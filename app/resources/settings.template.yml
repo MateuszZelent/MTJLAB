@@ -373,7 +373,7 @@ devices:
     acquisition:
       # The legacy setting name "standard_scpi_opc" selects the qualified
       # MS2830A protocol: INIT:MODE:SING, *WAI, INIT:SWP? confirmation,
-      # and ABORT.
+      # and the documented ABOR command.
       # Unverified mode permits manual Live/Fetch but blocks recipe checkpoints
       # so that an old trace cannot be stored as a new measurement point.
       single_sweep_mode: "unverified"

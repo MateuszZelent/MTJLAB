@@ -1,0 +1,17 @@
+{
+  "simulation_only": true,
+  "checkpoints": 3,
+  "frequency_start": "100 MHz",
+  "frequency_stop": "6 GHz",
+  "trace_points": 10001,
+  "vbw": "30 kHz",
+  "waits_recorded_seconds": [
+    3.0,
+    3.0,
+    3.0
+  ],
+  "real_waits_bypassed": true,
+  "pythat_valid": true,
+  "archive_bytes": 4060082,
+  "scope": "Explicit advanced block; video/power mode remains unauthored."
+}

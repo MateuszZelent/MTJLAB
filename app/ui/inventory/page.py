@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.ui.dialogs import StationDialog
+
 from pathlib import Path
 from typing import Sequence
 
@@ -64,7 +66,7 @@ from app.ui.inventory.programming_dialog import RenumberRowsDialog, SampleProgra
 from app.ui.dialogs import StationMessageBox as QMessageBox
 
 
-class RenameHeaderDialog(QDialog):
+class RenameHeaderDialog(StationDialog):
     """Modal prompt to rename an individual row or column label."""
 
     def __init__(
@@ -74,12 +76,12 @@ class RenameHeaderDialog(QDialog):
         current_label: str,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent, resizable=True)
         self.setWindowTitle(f"Rename {header_type} {key}")
         self.setMinimumWidth(380)
         self.setModal(True)
 
-        layout = QVBoxLayout(self)
+        layout = self.modal_content_layout()
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(12)
 
@@ -112,7 +114,8 @@ class RenameHeaderDialog(QDialog):
         return self.label_input.text().strip()
 
 
-class AddHeaderDialog(QDialog):
+
+class AddHeaderDialog(StationDialog):
     """Modal prompt to insert a new row or column."""
 
     def __init__(
@@ -121,12 +124,12 @@ class AddHeaderDialog(QDialog):
         default_key: str,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent, resizable=True)
         self.setWindowTitle(f"Add New {header_type}")
         self.setMinimumWidth(380)
         self.setModal(True)
 
-        layout = QVBoxLayout(self)
+        layout = self.modal_content_layout()
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(12)
 
@@ -162,16 +165,17 @@ class AddHeaderDialog(QDialog):
         return key, label
 
 
-class CatalogueSettingsDialog(QDialog):
+
+class CatalogueSettingsDialog(StationDialog):
     """Configure the single parent directory used by the Samples catalogue."""
 
     def __init__(self, current_root: Path, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(parent, resizable=True)
         self.setWindowTitle("Samples Catalogue Settings")
         self.setMinimumWidth(620)
         self.setModal(True)
 
-        layout = QVBoxLayout(self)
+        layout = self.modal_content_layout()
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
         layout.addWidget(SubtitleLabel("Samples Catalogue Root", self))
@@ -215,6 +219,7 @@ class CatalogueSettingsDialog(QDialog):
 
     def selected_root(self) -> Path:
         return Path(self.path_input.text().strip()).expanduser()
+
 
 
 class SampleInventoryPage(QWidget):

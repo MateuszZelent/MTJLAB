@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from app.storage.hdf5_series_reader import MeasurementSeries
+from app.storage.hdf5_series_reader import Hdf5SeriesReader, MeasurementSeries
 
 
 class CharacterizationCsvReader:
@@ -52,24 +52,21 @@ class CharacterizationCsvReader:
         default_y = "Voltage_V" if mode == "current" else "Current_A"
         y_channel = (
             preferred_y_channel
-            if preferred_y_channel in cls._Y_CHANNELS
+            if preferred_y_channel is not None
             else default_y
         )
         xs: list[float] = []
         ys: list[float] = []
         for row in rows:
-            try:
-                xs.append(float(row["Demanded_SI"]))
-                ys.append(float(row[y_channel]))
-            except (KeyError, TypeError, ValueError):
-                continue
+            xs.append(Hdf5SeriesReader._finite_or_gap(row.get("Demanded_SI")))
+            ys.append(Hdf5SeriesReader._finite_or_gap(row.get(y_channel)))
 
         x_label, x_unit = (
             ("Demanded Current", "A")
             if mode == "current"
             else ("Demanded Voltage", "V")
         )
-        y_label, y_unit = cls._LABELS[y_channel]
+        y_label, y_unit = cls._LABELS.get(y_channel, (y_channel, ""))
         return MeasurementSeries(
             title=target.name,
             x_label=x_label,

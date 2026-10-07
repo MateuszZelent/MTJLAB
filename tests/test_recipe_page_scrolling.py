@@ -131,9 +131,11 @@ class RecipePageScrollingTests(unittest.TestCase):
         settings = SettingsRepository(SETTINGS_TEMPLATE).load().settings
         page = RecipePage(settings)
         try:
-            # Check relaxed minimum heights
+            # The outer Fluent host scrolls the document. Keep the workspace
+            # readable instead of compressing its tree into a few clipped rows;
+            # shown desktop/narrow tests verify that scrolling exposes it.
             self.assertLessEqual(page.workspace_card.minimumHeight(), 250)
-            self.assertLessEqual(page.workspace_splitter.minimumHeight(), 250)
+            self.assertLessEqual(page.workspace_splitter.minimumHeight(), 500)
             self.assertLessEqual(page.builder_container.minimumHeight(), 250)
             self.assertLessEqual(page.library_panel.minimumHeight(), 250)
             self.assertLessEqual(page.inspector_panel.minimumHeight(), 250)

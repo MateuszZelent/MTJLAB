@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any
 
@@ -155,7 +156,15 @@ class ThatecRunReader:
             if scale_dataset is not None and data.ndim >= 2:
                 dimensions = data.ndim - 1
                 start = checkpoint * 2 * (dimensions + 1)
-                scale = tuple(float(value) for value in scale_dataset[start : start + 2 * (dimensions + 1)])
+                end = start + 2 * (dimensions + 1)
+                if scale_dataset.ndim != 1 or scale_dataset.size < end:
+                    raise ExecutionError(f"THATEC scale for {row_id} checkpoint {checkpoint} is incomplete or malformed.")
+                try:
+                    scale = tuple(float(value) for value in scale_dataset[start:end])
+                except (TypeError, ValueError) as exc:
+                    raise ExecutionError(f"THATEC scale for {row_id} is not numeric.") from exc
+                if not all(math.isfinite(value) for value in scale):
+                    raise ExecutionError(f"THATEC scale for {row_id} contains non-finite values.")
         return ThatecRowData(row_id, checkpoint, values, scale)
 
     @staticmethod
@@ -169,7 +178,20 @@ class ThatecRunReader:
             if data.ndim != 1:
                 raise ExecutionError(f"THATEC row {row_id} is not scalar.")
             limit = ThatecRunReader._committed_row_limit(file, row_id)
-            return data[:limit], group.get("timestamp", ())[:limit]
+            if limit is not None and data.shape[0] < limit:
+                raise ExecutionError(f"THATEC row {row_id} is missing committed scalar samples.")
+            timestamps = group.get("timestamp")
+            if timestamps is None:
+                if limit is not None and limit > 0:
+                    raise ExecutionError(f"THATEC row {row_id} is missing committed timestamps.")
+                return data[:limit], ()
+            if timestamps.ndim != 1:
+                raise ExecutionError(f"THATEC timestamps for {row_id} must be one-dimensional.")
+            count = data.shape[0] if limit is None else limit
+            available = timestamps.shape[0] if limit is None else min(timestamps.shape[0], limit)
+            if available != count:
+                raise ExecutionError(f"THATEC scalar samples and timestamps for {row_id} have different lengths.")
+            return data[:limit], timestamps[:limit]
 
     @staticmethod
     def spectrum_slice(
@@ -217,12 +239,15 @@ class ThatecRunReader:
         x_offset, x_multiplier = ThatecRunReader._scale_pair(
             data.scale, frequency_axis, coordinate
         )
-        x_values = x_offset + x_multiplier * np.arange(
-            values.shape[frequency_axis], dtype=float
-        )
-        x_values, x_unit = ThatecRunReader._normalise_frequency_axis(
-            x_values, coordinate.unit
-        )
+        with np.errstate(over="ignore", invalid="ignore"):
+            x_values = x_offset + x_multiplier * np.arange(
+                values.shape[frequency_axis], dtype=float
+            )
+            x_values, x_unit = ThatecRunReader._normalise_frequency_axis(
+                x_values, coordinate.unit
+            )
+        if not np.isfinite(x_values).all():
+            raise ExecutionError(f"THATEC spectrum {row_id} has non-finite axis coordinates.")
 
         value_axis = axes[values.ndim] if len(axes) > values.ndim else _AxisMetadata(
             "Amplitude", "", 0.0, 1.0
@@ -324,13 +349,15 @@ class ThatecRunReader:
         External thaTEC axes and measurements retain their public semantics.
         Frequency axes in our own archives also remain independent of count.
         """
+        from app.storage.thatec_schema_mapper import CHECKPOINT_ROLES
+
         if "run" not in file or "points" not in file:
             return None
         definition = file.get(f"scan_definition/{row_id}")
         if definition is None:
             return None
         role = dict(ThatecRunReader._pairs(definition)).get("lab control role")
-        if role not in {"setpoint", "measurement", "spectrum", "spectrum_processed"} and not (
+        if role not in CHECKPOINT_ROLES and not (
             row_id == "row_00" and bool(file.attrs.get("lab_control_dynamic_checkpoint_axis", False))
         ):
             return None
@@ -461,15 +488,14 @@ class ThatecRunReader:
 
     @staticmethod
     def _normalise_frequency_axis(values: Any, unit: str) -> tuple[Any, str]:
-        normalized = unit.strip().casefold().replace("μ", "u").replace("µ", "u")
-        scales = {
-            "hz": 1.0,
-            "khz": 1e3,
-            "mhz": 1e6,
-            "ghz": 1e9,
-        }
-        scale = scales.get(normalized)
-        if scale is None:
+        from app.domain.errors import ConfigurationError
+        from app.domain.quantities import DIMENSION_FREQUENCY, parse_quantity
+
+        try:
+            scale = parse_quantity(f"1 {unit.strip()}", DIMENSION_FREQUENCY).si_value
+        except (ConfigurationError, ValueError):
+            # External files may contain non-frequency axes. Keep their values
+            # and labels rather than inventing a conversion for an unknown unit.
             return values, ThatecRunReader._display_unit(unit)
         return values * scale, "Hz"
 
@@ -485,10 +511,15 @@ class ThatecRunReader:
 
     @staticmethod
     def _metadata_float(value: str | None, fallback: float) -> float:
-        try:
-            return float(value) if value is not None else fallback
-        except ValueError:
+        if value is None:
             return fallback
+        try:
+            result = float(value)
+        except ValueError as exc:
+            raise ExecutionError(f"THATEC axis metadata is not numeric: {value!r}.") from exc
+        if not math.isfinite(result):
+            raise ExecutionError(f"THATEC axis metadata must be finite: {value!r}.")
+        return result
 
     @staticmethod
     def _display_unit(unit: str) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.devices.moke_box.models import hall_field_from_voltage
 from app.devices.moke_box.protocol import (
     MokeAd7734Frame,
     MokeCommandType,
@@ -51,8 +52,12 @@ class SimulatedMokeBoxTransport:
             requested = command.value_u16
             if requested != 1:
                 raise DeviceError("MOKE simulation supports one Hall sample per request.")
-            voltage = self._context.magnet.field_t() / 0.04 + self._random.gauss(0, 0.00001)
-            signed = int(round(max(-1.0, min(1.0, voltage / 10.0)) * 0x7FFFFF))
+            # Invert the application's linear Hall conversion, not an unrelated
+            # coil voltage/field coefficient. Noise is expressed in input volts.
+            voltage = self._context.magnet.field_t() / hall_field_from_voltage(1.0)
+            voltage += self._random.gauss(0, 0.00001)
+            fraction = max(-1.0, min(1.0, voltage / 10.0))
+            signed = int(round(fraction * (0x7FFFFF if fraction >= 0 else 0x800000)))
             self._pending = MokeAd7734Frame(
                 MokeTarget.MAIN_BOX, 0, signed + 0x800000
             ).encode()

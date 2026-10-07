@@ -32,6 +32,7 @@ from app.devices.registry import built_in_device_registry
 from app.ui.measurement_tree import MeasurementTreeView
 from app.ui.recipes import SweepGeneratorDialog
 from tests.helpers import simulation_settings
+from tests.test_recipe_compiler import authored_source
 from app.settings import SettingsRepository
 
 
@@ -96,7 +97,8 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             self.application.processEvents()
             self.assertEqual(page.execution_mode.currentData(), "dry_run")
             self.assertEqual(page.run_button.text(), "Run dry run")
-            self.assertIn("RAW/processed", page.execution_mode_hint.text())
+            self.assertIn("outputs OFF", page.execution_mode_hint.text())
+            self.assertIn("MOKE VOUT writes are skipped", page.execution_mode_hint.text())
             page.output_file_stem.setText("operator-check")
             self.application.processEvents()
             self.assertIn("operator-check.h5", page.output_file_preview.text())
@@ -140,6 +142,7 @@ root:
   id: root
   type: sequence
   children:
+    - {id: initial-rigol, type: configure_rigol, channel: 1, waveform: SIN, frequency: '100 Hz', high_level: '10 mV', low_level: '-10 mV'}
     - id: frequency-sweep
       type: sweep
       target: rigol.1.frequency
@@ -292,6 +295,7 @@ finally:
             source = (Path(__file__).parents[1] / "recipes" / "untitled_sweep.yml").read_text(
                 encoding="utf-8"
             )
+            source = authored_source(source)
             recipe = parse_recipe_text(source)
             plan = RecipeCompiler(window._settings).compile(recipe)
             snapshot = normalize_recipe_tree(
@@ -326,6 +330,7 @@ finally:
             source = (Path(__file__).parents[1] / "recipes" / "untitled_sweep.yml").read_text(
                 encoding="utf-8"
             )
+            source = authored_source(source)
             recipe = parse_recipe_text(source)
             plan = RecipeCompiler(window._settings).compile(recipe)
             snapshot = normalize_recipe_tree(
@@ -517,9 +522,11 @@ finally:
             page = window.recipe_page
             host = window.navigation_routes["sweeps"]
             self.assertIsInstance(page.workspace_card, CardWidget)
-            self.assertGreaterEqual(page.workspace_splitter.minimumHeight(), 420)
+            viewport = page.measurement_tree.viewport()
+            self.assertTrue(page.workspace_card.rect().contains(
+                viewport.mapTo(page.workspace_card, viewport.rect().bottomRight())
+            ))
             self.assertTrue(page.execution_lock_banner.isHidden())
-            self.assertGreater(host.scroll_area.verticalScrollBar().maximum(), 0)
             self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
             library_button_state = page._library_action_buttons[0].isEnabled()
             editor_read_only = page.editor.isReadOnly()

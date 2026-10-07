@@ -71,7 +71,11 @@ class Hdf5RunWriter:
         simulation_metadata: dict[str, object] | None = None,
         run_attributes: dict[str, object] | None = None,
         isolate_validation: bool = False,
+        validation_memory_budget_bytes: int | None = None,
     ) -> None:
+        from app.storage.resource_budget import resolve_import_memory_budget
+
+        validation_memory_budget_bytes = resolve_import_memory_budget(validation_memory_budget_bytes)
         try:
             import h5py
             import numpy as np
@@ -93,78 +97,102 @@ class Hdf5RunWriter:
             raise ExecutionError(
                 f"The result file already exists or cannot be created: {self.path}"
             ) from exc
-        self._points = self._file.create_group("points")
-        self._spectra = self._file.create_group("spectra")
-        self._references = self._file.create_group("references")
-        self._pending = self._file.create_group("_pending")
-        events = self._file.create_group("events")
-        string_dtype = h5py.string_dtype("utf-8")
-        self._event_timestamps = events.create_dataset("timestamp", shape=(0,), maxshape=(None,), dtype=string_dtype)
-        self._event_severities = events.create_dataset("severity", shape=(0,), maxshape=(None,), dtype=string_dtype)
-        self._event_names = events.create_dataset("name", shape=(0,), maxshape=(None,), dtype=string_dtype)
-        self._event_messages = events.create_dataset("message", shape=(0,), maxshape=(None,), dtype=string_dtype)
-        run = self._file.create_group("run")
-        run.attrs["created_at_utc"] = datetime.now(timezone.utc).isoformat()
-        run.attrs["plan_sha256"] = plan_hash
-        run.attrs["recipe_source_sha256"] = hashlib.sha256(recipe_source.encode("utf-8")).hexdigest()
-        run.attrs["settings_sha256"] = hashlib.sha256(settings_source.encode("utf-8")).hexdigest()
         try:
-            run.attrs["application_version"] = version("lab-control")
-        except PackageNotFoundError:
-            run.attrs["application_version"] = get_full_version()
-        run.create_dataset("recipe_yaml", data=recipe_source, dtype=h5py.string_dtype("utf-8"))
-        run.create_dataset("settings_yaml", data=settings_source, dtype=h5py.string_dtype("utf-8"))
-        run.create_dataset(
-            "dut_limits_json",
-            data=json.dumps(self._recipe_dut_limits(recipe_source), sort_keys=True),
-            dtype=h5py.string_dtype("utf-8"),
-        )
-        run.create_dataset(
-            "dut_limits_policy_json",
-            data=json.dumps(legacy_dut_limits_policy(), sort_keys=True),
-            dtype=h5py.string_dtype("utf-8"),
-        )
-        run.create_dataset("device_idn_json", data=json.dumps(device_idn, sort_keys=True), dtype=h5py.string_dtype("utf-8"))
-        capabilities = device_capabilities or {}
-        run.create_dataset(
-            "capabilities_json",
-            data=json.dumps(self._serializable(capabilities), sort_keys=True),
-            dtype=h5py.string_dtype("utf-8"),
-        )
-        run.create_dataset(
-            "operator_context_json",
-            data=json.dumps(self._serializable(operator_context or {}), sort_keys=True),
-            dtype=h5py.string_dtype("utf-8"),
-        )
-        if operator_context and isinstance(operator_context, dict) and "username" in operator_context:
-            run.attrs["operator"] = str(operator_context["username"])
-        run.create_dataset(
-            "simulation_json",
-            data=json.dumps(self._serializable(simulation_metadata or {"enabled": False}), sort_keys=True),
-            dtype=h5py.string_dtype("utf-8"),
-        )
-        for attribute, value in (run_attributes or {}).items():
-            if isinstance(value, (str, bytes, int, float, bool)):
-                run.attrs[str(attribute)] = value
-            else:
-                run.attrs[str(attribute)] = json.dumps(
-                    self._serializable(value), sort_keys=True
-                )
-        self._thatec = ThatecHdf5Writer(
-            self._file,
-            device_idn=device_idn,
-            plan_hash=plan_hash,
-            expected_points=expected_points,
-            recipe_source=recipe_source,
-            settings_source=settings_source,
-        )
-        self._point_count = 0
-        self._correction_contexts: dict[str, SpectrumAcquisitionContext] = {}
-        self._interference_calibrations = {}
-        self._closed = False
-        if self.csv_summary_path is not None:
-            self._open_csv_summary()
-        self._file.flush()
+            self._points = self._file.create_group("points")
+            self._spectra = self._file.create_group("spectra")
+            self._references = self._file.create_group("references")
+            self._pending = self._file.create_group("_pending")
+            events = self._file.create_group("events")
+            string_dtype = h5py.string_dtype("utf-8")
+            self._event_timestamps = events.create_dataset("timestamp", shape=(0,), maxshape=(None,), dtype=string_dtype)
+            self._event_severities = events.create_dataset("severity", shape=(0,), maxshape=(None,), dtype=string_dtype)
+            self._event_names = events.create_dataset("name", shape=(0,), maxshape=(None,), dtype=string_dtype)
+            self._event_messages = events.create_dataset("message", shape=(0,), maxshape=(None,), dtype=string_dtype)
+            events.attrs["committed_count"] = 0
+            run = self._file.create_group("run")
+            run.attrs["validation_memory_budget_bytes"] = validation_memory_budget_bytes
+            run.attrs["created_at_utc"] = datetime.now(timezone.utc).isoformat()
+            run.attrs["plan_sha256"] = plan_hash
+            run.attrs["recipe_source_sha256"] = hashlib.sha256(recipe_source.encode("utf-8")).hexdigest()
+            run.attrs["settings_sha256"] = hashlib.sha256(settings_source.encode("utf-8")).hexdigest()
+            try:
+                run.attrs["application_version"] = version("lab-control")
+            except PackageNotFoundError:
+                run.attrs["application_version"] = get_full_version()
+            run.create_dataset("recipe_yaml", data=recipe_source, dtype=h5py.string_dtype("utf-8"))
+            run.create_dataset("settings_yaml", data=settings_source, dtype=h5py.string_dtype("utf-8"))
+            run.create_dataset(
+                "dut_limits_json",
+                data=json.dumps(self._recipe_dut_limits(recipe_source), sort_keys=True),
+                dtype=h5py.string_dtype("utf-8"),
+            )
+            run.create_dataset(
+                "dut_limits_policy_json",
+                data=json.dumps(legacy_dut_limits_policy(), sort_keys=True),
+                dtype=h5py.string_dtype("utf-8"),
+            )
+            run.create_dataset("device_idn_json", data=json.dumps(device_idn, sort_keys=True), dtype=h5py.string_dtype("utf-8"))
+            capabilities = device_capabilities or {}
+            run.create_dataset(
+                "capabilities_json",
+                data=json.dumps(self._serializable(capabilities), sort_keys=True),
+                dtype=h5py.string_dtype("utf-8"),
+            )
+            run.create_dataset(
+                "operator_context_json",
+                data=json.dumps(self._serializable(operator_context or {}), sort_keys=True),
+                dtype=h5py.string_dtype("utf-8"),
+            )
+            if operator_context and isinstance(operator_context, dict) and "username" in operator_context:
+                run.attrs["operator"] = str(operator_context["username"])
+            run.create_dataset(
+                "simulation_json",
+                data=json.dumps(self._serializable(simulation_metadata or {"enabled": False}), sort_keys=True),
+                dtype=h5py.string_dtype("utf-8"),
+            )
+            for attribute, value in (run_attributes or {}).items():
+                if isinstance(value, (str, bytes, int, float, bool)):
+                    run.attrs[str(attribute)] = value
+                else:
+                    run.attrs[str(attribute)] = json.dumps(
+                        self._serializable(value), sort_keys=True
+                    )
+            self._thatec = ThatecHdf5Writer(
+                self._file,
+                device_idn=device_idn,
+                plan_hash=plan_hash,
+                expected_points=expected_points,
+                recipe_source=recipe_source,
+                settings_source=settings_source,
+            )
+            self._point_count = 0
+            self._correction_contexts: dict[str, SpectrumAcquisitionContext] = {}
+            self._interference_calibrations = {}
+            self._closed = False
+            if self.csv_summary_path is not None:
+                self._open_csv_summary()
+            self._file.flush()
+        except Exception as initialization_error:
+            # Construction can fail after either file has been opened. Preserve
+            # the partial archive for diagnosis, but never leak its handles.
+            try:
+                if "run" in self._file:
+                    self._file["run"].attrs["status"] = "faulted"
+                self._file.flush()
+            except Exception:
+                pass
+            try:
+                self._file.close()
+            except Exception as close_error:
+                initialization_error.add_note(f"HDF5 cleanup also failed: {close_error}")
+            if self._csv_stream is not None:
+                try:
+                    self._csv_stream.close()
+                except Exception as close_error:
+                    initialization_error.add_note(f"CSV cleanup also failed: {close_error}")
+                self._csv_stream = None
+            self._closed = True
+            raise
 
     @property
     def point_count(self) -> int:
@@ -187,6 +215,9 @@ class Hdf5RunWriter:
         isolate_validation: bool = False,
     ) -> "Hdf5RunWriter":
         """Resume an existing run only after an externally verified safe boundary."""
+
+        if type(checkpoint_count) is not int or checkpoint_count < 0:
+            raise ExecutionError("Recovery checkpoint count must be an exact nonnegative integer.")
 
         try:
             import h5py
@@ -221,6 +252,12 @@ class Hdf5RunWriter:
             self._event_severities = events["severity"]
             self._event_names = events["name"]
             self._event_messages = events["message"]
+            from app.storage.event_log import EVENT_COLUMNS, committed_event_count
+            event_count = committed_event_count(events)
+            for column in EVENT_COLUMNS:
+                events[column].resize((event_count,))
+            events.attrs["committed_count"] = event_count
+            self._file.flush()
             self._truncate_to_checkpoint(checkpoint_count)
             self._thatec = ThatecHdf5Writer.resume(
                 self._file,
@@ -252,8 +289,18 @@ class Hdf5RunWriter:
             )
             self._file.flush()
             return self
-        except Exception:
-            self._file.close()
+        except Exception as resume_error:
+            try:
+                self._file.close()
+            except Exception as close_error:
+                resume_error.add_note(f"HDF5 recovery cleanup also failed: {close_error}")
+            if self._csv_stream is not None:
+                try:
+                    self._csv_stream.close()
+                except Exception as close_error:
+                    resume_error.add_note(f"CSV recovery cleanup also failed: {close_error}")
+                self._csv_stream = None
+            self._closed = True
             raise
 
     def _validate_resume_identity(
@@ -262,7 +309,12 @@ class Hdf5RunWriter:
         settings_source: str,
         plan_hash: str,
     ) -> None:
-        run = self._file.get("run")
+        self.verify_resume_identity(self._file, recipe_source, settings_source, plan_hash)
+
+    @staticmethod
+    def verify_resume_identity(file, recipe_source: str, settings_source: str, plan_hash: str) -> None:
+        """Read-only gate shared by worker preflight and the mutating resume."""
+        run = file.get("run")
         if run is None:
             raise ExecutionError("Run recovery requires the private /run metadata group.")
         expected = {
@@ -319,6 +371,8 @@ class Hdf5RunWriter:
         self._truncate_public_thatec(checkpoint_count)
 
     def _truncate_public_thatec(self, checkpoint_count: int) -> None:
+        from app.storage.thatec_schema_mapper import CHECKPOINT_ROLES
+
         definition = self._file["scan_definition"]
         measurement = self._file["measurement"]
         if bool(self._file.attrs.get("lab_control_dynamic_checkpoint_axis", False)):
@@ -334,12 +388,7 @@ class Hdf5RunWriter:
         for row_name in sorted(name for name in definition if name.startswith("row_")):
             values = dict(definition[row_name].asstr()[()])
             role = values.get("lab control role")
-            if role not in {
-                "setpoint",
-                "measurement",
-                "spectrum",
-                "spectrum_processed",
-            }:
+            if role not in CHECKPOINT_ROLES:
                 continue
             resumable_rows += 1
             if row_name not in measurement:
@@ -456,6 +505,12 @@ class Hdf5RunWriter:
             return {}
         return Hdf5RunWriter._serializable(decoded["dut_limits"])
 
+    def _require_writable(self) -> None:
+        if self._closed:
+            raise ExecutionError("Attempted to write to a closed HDF5 file.")
+        if getattr(self, "_storage_faulted", False) or getattr(self, "_event_log_fault", False):
+            raise ExecutionError("Archive rollback failed; close and recover the archive before further writes.")
+
     def store_reference(
         self,
         trace: SpectrumTrace,
@@ -463,6 +518,7 @@ class Hdf5RunWriter:
         kind: str = "single",
         average_count: int = 1,
         source_sweep_indices: tuple[int, ...] = (),
+        acquisition_metadata: dict | None = None,
     ) -> int:
         """Durably append a reference and return its stable run-local index.
 
@@ -471,12 +527,11 @@ class Hdf5RunWriter:
         ``/references/<index>`` and are linked from processed spectra.
         """
 
-        if self._closed:
-            raise ExecutionError("Attempted to write a reference to a closed HDF5 file.")
+        self._require_writable()
         self._validate_trace(trace)
         if kind not in {"single", "averaged", "loaded"}:
             raise ExecutionError(f"Unsupported reference kind {kind!r}.")
-        if average_count < 1:
+        if type(average_count) is not int or average_count < 1:
             raise ExecutionError("Reference average_count must be positive.")
         if (type(source_sweep_indices) is not tuple
                 or any(type(value) is not int or not 0 <= value < 2**63 for value in source_sweep_indices)
@@ -486,25 +541,48 @@ class Hdf5RunWriter:
         if any(f"recipe_raw_sweeps_v1/{value}" not in self._file for value in source_sweep_indices):
             raise ExecutionError("Reference requires every selected raw recipe source to be committed.")
         source_block_identity = None
+        acquisition_metadata = dict(acquisition_metadata or {})
+        purpose = acquisition_metadata.get("purpose", "reference")
+        duration = acquisition_metadata.get("minimum_duration_s", 0.0)
+        if not isinstance(purpose, str) or purpose not in {"reference", "background"} or type(duration) not in (int, float) or not 0 <= duration <= 3600:
+            raise ExecutionError("Invalid reference acquisition metadata.")
+        if duration:
+            elapsed = acquisition_metadata.get("collection_elapsed_s")
+            minimum_sweeps = acquisition_metadata.get("requested_minimum_sweeps")
+            if (type(elapsed) not in (int, float) or not duration <= elapsed < float("inf")
+                    or type(minimum_sweeps) is not int or not 1 <= minimum_sweeps <= average_count
+                    or not source_sweep_indices):
+                raise ExecutionError("Timed reference lacks evidence of its duration or minimum sweep count.")
+        encoded_acquisition = json.dumps(acquisition_metadata, allow_nan=False, sort_keys=True)
+        if len(encoded_acquisition.encode("utf-8")) > 65536:
+            raise ExecutionError("Reference acquisition metadata exceeds its budget.")
         for position, value in enumerate(source_sweep_indices):
             source = self._file[f"recipe_raw_sweeps_v1/{value}"]
             metadata = json.loads(source.attrs["metadata_json"])
             identity = (metadata["execution_id"], metadata["recipe_node_id"], metadata["configuration_generation"])
             if (not bool(source.attrs.get("complete", False)) or metadata["role"] != "reference"
-                    or metadata["average_index"] != position or metadata["average_count"] != average_count
+                    or metadata["average_index"] != position
+                    or metadata["average_count"] != (None if duration else average_count)
+                    or metadata.get("minimum_duration_s", 0.0) != duration
                     or source_block_identity is not None and source_block_identity != identity):
                 raise ExecutionError("Reference source identities do not describe one complete REF block.")
             source_block_identity = identity
         indexes = [int(name) for name in self._references if name.isdigit()]
         index = max(indexes, default=-1) + 1
         name = str(index)
+        pending_name = f"reference_{name}"
+        alias_created = False
         try:
-            group = self._references.create_group(name)
+            group = self._pending.create_group(pending_name)
+            group.attrs["reference_transaction_version"] = 1
+            group.attrs["complete"] = False
             group.attrs["reference_index"] = index
             group.attrs["trace_name"] = trace.trace_name
             group.attrs["acquired_at_utc"] = trace.acquired_at_utc.isoformat()
             group.attrs["kind"] = kind
             group.attrs["average_count"] = int(average_count)
+            group.attrs["purpose"] = purpose
+            group.attrs["acquisition_metadata_json"] = encoded_acquisition
             if source_sweep_indices:
                 group.create_dataset("source_recipe_sweep_indices", data=source_sweep_indices, dtype="u8")
             group.create_dataset(
@@ -517,32 +595,81 @@ class Hdf5RunWriter:
                 data=self._np.asarray(trace.powers_dbm, dtype="f8"),
                 **_spectrum_compression(len(trace.powers_dbm)),
             )
+            group["frequency_hz"].attrs["unit"] = "Hz"
+            group["power_dbm"].attrs["unit"] = "dBm"
+            self._file.flush()
+            group.attrs["complete"] = True
+            self._file.flush()
+            self._file.move(f"_pending/{pending_name}", f"references/{name}")
             if index == 0 and "reference" not in self._file:
+                alias_created = True
                 self._file["reference"] = group
             self._file.flush()
             return index
         except Exception as exc:
-            if index == 0 and "reference" in self._file:
-                del self._file["reference"]
-            if name in self._references:
-                del self._references[name]
-            self._file.flush()
+            try:
+                if alias_created and "reference" in self._file:
+                    del self._file["reference"]
+                if name in self._references:
+                    del self._references[name]
+                if pending_name in self._pending:
+                    del self._pending[pending_name]
+                self._file.flush()
+            except Exception as rollback_error:
+                self._storage_faulted = True
+                exc.add_note(f"Reference rollback failed: {rollback_error}")
             raise ExecutionError(f"Could not store the reference spectrum: {exc}") from exc
 
     def initialize_spectrum_decisions(self, context, config):
+        self._require_writable()
         from .spectrum_decision_store import initialize_decisions
 
         initialize_decisions(self, context, config)
 
     def store_recipe_spectrum_sweep(self, record):
+        self._require_writable()
         from .recipe_spectrum_store import append_recipe_sweep
+        from app.engine.estimation import require_storage_capacity
 
+        require_storage_capacity(self.path, len(record.frequencies_hz) * 32 + 128 * 1024)
         return append_recipe_sweep(self, record)
 
     def record_spectrum_decision(self, operation, parameters):
+        self._require_writable()
         from .spectrum_decision_store import append_decision
 
         return append_decision(self, operation, parameters)
+
+    def _commit_processing_record(self, pending_name, destination, write_record, label):
+        """Publish a new immutable record, rolling back either possible location."""
+        self._require_writable()
+        pending_path = f"_pending/{pending_name}"
+        if pending_path in self._file or destination in self._file:
+            raise ExecutionError(f"Cannot replace an existing {label} transaction.")
+        try:
+            pending = self._pending.create_group(pending_name)
+            write_record(pending)
+            pending.attrs["complete"] = True
+            self._file.flush()
+            self._file.move(pending_path, destination)
+            self._file.flush()
+        except Exception as exc:
+            rollback_errors = []
+            for path in (destination, pending_path):
+                try:
+                    if path in self._file:
+                        del self._file[path]
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"{path}: {rollback_exc}")
+            try:
+                self._file.flush()
+            except Exception as rollback_exc:
+                rollback_errors.append(f"flush: {rollback_exc}")
+            detail = ""
+            if rollback_errors:
+                self._storage_faulted = True
+                detail = "; rollback failed: " + "; ".join(rollback_errors)
+            raise ExecutionError(f"Could not commit {label}: {exc}{detail}") from exc
 
     def store_background_profile(
         self, context: SpectrumAcquisitionContext, profile: BackgroundProfile
@@ -550,8 +677,7 @@ class Hdf5RunWriter:
         """Commit an immutable private model before frames may reference it."""
         from .spectrum_correction_codec import read_profile, safe_record_id, write_profile
 
-        if self._closed:
-            raise ExecutionError("Cannot write a background profile to a closed file.")
+        self._require_writable()
         name = safe_record_id(profile.profile_id)
         if profile.context_id != context.context_id:
             raise ExecutionError("Background profile context mismatch.")
@@ -567,19 +693,10 @@ class Hdf5RunWriter:
                 raise ExecutionError("Cannot overwrite an existing background profile identity.")
             self._correction_contexts[context.context_id] = context
             return name
-        pending_name = f"profile_{name}"
-        try:
-            pending = self._pending.create_group(pending_name)
-            write_profile(pending, context, profile)
-            pending.attrs["complete"] = True
-            self._file.flush()
-            self._file.move(f"_pending/{pending_name}", f"spectrum_processing_v1/profiles/{name}")
-            self._file.flush()
-        except Exception as exc:
-            if pending_name in self._pending:
-                del self._pending[pending_name]
-            self._file.flush()
-            raise ExecutionError(f"Could not commit background profile: {exc}") from exc
+        self._commit_processing_record(
+            f"profile_{name}", f"spectrum_processing_v1/profiles/{name}",
+            lambda pending: write_profile(pending, context, profile), "background profile",
+        )
         self._correction_contexts[context.context_id] = context
         return name
 
@@ -589,8 +706,7 @@ class Hdf5RunWriter:
         from .spectrum_correction_codec import read_profile, safe_record_id
         from .spectrum_interference_codec import read_interference_calibration, write_interference_calibration
 
-        if self._closed:
-            raise ExecutionError("Cannot write interference calibration to a closed file.")
+        self._require_writable()
         name = safe_record_id(calibration.model_id)
         calibrated_interference_model(calibration)
         for profile_id, content_hash in calibration.source_profiles:
@@ -606,19 +722,10 @@ class Hdf5RunWriter:
                 raise ExecutionError("Cannot overwrite an interference model identity.")
             self._interference_calibrations[name] = calibration
             return name
-        pending_name = f"interference_{name}"
-        try:
-            pending = self._pending.create_group(pending_name)
-            write_interference_calibration(pending, calibration)
-            pending.attrs["complete"] = True
-            self._file.flush()
-            self._file.move(f"_pending/{pending_name}", f"spectrum_processing_v1/interference_models/{name}")
-            self._file.flush()
-        except Exception as exc:
-            if pending_name in self._pending:
-                del self._pending[pending_name]
-            self._file.flush()
-            raise ExecutionError(f"Could not commit interference calibration: {exc}") from exc
+        self._commit_processing_record(
+            f"interference_{name}", f"spectrum_processing_v1/interference_models/{name}",
+            lambda pending: write_interference_calibration(pending, calibration), "interference calibration",
+        )
         self._interference_calibrations[name] = calibration
         return name
 
@@ -627,8 +734,7 @@ class Hdf5RunWriter:
         from .finalized_spectrum_codec import block_hash, write_finalized
         from .spectrum_correction_codec import read_envelope, read_profile
 
-        if self._closed:
-            raise ExecutionError("Cannot store a final block in a closed archive.")
+        self._require_writable()
         indices = tuple(source_point_indices)
         if len(indices) != block.result.count or any(type(index) is not int or index < 0 for index in indices):
             raise ExecutionError("Final block requires integer source checkpoint indices.")
@@ -664,19 +770,10 @@ class Hdf5RunWriter:
 
             read_finalized(root[identity])
             return identity
-        pending_name = f"finalized_{identity}"
-        try:
-            pending = self._pending.create_group(pending_name)
-            write_finalized(pending, block, indices)
-            pending.attrs["complete"] = True
-            self._file.flush()
-            self._file.move(f"_pending/{pending_name}", f"spectrum_processing_v1/finalized_blocks/{identity}")
-            self._file.flush()
-        except Exception as exc:
-            if pending_name in self._pending:
-                del self._pending[pending_name]
-            self._file.flush()
-            raise ExecutionError(f"Could not commit finalized spectrum block: {exc}") from exc
+        self._commit_processing_record(
+            f"finalized_{identity}", f"spectrum_processing_v1/finalized_blocks/{identity}",
+            lambda pending: write_finalized(pending, block, indices), "finalized spectrum block",
+        )
         return identity
 
     def append(
@@ -691,8 +788,7 @@ class Hdf5RunWriter:
         acquisition_envelope: SpectrumFrameEnvelope | None = None,
         corrected_frame: CorrectedSpectrumFrame | None = None,
     ) -> int:
-        if self._closed:
-            raise ExecutionError("Attempted to write to a closed HDF5 file.")
+        self._require_writable()
         index = self._point_count
         name = str(index)
         self._validate_point(point)
@@ -704,6 +800,11 @@ class Hdf5RunWriter:
             processed_unit=processed_unit,
             processing_operation=processing_operation,
         )
+        from app.engine.estimation import require_storage_capacity
+
+        # Other processes can consume the volume after preflight. Check before
+        # the pending transaction, allowing space for public and private data.
+        require_storage_capacity(self.path, (len(trace.frequencies_hz) * 64 if trace is not None else 0) + 256 * 1024)
         if acquisition_envelope is not None and trace is None:
             raise ExecutionError("An acquisition envelope requires a raw spectrum.")
         if corrected_frame is not None:
@@ -787,6 +888,9 @@ class Hdf5RunWriter:
                         raise ExecutionError(
                             f"Point references missing spectrum reference {reference_index}."
                         )
+                    from .reference_transaction import require_committed_reference
+
+                    require_committed_reference(self._references[str(reference_index)])
                     spectrum.attrs["reference_index"] = reference_index
                 spectrum.create_dataset(
                     "frequency_hz",
@@ -825,38 +929,59 @@ class Hdf5RunWriter:
             else:
                 self._thatec.append(point, trace)
             committed.attrs["complete"] = True
-            self._point_count += 1
             self._file.flush()
             self._thatec.commit_point()
+            self._point_count += 1
         except Exception as exc:
-            self._thatec.rollback_last(trace is not None)
+            rollback_errors = []
+            try:
+                self._thatec.rollback_last(trace is not None)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"public rows: {rollback_exc}")
             for container in (self._pending, self._spectra, self._points):
-                if name in container:
-                    del container[name]
-            self._file.flush()
+                try:
+                    if name in container:
+                        del container[name]
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"{container.name}: {rollback_exc}")
+            try:
+                self._file.flush()
+            except Exception as rollback_exc:
+                rollback_errors.append(f"flush: {rollback_exc}")
+            if rollback_errors:
+                self._storage_faulted = True
             # The checkpoint is rolled back atomically, but the attempted
             # index and failure remain durable for recovery diagnostics.
             try:
                 self.append_event(
                     "checkpoint_write_failed",
-                    {"point_index": index, "error": str(exc)},
+                    {"point_index": index, "error": str(exc), "rollback_errors": rollback_errors},
                     severity="error",
                 )
             except Exception:
                 # A transport/filesystem failure may also prevent the event;
                 # never mask the original storage exception.
                 pass
-            raise ExecutionError(f"Could not atomically write point {index}: {exc}") from exc
+            detail = f"; rollback failed: {'; '.join(rollback_errors)}" if rollback_errors else ""
+            raise ExecutionError(f"Could not atomically write point {index}: {exc}{detail}") from exc
         try:
             self._append_csv_summary(index, point, trace)
         except Exception as exc:
             # CSV export is secondary: never invalidate or re-attempt an
             # already-committed HDF5 checkpoint because of a reporting error.
-            self.append_event(
-                "csv_append_failed",
-                {"point_index": index, "error": str(exc)},
-                severity="warning",
-            )
+            try:
+                self.append_event(
+                    "csv_append_failed",
+                    {"point_index": index, "error": str(exc)},
+                    severity="warning",
+                )
+            except Exception:
+                # An event-log failure cannot turn a committed point into a
+                # failed append. The next append or close still checks HDF5.
+                try:
+                    self._file["run"].attrs["csv_export_error"] = str(exc)
+                except Exception:
+                    pass
         return index
 
     @staticmethod
@@ -943,14 +1068,17 @@ class Hdf5RunWriter:
         important diagnostic record.
         """
 
-        if self._closed:
-            raise ExecutionError("Attempted to write an event to a closed HDF5 file.")
+        self._require_writable()
         timestamp = str(data.get("timestamp_utc") or datetime.now(timezone.utc).isoformat())
         message = json.dumps(
             self._serializable(self._event_payload(name, data)),
             sort_keys=True,
         )
         index = len(self._event_names)
+        from app.storage.event_log import EVENT_COLUMNS, committed_event_count
+        events = self._file["events"]
+        if committed_event_count(events) != index or any(len(events[column]) != index for column in EVENT_COLUMNS):
+            raise ExecutionError("Incomplete event tail; recover the archive before appending events.")
         try:
             for dataset, value in (
                 (self._event_timestamps, timestamp),
@@ -961,7 +1089,13 @@ class Hdf5RunWriter:
                 dataset.resize((index + 1,))
                 dataset[index] = value
             self._file.flush()
+            events.attrs["committed_count"] = index + 1
+            self._file.flush()
         except Exception:
+            try:
+                events.attrs["committed_count"] = index
+            except Exception:
+                self._event_log_fault = True
             for dataset in (
                 self._event_timestamps,
                 self._event_severities,
@@ -972,40 +1106,67 @@ class Hdf5RunWriter:
                     if len(dataset) > index:
                         dataset.resize((index,))
                 except Exception:
-                    pass
+                    self._event_log_fault = True
             try:
                 self._file.flush()
             except Exception:
-                pass
+                self._event_log_fault = True
             raise
 
     def close(self, status: str) -> None:
         if self._closed:
+            if getattr(self, "_close_error", None) is not None:
+                raise ExecutionError(self._close_error)
             return
-        self._file["run"].attrs["status"] = status
-        self._thatec.close(status)
-        self._file.flush()
-        self._file.close()
+        errors = []
+        if getattr(self, "_storage_faulted", False):
+            errors.append("Archive rollback failed; recovery is required")
+        if getattr(self, "_event_log_fault", False):
+            errors.append("Event rollback failed; possible uncommitted event tail; recovery is required")
+        if errors:
+            status = "faulted"
+
+        def attempt(label, operation):
+            try:
+                operation()
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+
+        attempt("terminal status", lambda: self._file["run"].attrs.__setitem__("status", status))
+        attempt("public finalization", lambda: self._thatec.close(status))
+        attempt("HDF5 flush", self._file.flush)
         if self._csv_stream is not None:
-            self._csv_stream.flush()
-            self._csv_stream.close()
+            attempt("CSV flush", self._csv_stream.flush)
+            attempt("CSV close", self._csv_stream.close)
             self._csv_stream = None
             self._csv_writer = None
+        if errors:
+            attempt("fault status", lambda: self._file["run"].attrs.__setitem__("status", "faulted"))
+            attempt("fault detail", lambda: self._file["run"].attrs.__setitem__("storage_close_error", "; ".join(errors)))
+            attempt("running flag", lambda: self._file.attrs.__setitem__("measurement running", self._np.uint8(0)))
+            attempt("fault flush", self._file.flush)
+        attempt("HDF5 close", self._file.close)
         self._closed = True
+        if errors:
+            self._close_error = "Could not finalize the measurement archive: " + "; ".join(errors)
+            raise ExecutionError(self._close_error)
         from app.storage.thatec_validator import ThatecCompatibilityValidator
 
-        if self._isolate_validation:
-            from app.storage.validation_worker import validate_archive_isolated
+        try:
+            if self._isolate_validation:
+                from app.storage.validation_worker import validate_archive_isolated
 
-            report = validate_archive_isolated(self.path)
-        else:
-            report = ThatecCompatibilityValidator().validate(
-                self.path, require_pythat=True
-            )
-        if not report.valid:
+                report = validate_archive_isolated(self.path)
+            else:
+                report = ThatecCompatibilityValidator().validate(
+                    self.path, require_pythat=True
+                )
             detail = "; ".join(
                 f"{issue.path}: {issue.message}" for issue in report.errors
-            )
+            ) if not report.valid else ""
+        except Exception as exc:
+            detail = f"Validation could not finish: {exc}"
+        if detail:
             try:
                 with self._h5py.File(self.path, "r+") as recovered:
                     recovered["run"].attrs["status"] = "faulted"
@@ -1014,4 +1175,5 @@ class Hdf5RunWriter:
                     recovered.flush()
             except Exception:
                 pass
-            raise ExecutionError(f"Final HDF5 contract validation failed: {detail}")
+            self._close_error = f"Final HDF5 contract validation failed: {detail}"
+            raise ExecutionError(self._close_error)

@@ -108,7 +108,7 @@ def test_independent_outputs_selected_zero_and_emergency_shutdown(tmp_path):
     assert not adapter.safe_target_confirmed
     transport.writes.clear()
     adapter.emergency_off()
-    assert {frame.channel for frame in transport.writes} == {0, 2}
+    assert {frame.channel for frame in transport.writes} == {0}  # VOUT2 is freshly confirmed zero, without another SET.
     assert adapter.read_vouts()[0] == adapter.read_vouts()[2] == 0
     assert adapter.safe_target_confirmed
 

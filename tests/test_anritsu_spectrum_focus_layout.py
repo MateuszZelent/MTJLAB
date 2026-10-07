@@ -48,9 +48,9 @@ def test_spectrum_is_primary_and_controls_remain_reachable(shell_qt_application,
     assert window.rect().contains(page.spectrum_plot.mapTo(window, page.spectrum_plot.rect().bottomRight()))
     assert page.signal_analysis_card.height() <= (80 if size[0] > 1000 else 120)
     for widget in (page.live, page.single, page.correction_controls.configure_background, page.correction_controls.configure_reference,
-                   page.abort_button, page.configure_analysis,
+                   page.abort_button, page.configure_analysis, page.quick_power_unit, *page.quick_curves.values(),
                    page.toggle_acquisition_controls, *page.cleanup_filters.values(),
-                   page.toggle_analysis_details, page.auto_peak_detection, page.peak_settings, page.plot_scales, *page.spectrum_plot.toolbar_buttons,
+                   page.toggle_analysis_details, page.open_floating_spectrum, page.auto_peak_detection, page.peak_settings, page.plot_scales, *page.spectrum_plot.toolbar_buttons,
                    page.spectrum_plot.readout):
         assert widget.isVisibleTo(window)
         origin = widget.mapTo(page, QPoint(0, 0))
@@ -92,10 +92,10 @@ def test_spectrum_is_primary_and_controls_remain_reachable(shell_qt_application,
         QTest.qWait(50)
         shell_qt_application.processEvents()
         assert page.spectrum_plot.width() > page.width() * .9
-        # Existing emergency-off dispatch remains on the always-visible command strip.
+        # Acquisition abort remains on the always-visible command strip.
         page.abort_button.setEnabled(True)
         QTest.mouseClick(page.abort_button, Qt.MouseButton.LeftButton)
-        dispatch.assert_called_once_with("emergency_off")
+        dispatch.assert_called_once_with("abort_acquisition")
 
     if size[0] == 1600:
         for width, height in ((820, 560), (1360, 880), (1600, 1000)):

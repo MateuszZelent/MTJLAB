@@ -163,6 +163,7 @@ def workspace(application, tmp_path):
     yield host, page, controllers, tmp_path
     workflow.stop() if workflow.busy else None
     wait_for(application, lambda: not workflow.busy)
+    wait_for(application, lambda: workflow._catalog_thread is None)
     assert DeviceController.close_all(controllers.values())
     host.close()
     application.processEvents()
@@ -361,6 +362,30 @@ def test_apply_validates_current_settings_and_authorization_without_separate_arm
     assert not workflow.busy
     assert "authorization denial" in workflow.manual_status.text()
     assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == actual
+
+
+def test_live_invalid_draft_explains_block_and_valid_edit_unlocks(workspace, application):
+    host, page, controllers, tmp_path = workspace
+    workflow = page.field_workflow
+    page.views.setCurrentIndex(2)
+    workflow.target.setText("2 V")
+    assert not workflow.live_control_switch.isEnabled()
+    assert "Live control unavailable" in workflow.manual_status.text()
+    assert "min/max" in workflow.live_control_switch.toolTip()
+    assert workflow.zero_button.isEnabled()
+    assert workflow.target.isEnabled()
+    assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == 0
+    workflow.target.setText("0 mV")
+    assert workflow.live_control_switch.isEnabled()
+    workflow.live_control_switch.setChecked(True)
+    assert workflow.live_control_switch.isChecked()
+    workflow.target.setText("2 V")
+    assert workflow.live_control_switch.isEnabled()  # OFF remains available.
+    QTest.qWait(550)
+    assert not workflow.busy
+    assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == 0
+    assert host.grab().save(str(tmp_path / "moke-live-invalid-draft.png"))
+    workflow.live_control_switch.setChecked(False)
 
 
 def test_manual_readback_failure_stops_live_and_allows_deliberate_apply_after_zero(workspace, application, monkeypatch):
@@ -679,6 +704,7 @@ def test_live_completion_preserves_saved_calibration_selection_and_review(worksp
     workflow.saved_models.setCurrentIndex(1)
     selected = workflow.saved_models.currentData()
     workflow.load_model_button.click()
+    wait_for(application, lambda: workflow._catalog_thread is None)
     workflow.reviewed.setChecked(True)
     reviewed_id = workflow._review_model.calibration_id
     page.views.setCurrentIndex(2)
@@ -716,7 +742,9 @@ def test_coupled_calibration_reviews_activates_and_previews_field(workspace, app
     assert "DAC zero confirmed" in workflow.calibration_status.text()
     assert not workflow.activate_button.isEnabled()
     workflow.reviewed.setChecked(True)
+    wait_for(application, lambda: workflow.activate_button.isEnabled())
     workflow.activate_button.click()
+    wait_for(application, lambda: workflow._catalog_thread is None)
     assert workflow._active_model is not None
     page.views.setCurrentIndex(2)
     workflow.show_field_preview(0)
@@ -728,6 +756,7 @@ def test_coupled_calibration_reviews_activates_and_previews_field(workspace, app
     wait_for(application, lambda: workflow.saved_models.count() == 1)
     workflow._review_model = None
     workflow.load_model_button.click()
+    wait_for(application, lambda: workflow._catalog_thread is None)
     assert workflow._review_model is not None
     assert not workflow.reviewed.isChecked()
     assert not workflow.activate_button.isEnabled()
@@ -978,7 +1007,9 @@ def test_full_fluent_shell_binds_control_calibration_and_voltage_sweep(applicati
         wait_for(application, lambda: not workflow.busy, timeout=35)
         assert workflow._last_result is not None, workflow.calibration_status.text()
         workflow.reviewed.setChecked(True)
+        wait_for(application, lambda: workflow.activate_button.isEnabled())
         workflow.activate_button.click()
+        wait_for(application, lambda: workflow._catalog_thread is None)
         assert workflow._active_model is not None
         window.moke_box_page.views.setCurrentIndex(2)
         observe_voltage_completions(workflow)

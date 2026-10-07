@@ -86,6 +86,12 @@ class MokeVoltagePlan:
     settling_s: float = 0.0
 
     def validate(self, profile: MokeControlProfile) -> None:
+        self.validate_envelope(profile)
+        for value in self.targets_v:
+            self.applied_voltage(value)
+
+    def validate_envelope(self, profile: MokeControlProfile) -> None:
+        """Recheck binding and limits without rescanning an immutable trajectory."""
         if type(self.channel) is not int or self.profile_fingerprint != profile.fingerprint or self.channel != profile.channel:
             raise SafetyViolation("MOKE plan does not match the qualified physical binding.")
         finite_number(self.minimum_v, "Working minimum")
@@ -97,8 +103,6 @@ class MokeVoltagePlan:
             raise SafetyViolation("MOKE working min/max must fit within the station envelope.")
         if not isinstance(self.targets_v, tuple) or not 1 <= len(self.targets_v) <= 100_000:
             raise SafetyViolation("MOKE plan requires 1..100000 immutable voltage targets.")
-        for value in self.targets_v:
-            self.applied_voltage(value)
 
     def applied_voltage(self, value_v: float) -> float:
         """Round inward at a bound so a DAC code never expands the envelope."""

@@ -11,6 +11,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
+    CaptionLabel,
     CheckBox,
     ComboBox,
     LineEdit,
@@ -20,8 +21,6 @@ from qfluentwidgets import (
 )
 
 from app.domain.quantities import (
-    DIMENSION_DB,
-    DIMENSION_DBM,
     DIMENSION_FREQUENCY,
     format_quantity_auto,
     parse_quantity,
@@ -79,6 +78,7 @@ class SpectrumWorkbench(SpectrumPlotWidget):
         self.freeze.toggled.connect(self._freeze_changed)
         layout.addWidget(self.freeze)
         self.axis_controls: dict[str, tuple[CheckBox, LineEdit, LineEdit]] = {}
+        self.axis_feedback: dict[str, CaptionLabel] = {}
         for axis, title, defaults in (
             ("x", "Frequency range", ("1 MHz", "10 MHz")),
             ("y", "Amplitude range", ("-100 dBm", "0 dBm")),
@@ -101,6 +101,11 @@ class SpectrumWorkbench(SpectrumPlotWidget):
             grid.addWidget(upper, 2, 1)
             apply = PushButton("Apply range", content)
             grid.addWidget(apply, 3, 0, 1, 2)
+            message = CaptionLabel("", content)
+            message.setWordWrap(True)
+            message.hide()
+            grid.addWidget(message, 4, 0, 1, 2)
+            self.axis_feedback[axis] = message
             layout.addLayout(grid)
             self.axis_controls[axis] = locked, lower, upper
             apply.clicked.connect(lambda _checked=False, selected=axis: self.apply_axis_range(selected))
@@ -225,18 +230,23 @@ class SpectrumWorkbench(SpectrumPlotWidget):
     def apply_axis_range(self, axis: str) -> bool:
         locked, lower, upper = self.axis_controls[axis]
         try:
-            parse = self._frequency if axis == "x" else self._amplitude
+            # Viewport padding may extend below 0 Hz. This is a display bound,
+            # not an instrument frequency or a sampled marker position.
+            parse = (lambda text: parse_quantity(text, DIMENSION_FREQUENCY).si_value) if axis == "x" else self._amplitude
             limits = parse(lower.text()), parse(upper.text())
             if limits[0] >= limits[1]:
                 raise ValueError("Minimum must be smaller than maximum; previous range preserved.")
         except (ValueError, TypeError) as error:
             self._say_error(error)
+            self.axis_feedback[axis].setText(str(error))
+            self.axis_feedback[axis].show()
             return False
         self.fixed_ranges[axis] = limits
         locked.blockSignals(True)
         locked.setChecked(True)
         locked.blockSignals(False)
         self._restore_fixed_ranges()
+        self.axis_feedback[axis].hide()
         self.feedback.setText(f"Fixed {axis.upper()} range applied.")
         return True
 
@@ -501,7 +511,7 @@ class SpectrumWorkbench(SpectrumPlotWidget):
                 for other in samples[1:]:
                     text = f"{other[0]} − {first[0]}: Δf {format_quantity_auto(other[1] - first[1], DIMENSION_FREQUENCY)}"
                     if first[2] and other[2]:
-                        unit = "dB" if self._measurement_unit() in {"dBm", "dB"} else "linear ratio"
+                        unit = "dB" if self._measurement_unit() in {"dBm", "dB"} else self._measurement_unit()
                         text += f", ΔA {other[2][1] - first[2][1]:.6g} {unit}"
                     rows.append(text)
             self.marker_readout.setText("\n".join(rows) or "No frequency markers.")

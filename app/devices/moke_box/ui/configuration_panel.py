@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QFormLayout, QSizePolicy, QVBoxLayout
 from qfluentwidgets import CaptionLabel, CardWidget, ComboBox, StrongBodyLabel
 
 from app.domain.quantities import DIMENSION_VOLTAGE, parse_quantity
+from app.domain.errors import SafetyViolation
 from app.safety.moke_box import MokeVoltagePlan
 from app.ui.common import line_edit
 from app.ui.widgets import LimitEditDialog, LimitField
@@ -73,20 +74,31 @@ class MokeVoltageConfigurationPanel(CardWidget):
         if hasattr(self, "form"):
             self.form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows if self.width() < 720 else QFormLayout.RowWrapPolicy.WrapLongRows)
 
-    def set_operator_limits(self, minimum, maximum):
+    def _validate_operator_limits(self, minimum, maximum):
         lo = parse_quantity(minimum, DIMENSION_VOLTAGE).si_value
         hi = parse_quantity(maximum, DIMENSION_VOLTAGE).si_value
         if lo >= hi:
             raise ValueError("Operator minimum must be smaller than maximum.")
         if self.profile is not None:
+            if not self.profile.minimum_v <= lo < hi <= self.profile.maximum_v:
+                raise SafetyViolation(f"Operator limits must stay within the VOUT {self.profile.channel} station range "
+                                 f"[{self.profile.minimum_v:g}, {self.profile.maximum_v:g}] V. "
+                                 "Edit the approved station profile in Settings to change that range.")
             MokeVoltagePlan(self.profile.fingerprint, self.profile.channel, lo, hi, (lo,)).validate(self.profile)
+
+    def set_operator_limits(self, minimum, maximum):
+        self._validate_operator_limits(minimum, maximum)
         self.minimum_text, self.maximum_text = minimum, maximum
         self.level_field.set_limits(minimum, maximum)
         self.range_changed.emit(minimum, maximum)
 
     def edit_limits(self):
+        limits = (f" Station VOUT {self.profile.channel}: {self.profile.minimum_v:g} to {self.profile.maximum_v:g} V."
+                  if self.profile is not None else "")
         dialog = LimitEditDialog("MOKE source voltage", self.minimum_text, self.maximum_text,
-                                 guidance="Set operator min/max in V or mV within the qualified station range. Editing this range sends no hardware command.", parent=self)
+                                 guidance="Set operator min/max in V or mV within the qualified station range. "
+                                          "Editing this range sends no hardware command." + limits,
+                                 validate=self._validate_operator_limits, parent=self)
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
         try:

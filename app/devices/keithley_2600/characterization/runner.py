@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.devices.keithley_2600.characterization.output_state import require_output_off
+
 import math
 import threading
 import time
@@ -29,17 +31,24 @@ from app.safety.keithley import validate_keithley_source, validate_source_range
 from app.settings.models import StationSettings
 
 
+def _check_cancel(cancel_event) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise RunInterrupted("Characterization cancelled before the next source operation.")
+
+
 class KeithleyCharacterizationRunner:
     """Safely executes Keithley IV sweeps with preflight checks and clean safe shutdowns."""
 
     @staticmethod
-    def prepare_new_sweep_output(device: Any, channel: str) -> None:
+    def prepare_new_sweep_output(device: Any, channel: str, cancel_event=None) -> None:
         """A new operator-started run acknowledges compliance without restoring a level."""
-        device.confirm_output_off(channel)
+        _check_cancel(cancel_event)
+        require_output_off(device, channel)
+        _check_cancel(cancel_event)
         result = device.recover_from_compliance(channel, "keep_off")
         if not isinstance(result, dict) or result.get("outputs_confirmed_off") is not True:
             raise DeviceError(f"Compliance recovery for {channel} was not confirmed.")
-        device.confirm_output_off(channel)
+        require_output_off(device, channel)
 
     @staticmethod
     def sweep_setpoints_excluding_zero(
@@ -260,21 +269,28 @@ class KeithleyCharacterizationRunner:
         ] = "completed"
         termination_detail = ""
 
-        # 1. Configure the exact first sweep request while OUTPUT is OFF.  This
-        # is the same complete request shape used by the normal Keithley card.
-        init_req = cls.source_request_for_level(config, float(setpoints[0]))
-        cls.prepare_new_sweep_output(device, channel)
-        applied_request = device.configure_source(init_req)
-        if not isinstance(applied_request, KeithleySourceRequest):
-            raise DeviceError(
-                "Keithley did not return the applied characterization configuration."
-            )
-        cls.assert_applied_configuration_matches_request(
-            init_req,
-            applied_request,
-        )
-
+        configuration_attempted = False
+        output_attempted = False
         try:
+            # 1. Configure the exact first sweep request while OUTPUT is OFF.  This
+            # is the same complete request shape used by the normal Keithley card.
+            init_req = cls.source_request_for_level(config, float(setpoints[0]))
+            _check_cancel(cancel_event)
+            cls.prepare_new_sweep_output(device, channel, cancel_event)
+            _check_cancel(cancel_event)
+            configuration_attempted = True
+            applied_request = device.configure_source(init_req)
+            if not isinstance(applied_request, KeithleySourceRequest):
+                raise DeviceError(
+                    "Keithley did not return the applied characterization configuration."
+                )
+            cls.assert_applied_configuration_matches_request(
+                init_req,
+                applied_request,
+            )
+
+            _check_cancel(cancel_event)
+            output_attempted = True
             # 2. Enable output only after the shared stop policy is confirmed.
             device.set_output(channel, True)
             for idx, demanded in enumerate(setpoints):
@@ -289,11 +305,11 @@ class KeithleyCharacterizationRunner:
                     termination_detail = "Field line reached compliance before the next sample point."
                     break
 
-                # Apply setpoint with keyword arguments for real adapter and positional fallback
-                try:
-                    device.update_source_level(channel, mode=config.mode, level_si=float(demanded))
-                except TypeError:
-                    device.update_source_level(channel, float(demanded))
+                _check_cancel(cancel_event)
+                # A failure may occur after the instrument accepted the write.
+                # Use the adapter contract once; never infer a signature mismatch
+                # from an exception inside an already executed operation.
+                device.update_source_level(channel, mode=config.mode, level_si=float(demanded))
 
                 device.assert_output_state(channel, expected_enabled=True)
 
@@ -332,9 +348,9 @@ class KeithleyCharacterizationRunner:
                 # True sample resistance: V_meas / I_meas (avoid zero division)
                 if abs(i_meas) > 1e-12:
                     true_r = v_meas / i_meas
-                elif config.mode == "current" and abs(demanded) > 1e-12:
-                    true_r = v_meas / demanded
                 else:
+                    # Demanded current belongs only to apparent resistance;
+                    # it is not evidence of current through the sample.
                     true_r = float("nan")
 
                 # Apparent resistance:
@@ -385,13 +401,16 @@ class KeithleyCharacterizationRunner:
             termination_detail = str(exc) or "Sweep interrupted by operator."
         finally:
             # 3. Fail-safe shutdown: ramp to zero and disable output
-            try:
-                device.ramp_to_zero(channel)
-            except Exception:
-                pass
+            if output_attempted:
+                try:
+                    device.ramp_to_zero(channel)
+                except Exception:
+                    pass
             shutdown_error: Exception | None = None
             try:
-                device.set_output(channel, False)
+                if configuration_attempted:
+                    device.set_output(channel, False)
+                require_output_off(device, channel)
             except Exception as exc:
                 shutdown_error = exc
             if shutdown_error is not None:
@@ -459,14 +478,7 @@ class CharacterizationWorker(QThread):
             self.finished_dataset.emit(dataset)
         except Exception as exc:
             try:
-                confirm_output_off = getattr(self._device, "confirm_output_off", None)
-                if callable(confirm_output_off):
-                    confirm_output_off(self._config.channel)
-                else:
-                    self._device.assert_output_state(
-                        self._config.channel,
-                        expected_enabled=False,
-                    )
+                require_output_off(self._device, self._config.channel)
             except Exception as off_exc:
                 self.output_off_confirmed = False
                 self.failed.emit(

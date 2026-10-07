@@ -3,6 +3,7 @@
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -10,6 +11,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pytest
 from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 
 from app.devices.anritsu_ms2830a import SpectrumTrace
 from app.devices.anritsu_ms2830a.ui.page import AnritsuPage, _AnritsuSpectrumWindow
@@ -44,6 +47,19 @@ def apply_range(widget, axis, lower, upper):
     return widget.apply_axis_range(axis)
 
 
+@pytest.mark.parametrize("unit,expected", [("W", "W"), ("V", "V"), ("dBm", "dB"), ("dB", "dB"), ("ratio", "ratio")])
+def test_marker_delta_preserves_physical_unit(workbench, application, unit, expected):
+    workbench.resize(1000, 700)
+    workbench.show()
+    workbench.set_trace_unit("Raw", unit)
+    workbench.set_trace("Raw", [1e6, 2e6, 3e6], [1., 2., 4.], primary=True)
+    workbench.add_frequency_marker(1e6)
+    workbench.add_frequency_marker(3e6)
+    application.processEvents()
+    assert f"ΔA 3 {expected}" in workbench.marker_readout.text()
+    assert workbench.plot.isVisible() and workbench.plot.width() > 0
+
+
 def test_fixed_axes_survive_new_frames_reset_and_outlying_markers(workbench):
     assert apply_range(workbench, "x", "2 MHz", "4e6 Hz")
     assert apply_range(workbench, "y", "-80 dBm", "-5 dBm")
@@ -65,7 +81,7 @@ def test_fixed_axes_survive_new_frames_reset_and_outlying_markers(workbench):
 @pytest.mark.parametrize("axis,lower,upper", [
     ("x", "3 MHz", "2 MHz"), ("x", "2", "4 MHz"),
     ("x", "2 mV", "4 MHz"), ("x", "nan Hz", "4 MHz"),
-    ("x", "-1 MHz", "4 MHz"), ("y", "-80 dB", "0 dBm"),
+    ("y", "-80 dB", "0 dBm"),
     ("y", "-80 dBm", "inf dBm"), ("y", "0 dBm", "0 dBm"),
 ])
 def test_invalid_ranges_leave_previous_limits_intact(workbench, axis, lower, upper):
@@ -87,6 +103,41 @@ def test_amplitude_dimension_change_unlocks_y_only(workbench):
     assert apply_range(workbench, "y", "-10 dB", "20 dB")
     workbench.set_labels(y_unit="linear ratio")
     assert apply_range(workbench, "y", "0", "2 linear ratio")
+
+
+def test_shown_fixed_frequency_range_accepts_negative_display_margin(application):
+    window = _AnritsuSpectrumWindow(None)
+    try:
+        window.resize(1280, 820)
+        window.show()
+        plot = window.spectrum
+        plot.set_labels(x="Frequency", x_unit="Hz", y="Signed residual", y_unit="W")
+        plot.set_trace("Analysis", [1e8, 3e9, 6e9], [1e-12, 8e-12, -1e-13], primary=True)
+        plot.auto_range()
+        application.processEvents()
+        assert apply_range(plot, "x", "-89.9097745 MHz", "3.28938815 GHz")
+        assert apply_range(plot, "y", "-1 pW", "20.0469206 pW")
+        for width in (1280, 900):
+            window.resize(width, 820)
+            plot.set_trace("Analysis", [1e8, 4e9, 6e9], [2e-12, 4e-12, 1e-12], primary=True)
+            plot.auto_range()
+            application.processEvents()
+            assert plot.axis_controls["x"][0].isChecked()
+            assert plot.plot.viewRange()[0] == pytest.approx([-89.9097745e6, 3.28938815e9])
+            assert plot.plot.viewRange()[1] == pytest.approx([-1e-12, 20.0469206e-12])
+        assert not apply_range(plot, "x", "4 GHz", "2 GHz")
+        assert plot.axis_feedback["x"].isVisibleTo(window)
+        assert plot.plot.viewRange()[0] == pytest.approx([-89.9097745e6, 3.28938815e9])
+        assert apply_range(plot, "x", "1 GHz", "3 GHz")
+        assert not plot.axis_feedback["x"].isVisible()
+        application.processEvents()
+        artifacts = Path("artifacts/anritsu-spectrum-workbench")
+        artifacts.mkdir(parents=True, exist_ok=True)
+        assert window.grab().save(str(artifacts / "fixed-frequency-regression.png"))
+    finally:
+        window.close()
+        window.deleteLater()
+        application.processEvents()
 
 
 def test_markers_sample_nearest_bins_update_deltas_and_remove(workbench):
@@ -195,7 +246,13 @@ def test_freeze_preview_keeps_acquisition_display_current_and_resumes_latest(app
             return SpectrumTrace(frequencies_hz=(1e6, 2e6), powers_dbm=(power, power),
                                  trace_name="TRAC1", acquired_at_utc=datetime.now(UTC))
         page._latest_trace = frame(-50)
-        page._open_spectrum_window()
+        page._refresh_spectrum_display()
+        page.resize(1280, 820)
+        page.show()
+        application.processEvents()
+        assert page.open_floating_spectrum.isVisibleTo(page)
+        assert not page.analysis_details.isVisible()
+        QTest.mouseClick(page.open_floating_spectrum, Qt.MouseButton.LeftButton)
         floating = page._spectrum_window
         assert floating is not None
         floating.spectrum.freeze.setChecked(True)
@@ -209,6 +266,58 @@ def test_freeze_preview_keeps_acquisition_display_current_and_resumes_latest(app
     finally:
         if page._spectrum_window:
             page._spectrum_window.close()
+        page.close()
+        page.deleteLater()
+        application.processEvents()
+
+
+def test_quick_comparisons_units_and_return_to_current_view(application):
+    controller = MagicMock()
+    controller.is_connected = False
+    controller.visa_address = "SIM::ANRITSU"
+    page = AnritsuPage(controller, SettingsRepository(SETTINGS_TEMPLATE).load().settings,
+                       single_sweep_available=True)
+    try:
+        raw = SpectrumTrace((1e6, 2e6, 3e6, 4e6, 5e6), (0, -10, -20, -30, -40), datetime.now(UTC), "TRAC1")
+        page._latest_trace = raw
+        page._reference_trace = SpectrumTrace(raw.frequencies_hz, (-10,) * 5, datetime.now(UTC), "TRAC1")
+        page._background_for_filter = MagicMock(return_value=(None, SimpleNamespace(
+            mean_w=(.002, .0001, .000001, .000001, .000001), profile_id="test-profile", content_hash="test-hash", context_id="test-context")))
+        page.resize(1600, 1000)
+        page.show()
+        application.processEvents()
+        for checkbox in page.quick_curves.values():
+            assert checkbox.isVisibleTo(page)
+            checkbox.setChecked(True)
+        assert len(page._display_state.traces) == 3
+        assert page._display_state.by_key["background_difference"].values[0] < 0
+        exported_raw, derived, unit, operation = page._manual_trace_payload("background_difference")
+        assert exported_raw is raw
+        assert derived[0] < 0 and unit == "W"
+        assert "test-hash" in operation
+        artifact_dir = Path("artifacts/spectrum-layout")
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        application.processEvents()
+        assert page.grab().save(str(artifact_dir / "three-power-comparisons.png"))
+        page.quick_power_unit.setCurrentIndex(page.quick_power_unit.findData("dBm"))
+        assert "non-positive" in page.info.text()
+        assert all(trace.unit == "dBm" for trace in page._display_state.traces)
+        page.quick_power_unit.setCurrentIndex(page.quick_power_unit.findData("W"))
+        assert page._display_state.by_key["background_difference"].values[0] < 0
+        page._background_for_filter.side_effect = ValueError("Background is stale")
+        page._refresh_spectrum_display()
+        assert "background_difference" not in page._display_state.by_key
+        assert "Background is stale" in page.info.text()
+        page.quick_power_unit.setCurrentIndex(0)
+        for checkbox in page.quick_curves.values():
+            checkbox.setChecked(False)
+        assert page._display_state.available_keys == ("raw",)
+        assert page._display_state.selected.unit == "dBm"
+        assert "Background_difference" not in page.spectrum_plot._traces
+        assert "Reference_difference" not in page.spectrum_plot._traces
+        assert raw.powers_dbm == (0, -10, -20, -30, -40)
+        controller.call.assert_not_called()
+    finally:
         page.close()
         page.deleteLater()
         application.processEvents()

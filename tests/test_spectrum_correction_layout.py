@@ -1,8 +1,6 @@
 """Shown geometry, theme contrast and frozen quantitative preview regression."""
 
 import os
-import csv
-from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -10,16 +8,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QPoint
 from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from app.devices.anritsu_ms2830a.ui.page import AnritsuPage, AnritsuPageState
-from app.settings import SettingsRepository
-from app.ui.design_system import apply_application_theme
 from app.ui.widgets import SpectrumPlotWidget
-from tests.helpers import SETTINGS_TEMPLATE
 from tests.test_spectrum_correction_store import fixture_profile, signal_fixture
 
 

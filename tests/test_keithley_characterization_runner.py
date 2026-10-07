@@ -95,6 +95,7 @@ class _MockKeithleyDevice:
 
     def confirm_output_off(self, channel):
         self.assert_output_state(channel, expected_enabled=False)
+        return True
 
     def set_compliance_policy(self, channel: str, stop_on_compliance: Any) -> None:
         if isinstance(stop_on_compliance, bool):
@@ -657,7 +658,7 @@ def test_partial_dataset_only_for_explicit_interruption(error_type):
             KeithleyCharacterizationRunner.run_sweep(
                 device, config, cancel_event=cancelled, on_point=interrupt_after_point)
     assert not device.output_enabled
-    assert device.calls[-1] == "set_output:A:False"
+    assert device.calls[-2:] == ["set_output:A:False", "assert_output_state:A:False"]
     assert len([call for call in device.calls if call.startswith("update_source_level:")]) == 1
 
 

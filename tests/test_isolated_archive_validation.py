@@ -66,3 +66,25 @@ def test_child_reports_corrupt_archive_instead_of_success(tmp_path):
     with h5py.File(path, "w") as file:
         file.create_group("unrelated")
     assert not validate_archive_isolated(path).valid
+
+
+def test_large_child_diagnostics_are_spooled_and_only_tail_is_loaded(tmp_path, monkeypatch):
+    streams = []
+    def noisy_failure(*args, **kwargs):
+        stream = kwargs["stderr"]
+        assert stream != subprocess.PIPE and stream.fileno() >= 0
+        streams.append(stream)
+        stream.write(b"HEAD-MARKER\n")
+        for _ in range(32):
+            stream.write(b"x" * 65536)
+        stream.write(b"\nTAIL-MARKER: native validation failed")
+        stream.flush()
+        return SimpleNamespace(returncode=-1)
+    monkeypatch.setattr("app.storage.validation_worker.subprocess.run", noisy_failure)
+    report = validate_archive_isolated(tmp_path / "result.h5")
+    assert not report.valid
+    message = report.errors[0].message
+    assert "HEAD-MARKER" not in message
+    assert message.endswith("TAIL-MARKER: native validation failed")
+    assert len(message) < 2100
+    assert streams[0].closed

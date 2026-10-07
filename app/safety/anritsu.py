@@ -107,6 +107,16 @@ def validate_anritsu_spectrum(
             f"Reference level {reference_level_dbm:.9g} dBm is outside the documented MS2830A range "
             f"of {reference_min:.9g}–{reference_max:.9g} dBm."
         )
+    if safety.reference_level.enabled:
+        if safety.reference_level.min is None or safety.reference_level.max is None:
+            raise SafetyViolation("Define the permitted Anritsu reference level range before acquisition.")
+        lower = parse_quantity(safety.reference_level.min, DIMENSION_DBM).si_value
+        upper = parse_quantity(safety.reference_level.max, DIMENSION_DBM).si_value
+        if not lower <= reference_level_dbm <= upper:
+            raise SafetyViolation(
+                f"Reference level {reference_level_dbm:.9g} dBm is outside the configured range "
+                f"of {lower:.9g}–{upper:.9g} dBm."
+            )
     if isinstance(points, bool) or points not in ANRITSU_SWEEP_POINT_COUNTS:
         raise SafetyViolation(
             "The Anritsu point count must be one of: "
@@ -180,24 +190,24 @@ def validate_anritsu_advanced_spectrum(
             "Anritsu advanced Spectrum Analyzer control is unverified for this firmware."
         )
 
-    normalized_detector = normalize_anritsu_detector(detector)
+    normalized_detector = normalize_anritsu_detector(detector) if detector is not None else None
     allowed_detectors = set(ANRITSU_BASIC_DETECTORS)
     if ANRITSU_CISPR_OPTIONS.intersection(hardware_options):
         allowed_detectors.update(ANRITSU_CISPR_DETECTORS)
-    if normalized_detector not in allowed_detectors:
+    if normalized_detector is not None and normalized_detector not in allowed_detectors:
         raise SafetyViolation(
             f"Detector {detector!r} is not qualified for the detected Anritsu options."
         )
 
-    if not rbw_auto and (
+    if (rbw_auto is False or rbw_hz is not None) and (
         rbw_hz is None or not math.isfinite(rbw_hz) or not 1 <= rbw_hz <= 31.25e6
     ):
         raise SafetyViolation("Manual Anritsu RBW must be within 1 Hz..31.25 MHz.")
 
-    normalized_vbw_mode = vbw_mode.strip().lower()
-    if normalized_vbw_mode not in {"auto", "manual", "off"}:
+    normalized_vbw_mode = vbw_mode.strip().lower() if vbw_mode is not None else None
+    if normalized_vbw_mode is not None and normalized_vbw_mode not in {"auto", "manual", "off"}:
         raise SafetyViolation("Anritsu VBW mode must be auto, manual, or off.")
-    if normalized_vbw_mode == "manual" and (
+    if (normalized_vbw_mode == "manual" or vbw_hz is not None) and (
         vbw_hz is None or not math.isfinite(vbw_hz) or not 1 <= vbw_hz <= 10e6
     ):
         raise SafetyViolation("Manual Anritsu VBW must be within 1 Hz..10 MHz.")
@@ -214,7 +224,7 @@ def validate_anritsu_advanced_spectrum(
                 "Automatic attenuation is forbidden because the safety profile requires a "
                 "minimum internal attenuation. Select a manual value at or above that limit."
             )
-    else:
+    elif attenuation_auto is False or attenuation_db is not None:
         if attenuation_db is None or not math.isfinite(attenuation_db):
             raise SafetyViolation("Manual Anritsu attenuation requires a finite value.")
         if not 0 <= attenuation_db <= 60 or not math.isclose(
@@ -233,7 +243,7 @@ def validate_anritsu_advanced_spectrum(
         if not ANRITSU_PREAMPLIFIER_OPTIONS.intersection(hardware_options):
             raise SafetyViolation("The connected Anritsu did not report a preamplifier option.")
 
-    if not sweep_time_auto and (
+    if (sweep_time_auto is False or sweep_time_s is not None) and (
         sweep_time_s is None
         or not math.isfinite(sweep_time_s)
         or not 1e-3 <= sweep_time_s <= 1000

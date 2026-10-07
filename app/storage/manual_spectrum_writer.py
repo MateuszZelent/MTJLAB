@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 import hashlib
+import json
 import math
 from pathlib import Path
 from typing import Sequence
@@ -53,12 +54,18 @@ class ManualSpectrumArchive:
         settings_source: str = "",
         device_idn: dict[str, str] | None = None,
         operator_context: dict[str, object] | None = None,
+        simulation: bool = False,
+        isolate_validation: bool = False,
     ) -> None:
+        if not isinstance(simulation, bool):
+            raise ValueError("Manual archive requires a boolean simulation mode.")
         self._settings_source = str(settings_source)
         self._device_idn = {
             str(key): str(value) for key, value in (device_idn or {}).items()
         }
         self._operator_context = dict(operator_context or {})
+        self._simulation = simulation
+        self._isolate_validation = isolate_validation
         self._writer: Hdf5RunWriter | None = None
         self._path: Path | None = None
         self._frequency_grid: tuple[float, ...] | None = None
@@ -101,6 +108,7 @@ class ManualSpectrumArchive:
         processed_values: Sequence[float] | None = None,
         processed_unit: str | None = None,
         processing_operation: str = "none",
+        capture_context: dict[str, object] | None = None,
     ) -> ManualSpectrumSaveResult:
         """Append one complete trace and return the actual output path."""
 
@@ -126,6 +134,18 @@ class ManualSpectrumArchive:
         if selected_mode is ManualSpectrumSaveMode.TIMESTAMPED:
             path = timestamped_path(path)
 
+        if capture_context is not None:
+            # Snapshot before file mutation. Run identity remains immutable for
+            # an append session; a new file gets the current capture context.
+            capture_context = json.loads(json.dumps(capture_context, allow_nan=False))
+            if capture_context.get("simulation") is not self._simulation:
+                raise ExecutionError("Manual capture context simulation provenance differs.")
+            settings_source = str(capture_context["settings_source"])
+            device_idn = dict(capture_context["device_idn"])
+            operator_context = dict(capture_context["operator_context"])
+            self._settings_source = settings_source
+            self._device_idn = device_idn
+            self._operator_context = operator_context
         writer = self._open_for(path, selected_mode)
         self._validate_grid(trace)
         point_index = writer.point_count
@@ -137,6 +157,7 @@ class ManualSpectrumArchive:
                 "dimension": value.dimension,
                 "unit": value.unit,
                 "source": value.source,
+                "recorded_at_utc": value.recorded_at_utc.isoformat() if value.recorded_at_utc is not None else None,
             }
             for value in metadata_values
         ]
@@ -153,6 +174,9 @@ class ManualSpectrumArchive:
                 "metadata_scope": metadata_scope,
                 "selected_metadata_keys": sorted(measurements),
                 "metadata_descriptors": descriptors,
+                "metadata_sampled_at_utc": datetime.now(timezone.utc).isoformat(),
+                "metadata_snapshot_kind": "last_confirmed_at_save",
+                "capture_context_at_save": capture_context or {},
             },
         )
         writer.append(
@@ -202,6 +226,9 @@ class ManualSpectrumArchive:
                     f"Timestamped manual spectrum target already exists: {path}"
                 )
             identity, checkpoint_count, frequency_grid = _read_archive_identity(path)
+            simulation_metadata = json.loads(identity["simulation_json"])
+            if simulation_metadata.get("enabled") is not self._simulation:
+                raise ExecutionError("Manual archive simulation provenance differs; choose a new file.")
             writer = Hdf5RunWriter.resume(
                 path,
                 recipe_source=identity["recipe_source"],
@@ -210,6 +237,7 @@ class ManualSpectrumArchive:
                 checkpoint_count=checkpoint_count,
                 expected_points=None,
                 operator_context=self._operator_context,
+                isolate_validation=self._isolate_validation,
             )
             self._frequency_grid = frequency_grid
         else:
@@ -224,11 +252,12 @@ class ManualSpectrumArchive:
                 device_idn=self._device_idn,
                 operator_context=self._operator_context,
                 simulation_metadata={
-                    "enabled": False,
+                    "enabled": self._simulation,
                     "manual_spectrum": True,
                 },
                 run_attributes={"manual_spectrum_schema": MANUAL_SPECTRUM_SCHEMA},
                 expected_points=None,
+                isolate_validation=self._isolate_validation,
             )
             self._frequency_grid = None
         self._writer = writer
@@ -336,6 +365,7 @@ def _read_archive_identity(
                     "recipe_source": recipe_source,
                     "settings_source": settings_source,
                     "plan_hash": plan_hash,
+                    "simulation_json": _dataset_text(run, "simulation_json"),
                 },
                 len(names),
                 frequency_grid,

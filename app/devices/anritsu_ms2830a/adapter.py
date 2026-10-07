@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 import hashlib
 import math
@@ -12,7 +12,7 @@ from app.devices.base import DeviceAdapter, InstrumentSession, SessionFactory, p
 from app.devices.anritsu_ms2830a.hardware import (
     ANRITSU_PREAMPLIFIER_OPTIONS,
     ANRITSU_SIGNAL_GENERATOR_OPTIONS,
-    parse_anritsu_option_response,
+    parse_anritsu_hardware_catalog,
 )
 from app.devices.visa import PyVisaSessionFactory
 from app.domain.errors import ConnectionError, DeviceError, SafetyViolation
@@ -29,20 +29,7 @@ from app.safety.anritsu import (
     validate_anritsu_trace_name,
 )
 from app.settings.models import AnritsuSettings, StationSettings
-
-
-@dataclass(frozen=True, slots=True)
-class SpectrumConfig:
-    start_hz: float
-    stop_hz: float
-    reference_level_dbm: float
-    points: int
-    trace: str = "TRAC1"
-    rbw_auto: bool = True
-    rbw_hz: float | None = None
-    vbw_auto: bool = True
-    vbw_mode: str = "VID"
-    vbw_hz: float | None = None
+from .configuration import SignalGeneratorConfig, SpectrumConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,20 +64,22 @@ class AnritsuFullConfigurationReadback:
     continuous_sweep: bool
     average_count: int
     instrument_mode: str = ""
+    preamplifier_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class AdvancedSpectrumConfig:
-    rbw_auto: bool = True
+    rbw_auto: bool | None = None
     rbw_hz: float | None = None
-    vbw_mode: str = "auto"
+    vbw_mode: str | None = None
     vbw_hz: float | None = None
-    detector: str = "NORM"
-    attenuation_auto: bool = True
+    detector: str | None = None
+    attenuation_auto: bool | None = None
     attenuation_db: float | None = None
-    preamplifier_enabled: bool = False
-    sweep_time_auto: bool = True
+    preamplifier_enabled: bool | None = None
+    sweep_time_auto: bool | None = None
     sweep_time_s: float | None = None
+    vbw_filter_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,12 +95,7 @@ class AdvancedSpectrumSnapshot:
     sweep_time_auto: bool
     sweep_time_s: float
     instrument_mode: str
-
-
-@dataclass(frozen=True, slots=True)
-class SignalGeneratorConfig:
-    frequency_hz: float
-    power_dbm: float
+    vbw_filter_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,8 +146,11 @@ class ReferenceSpectrum:
     notes: str = ""
     saved_to_file: bool = False
     grid_hash: str = ""
+    vbw_filter_mode: str | None = None
 
     def __post_init__(self) -> None:
+        if self.vbw_filter_mode not in {None, "VID", "POW"}:
+            raise ValueError("Reference VBW filter mode must be VID or POW.")
         if self.kind not in {"single", "averaged", "imported"}:
             raise ValueError(f"Unsupported reference kind {self.kind!r}.")
         if self.average_count < 1:
@@ -235,11 +222,13 @@ class AnritsuAdapter(DeviceAdapter):
         self._session: InstrumentSession | None = None
         self._live = False
         self._last_sg_config: SignalGeneratorConfig | None = None
+        self._sg_control_owned = False
         self._sg_output_enabled = False
         self._options_query_failed = False
         self._cached_grid: tuple[float, float, int, tuple[float, ...]] | None = None
         self._configuration_generation = 0
         self._acquisition_sequence = 0
+        self._remote_entered = False
 
     @classmethod
     def _read_hardware_options(cls, session: InstrumentSession) -> tuple[bool, tuple[str, ...]]:
@@ -250,15 +239,41 @@ class AnritsuAdapter(DeviceAdapter):
 
         original_timeout = session.timeout
         try:
-            # Some old firmware may not implement *OPT?. Do not make an
-            # otherwise valid instrument unusable, and do not wait for the
-            # normal 30-second acquisition timeout for this optional probe.
+            # *OPT? is not a documented MS2830A header. Use its hardware
+            # catalogue and the installed language without changing either
+            # the language or the active measurement application.
             session.timeout = max(1, min(original_timeout, 2000))
-            return True, parse_anritsu_option_response(session.query("*OPT?"))
+            native = cls._read_remote_language(session) == "NAT"
+            if native:
+                # Station firmware 7.03.00 rejects OPTINFO? HARD in SPECT.
+                # Spectrum acquisition does not need optional hardware discovery.
+                # Keep capabilities unknown instead of probing unsupported
+                # headers or switching to CONFIG during connection.
+                return False, ()
+            return True, parse_anritsu_hardware_catalog(session.query("SYST:HARD:OPT:CAT?"))
         except Exception:
             return False, ()
         finally:
             session.timeout = original_timeout
+
+    @staticmethod
+    def _read_remote_language(session: InstrumentSession) -> str:
+        language = session.query("SYST:LANG?").strip().strip('"').upper()
+        if language == "NATIVE":
+            language = "NAT"
+        if language not in {"SCPI", "NAT"}:
+            raise DeviceError(f"Anritsu returned unknown remote language {language!r}.")
+        return language
+
+    def _prepare_trace_a(self) -> None:
+        session = self._require_session()
+        # Mainframe Remote Control 1.6.2: Native moves the indexed SCPI
+        # header's number into the first argument. Never change the language
+        # implicitly, and never send TRAC1:TYPE to a Native interpreter.
+        language = self._read_remote_language(session)
+        command = "TRAC:TYPE 1,WRIT" if language == "NAT" else "TRAC1:TYPE WRIT"
+        session.write(command)
+        self._check_scpi_errors(session, f"Trace A preparation ({command}, language={language})")
 
     def _require_session(self) -> InstrumentSession:
         if self._session is None:
@@ -276,7 +291,7 @@ class AnritsuAdapter(DeviceAdapter):
         if not resource:
             raise ConnectionError("No Anritsu VISA resource is configured in settings.yml.")
         timeout = int(parse_quantity(self._settings.connection.timeout, DIMENSION_TIME).si_value * 1000)
-        session = self._factory.open(resource, self._settings.connection.visa_backend, timeout)
+        session = self._open_session(self._factory, resource, self._settings.connection.visa_backend, timeout)
         try:
             # Empty strings preserve the VISA backend defaults. Assigning an
             # empty terminator can make MS2830A queries time out over GPIB.
@@ -294,6 +309,11 @@ class AnritsuAdapter(DeviceAdapter):
             )
             success, hardware_options = self._read_hardware_options(session)
             self._options_query_failed = not success
+            if not success and self._settings.identity.required_options:
+                raise ConnectionError(
+                    "Cannot verify profile-required Anritsu hardware options: "
+                    "the option catalogue is unavailable in the current remote language/application."
+                )
             missing_options = set(self._settings.identity.required_options) - set(
                 hardware_options
             )
@@ -322,15 +342,8 @@ class AnritsuAdapter(DeviceAdapter):
                 ),
                 hardware_options=hardware_options,
             )
-            if self._capabilities.supports("signal_generator"):
-                # A pre-existing front-panel/remote SG state is not trusted.
-                # Connection succeeds only after RF OFF has been commanded and
-                # read back, then the analyser is returned to Spectrum mode.
-                try:
-                    self._enter_spectrum_mode_with_rf_off()
-                except Exception:
-                    if not self._options_query_failed:
-                        raise
+            # Identification is read-only. Explicit SG configuration establishes
+            # RF OFF before configuring it; spectrum-only sessions do not own RF.
             self._state = DeviceState.VERIFIED
             return identity
         except Exception:
@@ -349,8 +362,7 @@ class AnritsuAdapter(DeviceAdapter):
             session is not None
             and self._settings.safety.outputs_off_on_disconnect
             and (
-                (self._capabilities is not None and self._capabilities.supports("signal_generator"))
-                or self._sg_output_enabled
+                self._sg_control_owned or self._sg_output_enabled
                 or (self._last_sg_config is not None)
             )
         ):
@@ -361,6 +373,8 @@ class AnritsuAdapter(DeviceAdapter):
                     "Keep the session open and use E-STOP or remove RF power externally."
                 )
         session, self._session = self._session, None
+        self._remote_entered = False
+        self._sg_control_owned = False
         self._live = False
         self._last_sg_config = None
         self._sg_output_enabled = False
@@ -372,7 +386,29 @@ class AnritsuAdapter(DeviceAdapter):
                 self._capabilities = None
                 self._state = DeviceState.DISCONNECTED
 
-    def emergency_off(self) -> None:
+    @staticmethod
+    def _stop_spectrum_acquisition(session) -> None:
+        # MS2830A Spectrum Analyzer Remote Control, section 2.7, p. 2-321:
+        # use the documented short header accepted by the target firmware.
+        session.write("ABOR")
+        status = session.query("INIT:SWP?").strip()
+        if status not in {"0", "+0"}:
+            raise DeviceError(f"Anritsu did not confirm sweep stopped: INIT:SWP?={status!r}.")
+
+    def abort_acquisition(self) -> bool:
+        """Stop spectrum acquisition without selecting or controlling SG/RF."""
+        session = self._require_session()
+        try:
+            self._stop_spectrum_acquisition(session)
+        except Exception:
+            self._live = False
+            self._state = DeviceState.UNKNOWN
+            raise
+        self._live = False
+        self._state = DeviceState.VERIFIED
+        return True
+
+    def emergency_off(self) -> bool:
         """Best-effort RF OFF followed by acquisition abort.
 
         When the SG option is installed, E-STOP may explicitly change the
@@ -381,7 +417,7 @@ class AnritsuAdapter(DeviceAdapter):
         """
 
         if self._session is None:
-            return
+            return False
         session = self._session
         errors: list[Exception] = []
         has_generator = bool(
@@ -400,7 +436,7 @@ class AnritsuAdapter(DeviceAdapter):
             except Exception as exc:
                 errors.append(exc)
         try:
-            session.write("ABORT")
+            self._stop_spectrum_acquisition(session)
         except Exception as exc:
             errors.append(exc)
         if errors:
@@ -409,6 +445,7 @@ class AnritsuAdapter(DeviceAdapter):
         else:
             self._live = False
             self._state = DeviceState.VERIFIED
+        return not errors
 
     def apply_limit_settings(self, station: object) -> None:
         if not isinstance(station, StationSettings):
@@ -449,10 +486,10 @@ class AnritsuAdapter(DeviceAdapter):
             )
 
     def _enter_spectrum_mode_with_rf_off(self) -> None:
-        """Explicitly prove optional SG RF OFF before selecting Spectrum mode."""
+        """Stop session-owned SG output before explicitly selecting Spectrum."""
 
         session = self._require_session()
-        if self._capabilities is not None and self._capabilities.supports("signal_generator"):
+        if self._sg_control_owned or self._sg_output_enabled or self._last_sg_config is not None:
             session.write("INST SG")
             session.write("OUTP 0")
             if self._parse_output_state(session.query("OUTP?")):
@@ -542,6 +579,7 @@ class AnritsuAdapter(DeviceAdapter):
             power_dbm=config.power_dbm,
         )
         session = self._require_session()
+        self._sg_control_owned = True
         session.write("INST SG")
         session.write("OUTP 0")
         if self._parse_output_state(session.query("OUTP?")):
@@ -586,9 +624,20 @@ class AnritsuAdapter(DeviceAdapter):
         )
         session = self._require_session()
         before = self.read_signal_generator_configuration()
+        selected = {"frequency_hz", "power_dbm"} if config.changed_fields is None else set(config.changed_fields)
+        if not selected or not selected <= {"frequency_hz", "power_dbm"}:
+            raise SafetyViolation("Invalid selected signal generator fields.")
+        config = replace(config, **{
+            key: getattr(before, key) for key in {"frequency_hz", "power_dbm"} - selected
+        })
+        validate_anritsu_signal_generator(
+            self._settings, frequency_hz=config.frequency_hz, power_dbm=config.power_dbm,
+        )
         try:
-            session.write(f"FREQ {config.frequency_hz:.12g}HZ")
-            session.write(f"POW {config.power_dbm:.12g}")
+            if "frequency_hz" in selected:
+                session.write(f"FREQ {config.frequency_hz:.12g}HZ")
+            if "power_dbm" in selected:
+                session.write(f"POW {config.power_dbm:.12g}")
             actual = self.read_signal_generator_configuration()
         except Exception:
             self.emergency_off()
@@ -628,6 +677,7 @@ class AnritsuAdapter(DeviceAdapter):
         self._assert_signal_generator_supported()
         session = self._require_session()
         if not enabled:
+            self._sg_control_owned = True
             session.write("OUTP 0")
             active = self._parse_output_state(session.query("OUTP?"))
             self._sg_output_enabled = active
@@ -718,10 +768,12 @@ class AnritsuAdapter(DeviceAdapter):
         session = self._require_session()
         try:
             instrument_mode = session.query("INST?").strip()
+            if "SPECT" not in instrument_mode.upper():
+                raise DeviceError("Spectrum readback requires Spectrum Analyzer mode.")
             start_hz = float(session.query("FREQ:STAR?"))
             stop_hz = float(session.query("FREQ:STOP?"))
             reference_level_dbm = float(session.query("DISP:WIND:TRAC:Y:RLEV?"))
-            points = int(float(session.query("SWE:POIN?")))
+            points = self._parse_integer(session.query("SWE:POIN?"), "sweep point count", minimum=2)
         except (TypeError, ValueError) as exc:
             raise DeviceError("Anritsu returned an invalid current-configuration response.") from exc
         if not all(math.isfinite(value) for value in (start_hz, stop_hz, reference_level_dbm)):
@@ -738,27 +790,19 @@ class AnritsuAdapter(DeviceAdapter):
         """Query complete front-panel parameters in a fast burst for reconciliation."""
 
         session = self._require_session()
+        basic = self.read_current_configuration()
         try:
-            mode = session.query("INST?").strip()
-            start_hz = float(session.query("FREQ:STAR?"))
-            stop_hz = float(session.query("FREQ:STOP?"))
-            try:
-                center_hz = float(session.query("FREQ:CENT?"))
-            except Exception:
-                center_hz = (start_hz + stop_hz) / 2.0
-            try:
-                span_hz = float(session.query("FREQ:SPAN?"))
-            except Exception:
-                span_hz = stop_hz - start_hz
-            reference_level_dbm = float(session.query("DISP:WIND:TRAC:Y:RLEV?"))
-            points = int(float(session.query("SWE:POIN?")))
+            mode = basic.instrument_mode
+            start_hz, stop_hz = basic.start_hz, basic.stop_hz
+            # Both values are determined by the validated range. Avoid two
+            # redundant queries and continuing a session after their timeout.
+            center_hz = (start_hz + stop_hz) / 2.0
+            span_hz = stop_hz - start_hz
+            reference_level_dbm, points = basic.reference_level_dbm, basic.points
             rbw_auto = self._parse_switch(session.query("BAND:AUTO?"), "RBW auto")
             rbw_hz = float(session.query("BAND?"))
             vbw_auto = self._parse_switch(session.query("BAND:VID:AUTO?"), "VBW auto")
-            try:
-                vbw_mode = session.query("BAND:VID:MODE?").strip().upper()
-            except Exception:
-                vbw_mode = "VID"
+            vbw_mode = self._read_vbw_filter_mode()
             vbw_response = session.query("BAND:VID?").strip().upper()
             vbw_hz = None if vbw_response == "OFF" else float(vbw_response)
             sweep_time_auto = self._parse_switch(
@@ -770,12 +814,14 @@ class AnritsuAdapter(DeviceAdapter):
             )
             attenuation_db = float(session.query("POW:ATT?"))
             detector = normalize_anritsu_detector(session.query("DET?"))
-            cont_resp = session.query("INIT:CONT?").strip().upper()
-            continuous_sweep = cont_resp in {"1", "+1", "ON"}
-            try:
-                average_count = int(float(session.query("AVER:COUN?")))
-            except Exception:
-                average_count = 1
+            continuous_sweep = self._parse_switch(session.query("INIT:CONT?"), "continuous acquisition")
+            preamplifier_enabled = (
+                self._parse_switch(session.query("POW:GAIN?"), "preamplifier")
+                if self._capabilities is not None
+                and ANRITSU_PREAMPLIFIER_OPTIONS.intersection(self._capabilities.hardware_options)
+                else False
+            )
+            average_count = self._parse_integer(session.query("AVER:COUN?"), "average count")
         except (TypeError, ValueError) as exc:
             raise DeviceError("Anritsu returned invalid full configuration data.") from exc
 
@@ -799,7 +845,47 @@ class AnritsuAdapter(DeviceAdapter):
             continuous_sweep=continuous_sweep,
             average_count=average_count,
             instrument_mode=mode,
+            preamplifier_enabled=preamplifier_enabled,
         )
+
+    def read_acquisition_configuration(self) -> tuple[AnritsuFullConfigurationReadback, AdvancedSpectrumSnapshot]:
+        """Read one fresh configuration for acquisition and its provenance.
+
+        Advanced fields are already in the full readback; deriving the second
+        view avoids another burst of identical queries, without caching state.
+        """
+        full = self.read_full_configuration()
+        numeric = (full.rbw_hz, full.attenuation_db, full.sweep_time_s)
+        if full.vbw_hz is not None:
+            numeric += (full.vbw_hz,)
+        if not all(math.isfinite(value) for value in numeric):
+            raise DeviceError("Anritsu returned non-finite advanced Spectrum data.")
+        advanced = AdvancedSpectrumSnapshot(
+            rbw_auto=full.rbw_auto, rbw_hz=full.rbw_hz,
+            vbw_mode="auto" if full.vbw_auto else ("off" if full.vbw_hz is None else "manual"),
+            vbw_hz=full.vbw_hz, detector=full.detector,
+            attenuation_auto=full.attenuation_auto, attenuation_db=full.attenuation_db,
+            preamplifier_enabled=full.preamplifier_enabled,
+            sweep_time_auto=full.sweep_time_auto, sweep_time_s=full.sweep_time_s,
+            instrument_mode=full.instrument_mode, vbw_filter_mode=full.vbw_mode,
+        )
+        return full, advanced
+
+    def _read_vbw_filter_mode(self) -> str:
+        mode = self._require_session().query("BAND:VID:MODE?").strip().upper()
+        if mode not in {"VID", "POW"}:
+            raise DeviceError(f"Invalid Anritsu Video/Power readback: {mode!r}.")
+        return mode
+
+    @staticmethod
+    def _parse_integer(response: str, parameter: str, *, minimum: int = 1) -> int:
+        try:
+            value = float(response)
+        except (TypeError, ValueError) as exc:
+            raise DeviceError(f"Anritsu returned invalid {parameter} {response!r}.") from exc
+        if not math.isfinite(value) or not value.is_integer() or value < minimum:
+            raise DeviceError(f"Anritsu returned invalid {parameter} {response!r}.")
+        return int(value)
 
     @staticmethod
     def _parse_switch(response: str, parameter: str) -> bool:
@@ -862,6 +948,7 @@ class AnritsuAdapter(DeviceAdapter):
             sweep_time_auto=sweep_time_auto,
             sweep_time_s=sweep_time_s,
             instrument_mode=mode,
+            vbw_filter_mode=self._read_vbw_filter_mode(),
         )
 
     def _assert_advanced_firmware_qualified(self) -> None:
@@ -881,6 +968,24 @@ class AnritsuAdapter(DeviceAdapter):
     ) -> AdvancedSpectrumSnapshot:
         """Apply qualified input-path/bandwidth controls and verify every readback."""
 
+        self._assert_advanced_firmware_qualified()
+        requested = config
+        if requested.vbw_filter_mode not in {None, "VID", "POW"}:
+            raise SafetyViolation("VBW filter mode must be VID or POW.")
+        before = self.read_advanced_spectrum_configuration()
+        for value, mode, current_mode in (
+            (requested.rbw_hz, requested.rbw_auto, before.rbw_auto),
+            (requested.attenuation_db, requested.attenuation_auto, before.attenuation_auto),
+            (requested.sweep_time_s, requested.sweep_time_auto, before.sweep_time_auto),
+        ):
+            if value is not None and mode is None and current_mode:
+                raise SafetyViolation("A manual value requires an explicit manual-mode selection or confirmed manual baseline.")
+        if requested.vbw_hz is not None and requested.vbw_mode is None and before.vbw_mode != "manual":
+            raise SafetyViolation("A manual VBW requires an explicit manual-mode selection or confirmed manual baseline.")
+        config = AdvancedSpectrumConfig(**{
+            item.name: getattr(requested, item.name) if getattr(requested, item.name) is not None else getattr(before, item.name)
+            for item in fields(requested)
+        })
         options = self._capabilities.hardware_options if self._capabilities is not None else ()
         validate_anritsu_advanced_spectrum(
             self._settings,
@@ -904,34 +1009,31 @@ class AnritsuAdapter(DeviceAdapter):
         detector = normalize_anritsu_detector(config.detector)
         vbw_mode = config.vbw_mode.strip().lower()
         try:
-            self._enter_spectrum_mode_with_rf_off()
-            if has_preamp:
+            if has_preamp and requested.preamplifier_enabled is not None:
                 session.write("POW:GAIN OFF")
-            if config.attenuation_auto:
-                session.write("POW:ATT:AUTO ON")
-            else:
-                session.write("POW:ATT:AUTO OFF")
+            if requested.attenuation_auto is not None:
+                session.write("POW:ATT:AUTO ON" if config.attenuation_auto else "POW:ATT:AUTO OFF")
+            if requested.attenuation_db is not None:
                 session.write(f"POW:ATT {config.attenuation_db:.12g}DB")
-            session.write(f"DET {detector}")
-            if config.rbw_auto:
-                session.write("BAND:AUTO ON")
-            else:
-                session.write("BAND:AUTO OFF")
+            if requested.detector is not None:
+                session.write(f"DET {detector}")
+            if requested.rbw_auto is not None:
+                session.write("BAND:AUTO ON" if config.rbw_auto else "BAND:AUTO OFF")
+            if requested.rbw_hz is not None:
                 session.write(f"BAND {config.rbw_hz:.12g}HZ")
-            if vbw_mode == "auto":
-                session.write("BAND:VID:AUTO ON")
-            elif vbw_mode == "off":
-                session.write("BAND:VID:AUTO OFF")
-                session.write("BAND:VID OFF")
-            else:
-                session.write("BAND:VID:AUTO OFF")
+            if requested.vbw_mode is not None:
+                session.write("BAND:VID:AUTO ON" if vbw_mode == "auto" else "BAND:VID:AUTO OFF")
+                if vbw_mode == "off":
+                    session.write("BAND:VID OFF")
+            if requested.vbw_filter_mode is not None:
+                session.write(f"BAND:VID:MODE {requested.vbw_filter_mode}")
+            if requested.vbw_hz is not None:
                 session.write(f"BAND:VID {config.vbw_hz:.12g}HZ")
-            if config.sweep_time_auto:
-                session.write("SWE:TIME:AUTO ON")
-            else:
-                session.write("SWE:TIME:AUTO OFF")
+            if requested.sweep_time_auto is not None:
+                session.write("SWE:TIME:AUTO ON" if config.sweep_time_auto else "SWE:TIME:AUTO OFF")
+            if requested.sweep_time_s is not None:
                 session.write(f"SWE:TIME {config.sweep_time_s:.12g}S")
-            if has_preamp and config.preamplifier_enabled:
+            if has_preamp and requested.preamplifier_enabled is True:
                 session.write("POW:GAIN ON")
             actual = self.read_advanced_spectrum_configuration()
             self._verify_advanced_spectrum_readback(config, actual)
@@ -939,10 +1041,11 @@ class AnritsuAdapter(DeviceAdapter):
         except Exception:
             # Conservative input-path fallback. Do not hide the original fault.
             try:
-                if has_preamp:
-                    session.write("POW:GAIN OFF")
-                session.write("POW:ATT:AUTO OFF")
-                session.write("POW:ATT 60DB")
+                if requested.attenuation_auto is not None or requested.attenuation_db is not None or requested.preamplifier_enabled is not None:
+                    if has_preamp:
+                        session.write("POW:GAIN OFF")
+                    session.write("POW:ATT:AUTO OFF")
+                    session.write("POW:ATT 60DB")
             except Exception:
                 pass
             self._state = DeviceState.UNKNOWN
@@ -953,6 +1056,8 @@ class AnritsuAdapter(DeviceAdapter):
         requested: AdvancedSpectrumConfig, actual: AdvancedSpectrumSnapshot
     ) -> None:
         mismatches: list[str] = []
+        if requested.vbw_filter_mode is not None and actual.vbw_filter_mode != requested.vbw_filter_mode:
+            mismatches.append("VBW Video/Power mode")
         if actual.rbw_auto != requested.rbw_auto:
             mismatches.append("RBW auto state")
         if not requested.rbw_auto and not math.isclose(
@@ -999,6 +1104,8 @@ class AnritsuAdapter(DeviceAdapter):
 
     def configure_spectrum(self, config: SpectrumConfig) -> AnritsuConfigurationSnapshot:
         validate_anritsu_trace_name(config.trace)
+        if config.vbw_mode not in {None, "VID", "POW"}:
+            raise SafetyViolation("VBW filter mode must be VID or POW.")
         validate_anritsu_spectrum(
             self._settings.safety,
             start_hz=config.start_hz,
@@ -1007,39 +1114,62 @@ class AnritsuAdapter(DeviceAdapter):
             points=config.points,
         )
         session = self._require_session()
+        fields = config.changed_fields
+        if fields is not None:
+            allowed = {"start_hz", "stop_hz", "reference_level_dbm", "points"}
+            if not fields or len(fields) != len(set(fields)) or set(fields) - allowed:
+                raise SafetyViolation("Spectrum changes require explicit distinct supported fields.")
+            before = self.read_current_configuration()
+            if "SPECT" not in before.instrument_mode.upper():
+                raise DeviceError("Spectrum parameter changes require confirmed Spectrum Analyzer mode.")
+            for name in allowed - set(fields):
+                if not math.isclose(float(getattr(before, name)), float(getattr(config, name)), rel_tol=1e-9, abs_tol=1e-9):
+                    raise DeviceError(f"Anritsu unselected {name} differs from the planned baseline; re-read and recompile.")
+        else:
+            self._enter_spectrum_mode_with_rf_off()
         self._configuration_generation += 1
         self._cached_grid = None
-        self._enter_spectrum_mode_with_rf_off()
-        session.write(f"FREQ:STAR {config.start_hz:.12g}HZ")
-        session.write(f"FREQ:STOP {config.stop_hz:.12g}HZ")
-        session.write(f"DISP:WIND:TRAC:Y:RLEV {config.reference_level_dbm:.12g}")
-        session.write(f"SWE:POIN {config.points}")
-        if config.rbw_auto:
+        if fields is None or "start_hz" in fields:
+            session.write(f"FREQ:STAR {config.start_hz:.12g}HZ")
+        if fields is None or "stop_hz" in fields:
+            session.write(f"FREQ:STOP {config.stop_hz:.12g}HZ")
+        if fields is None or "reference_level_dbm" in fields:
+            session.write(f"DISP:WIND:TRAC:Y:RLEV {config.reference_level_dbm:.12g}")
+        if fields is None or "points" in fields:
+            session.write(f"SWE:POIN {config.points}")
+        if fields is None and config.rbw_auto is True:
             session.write("BAND:AUTO ON")
-        elif config.rbw_hz is not None:
+        elif fields is None and config.rbw_auto is False and config.rbw_hz is not None:
             session.write("BAND:AUTO OFF")
             session.write(f"BAND {config.rbw_hz:.12g}HZ")
-        if config.vbw_mode in {"VID", "POW"}:
+        if fields is None and config.vbw_mode in {"VID", "POW"}:
             session.write(f"BAND:VID:MODE {config.vbw_mode}")
-        if config.vbw_auto:
+        if fields is None and config.vbw_auto is True:
             session.write("BAND:VID:AUTO ON")
-        elif config.vbw_hz is not None:
+        elif fields is None and config.vbw_auto is False and config.vbw_hz is not None:
             session.write("BAND:VID:AUTO OFF")
             session.write(f"BAND:VID {config.vbw_hz:.12g}HZ")
+        elif fields is None and config.vbw_auto is False:
+            session.write("BAND:VID:AUTO OFF")
+            session.write("BAND:VID OFF")
         self._cached_grid = None
         # TRAC? TRAC1 reads Trace A.  In VIEW mode that buffer is documented
         # to remain unchanged even while the analyser continues measuring.
         # An explicit Apply action therefore restores Trace A to WRITE so the
         # next passive current-buffer read can actually contain a new frame.
-        session.write("TRAC1:TYPE WRIT")
+        if fields is None and config.prepare_current_buffer:
+            self._prepare_trace_a()
         # A range/point-count change invalidates the current TRAC1 buffer.  If
         # an earlier recipe or front-panel action left the analyser in Single,
         # passive reads would then return -999 forever.  Restore the normal
         # free-running Spectrum mode once per explicit Apply action.  Manual
         # Read and each Live timer tick remain pure current-buffer reads.
-        session.write("INIT:MODE:CONT")
+        if fields is None and config.prepare_current_buffer:
+            session.write("INIT:MODE:CONT")
         actual = self.read_current_configuration()
         mismatches: list[str] = []
+        if fields is None and config.vbw_mode is not None and self._read_vbw_filter_mode() != config.vbw_mode:
+            mismatches.append("VBW Video/Power mode")
         if not math.isclose(actual.start_hz, config.start_hz, rel_tol=0.0, abs_tol=1.0):
             mismatches.append(f"start requested={config.start_hz:g} Hz actual={actual.start_hz:g} Hz")
         if not math.isclose(actual.stop_hz, config.stop_hz, rel_tol=0.0, abs_tol=1.0):
@@ -1060,6 +1190,30 @@ class AnritsuAdapter(DeviceAdapter):
             raise DeviceError("Anritsu configuration readback mismatch: " + "; ".join(mismatches))
         return actual
 
+    def _ensure_acquisition_remote(self) -> None:
+        # GPIB REN is transport control, not an SCPI header or a sweep mode.
+        # Do this once when measurement starts, never during discovery/identity.
+        if self._settings.connection.resource.upper().startswith("GPIB") and not self._remote_entered:
+            self._require_session().ensure_remote()
+            self._remote_entered = True
+
+    @staticmethod
+    def _check_scpi_errors(session: InstrumentSession, context: str) -> None:
+        """Preserve transient front-panel errors in the caller's fault/log."""
+        errors = []
+        for _ in range(16):
+            response = session.query("SYST:ERR?").strip()
+            try:
+                code = int(response.split(",", 1)[0])
+            except ValueError as exc:
+                raise DeviceError(f"Anritsu invalid SYST:ERR? during {context}: {response!r}.") from exc
+            if code == 0:
+                if errors:
+                    raise DeviceError(f"Anritsu SCPI error during {context}: " + "; ".join(errors))
+                return
+            errors.append(response)
+        raise DeviceError(f"Anritsu error queue did not empty during {context}: " + "; ".join(errors))
+
     def start_live(self, ensure_continuous: bool = False) -> AnritsuConfigurationSnapshot:
         """Start Live polling, optionally ensuring free-running measurement."""
 
@@ -1071,10 +1225,12 @@ class AnritsuAdapter(DeviceAdapter):
             )
         if ensure_continuous:
             session = self._require_session()
+            self._ensure_acquisition_remote()
+            self._check_scpi_errors(session, "before Live preparation")
             # Live owns the expectation that every poll can observe the Trace
             # A measurement being refreshed. This changes the trace display
             # mode once at Live startup; individual timer ticks remain reads.
-            session.write("TRAC1:TYPE WRIT")
+            self._prepare_trace_a()
             # Do not probe TRAC:TYPE? here. Although documented for Spectrum
             # Analyzer mode, MS2830A firmware can leave the query unanswered
             # in measurement applications where trace-type control is not
@@ -1094,6 +1250,7 @@ class AnritsuAdapter(DeviceAdapter):
                 # The MS2830A command explicitly selects Continuous mode and
                 # starts continuous measurement.
                 session.write("INIT:MODE:CONT")
+            self._check_scpi_errors(session, "Live preparation (TRAC1:TYPE WRIT / INIT:MODE:CONT)")
         self._live = True
         return snapshot
 
@@ -1122,7 +1279,16 @@ class AnritsuAdapter(DeviceAdapter):
                 "the current profile permits Live/Fetch only."
             )
         session = self._require_session()
-        self._enter_spectrum_mode_with_rf_off()
+        if "SPECT" not in session.query("INST?").strip().upper():
+            raise SafetyViolation("Single spectrum acquisition requires an explicit Spectrum Analyzer configuration first.")
+        self._ensure_acquisition_remote()
+        self._check_scpi_errors(session, "before single-sweep preparation")
+        # A fresh acquisition must update Trace A, including when the previous
+        # display mode was VIEW/hold. Use the same trace-specific preparation
+        # as Live; TRAC:TYPE? times out on the target MS2830A and must not be
+        # probed (or retried after a timeout). This prepares the acquisition
+        # buffer without changing the operator's RF/bandwidth settings.
+        self._prepare_trace_a()
         # MS2830A Spectrum Analyzer Remote Control, section 2.7 documents this
         # exact pair for a single measurement. INIT:MODE:SING both selects
         # Single and starts the sweep; *WAI holds the following command until
@@ -1142,8 +1308,8 @@ class AnritsuAdapter(DeviceAdapter):
         timeout = deadline_s
         if timeout is None:
             timeout = parse_quantity(self._settings.acquisition.operation_complete_timeout, DIMENSION_TIME).si_value
-        if timeout <= 0:
-            raise SafetyViolation("Anritsu acquisition deadline must be positive.")
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise SafetyViolation("Anritsu acquisition deadline must be finite and positive.")
         session = self._require_session()
         deadline = time.monotonic() + timeout
         original_timeout_ms = session.timeout
@@ -1154,9 +1320,12 @@ class AnritsuAdapter(DeviceAdapter):
                     raise DeviceError("Timed out waiting for the Anritsu single sweep to complete.")
                 # The VISA call itself must not outlive the application-level
                 # deadline. Some backends reject a zero-millisecond timeout.
-                session.timeout = max(1, min(original_timeout_ms, int(remaining * 1000)))
+                # *WAI queues this query behind the entire sweep. Its response
+                # needs the acquisition budget, not the shorter ordinary I/O budget.
+                session.timeout = max(1, int(remaining * 1000))
                 response = session.query("INIT:SWP?").strip()
                 if response in {"0", "+0"}:
+                    self._check_scpi_errors(session, "INIT:MODE:SING / *WAI / INIT:SWP?")
                     self._state = DeviceState.VERIFIED
                     return
                 if response not in {"1", "+1"}:
@@ -1164,8 +1333,11 @@ class AnritsuAdapter(DeviceAdapter):
                         f"Anritsu returned invalid INIT:SWP? response {response!r}."
                     )
                 time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-        except Exception:
-            self.emergency_off()
+        except Exception as exc:
+            try:
+                self.abort_acquisition()
+            except Exception as abort_error:
+                exc.add_note(f"Anritsu acquisition abort also failed: {abort_error}")
             raise
         finally:
             session.timeout = original_timeout_ms
@@ -1173,15 +1345,34 @@ class AnritsuAdapter(DeviceAdapter):
     def acquire_single_sweep(
         self,
         trace: str = "TRAC1",
+        *,
+        timeout_s: float | None = None,
+        restore_continuous: bool = True,
     ) -> SpectrumTrace:
-        """Synchronise, then fetch one trace that belongs to this checkpoint."""
+        """Synchronise one trace; recipes keep Single between checkpoints."""
 
         trace = validate_anritsu_trace_name(trace)
+        if timeout_s is not None and (
+            type(timeout_s) not in (int, float) or not math.isfinite(timeout_s) or timeout_s <= 0
+        ):
+            raise SafetyViolation("Anritsu acquisition timeout must be finite and positive.")
         started = datetime.now(timezone.utc)
+        session = self._require_session()
+        if type(restore_continuous) is not bool:
+            raise SafetyViolation("Anritsu restore_continuous must be a boolean.")
+        continuous_before = (
+            self._parse_switch(session.query("INIT:CONT?"), "continuous acquisition")
+            if restore_continuous else False
+        )
         self.start_single_sweep()
-        self.wait_complete()
+        self.wait_complete(deadline_s=timeout_s)
         completed = datetime.now(timezone.utc)
         result = self.fetch_trace(trace)
+        if continuous_before:
+            session.write("INIT:MODE:CONT")
+            if not self._parse_switch(session.query("INIT:CONT?"), "continuous acquisition"):
+                raise DeviceError("Anritsu did not restore the confirmed Continuous acquisition mode.")
+            self._check_scpi_errors(session, "restoring Continuous acquisition")
         self._acquisition_sequence += 1
         return replace(
             result,
@@ -1208,22 +1399,14 @@ class AnritsuAdapter(DeviceAdapter):
         return self._read_ascii_trace(session, trace, prepare_ascii=True)
 
     def fetch_current_trace_fast(self, trace: str = "TRAC1") -> SpectrumTrace:
-        """Read the currently displayed trace at maximum speed using binary transfer and cached axis."""
+        """Read a binary trace with a freshly verified axis; cache only axis allocation."""
 
         trace = validate_anritsu_trace_name(trace)
         self._assert_acquisition_allowed()
         session = self._require_session()
-        if (
-            self._cached_grid is not None
-            and self._cached_grid[0] > 0
-            and self._cached_grid[1] > self._cached_grid[0]
-            and self._cached_grid[2] >= 2
-        ):
-            start_hz, stop_hz, points, _ = self._cached_grid
-        else:
-            points = int(float(session.query("SWE:POIN?")))
-            start_hz = float(session.query("FREQ:STAR?"))
-            stop_hz = float(session.query("FREQ:STOP?"))
+        points = AnritsuAdapter._parse_integer(session.query("SWE:POIN?"), "sweep point count", minimum=2)
+        start_hz = float(session.query("FREQ:STAR?"))
+        stop_hz = float(session.query("FREQ:STOP?"))
         return self._read_binary_trace(
             session, trace, points=points, start_hz=start_hz, stop_hz=stop_hz
         )
@@ -1237,11 +1420,30 @@ class AnritsuAdapter(DeviceAdapter):
         start_hz: float,
         stop_hz: float,
     ) -> SpectrumTrace:
-        session.write("FORM REAL,32")
-        session.write("FORM:BORD SWAP")
+        # Verify transfer state, but do not reprogram it at every Live tick.
+        # Querying also detects another client changing byte order or ASCII mode.
+        self._check_scpi_errors(session, "before binary trace transfer")
+        format_changed = session.query("FORM?").strip().upper() != "REAL,32"
+        if format_changed:
+            session.write("FORM REAL,32")
+        border_changed = session.query("FORM:BORD?").strip().upper() != "SWAP"
+        if border_changed:
+            session.write("FORM:BORD SWAP")
+        self._check_scpi_errors(session, "binary transfer setup (FORM / FORM:BORD)")
+        if format_changed and session.query("FORM?").strip().upper() != "REAL,32":
+            raise DeviceError("Anritsu did not confirm REAL,32 transfer format.")
+        if border_changed and session.query("FORM:BORD?").strip().upper() != "SWAP":
+            raise DeviceError("Anritsu did not confirm SWAP transfer byte order.")
         raw_values = session.query_binary_values(
             f"TRAC? {trace}", datatype="f", is_big_endian=False
         )
+        self._check_scpi_errors(session, "binary TRAC? " + trace)
+        points_after = self._parse_integer(session.query("SWE:POIN?"), "sweep point count", minimum=2)
+        start_after = float(session.query("FREQ:STAR?"))
+        stop_after = float(session.query("FREQ:STOP?"))
+        if (points_after, start_after, stop_after) != (points, start_hz, stop_hz):
+            self._cached_grid = None
+            raise DeviceError("Anritsu frequency grid changed during binary trace acquisition.")
         values = tuple(float(v) for v in raw_values)
         if len(values) != points:
             raise DeviceError(
@@ -1285,40 +1487,10 @@ class AnritsuAdapter(DeviceAdapter):
         *,
         timeout_s: float = 5.0,
     ) -> SpectrumTrace:
-        """Acquire a newly completed spectrum frame from the continuous pipeline at high speed."""
-
-        trace = validate_anritsu_trace_name(trace)
-        self._assert_acquisition_allowed()
-        session = self._require_session()
-        self._enter_spectrum_mode_with_rf_off()
-
-        session.write("TRAC1:TYPE WRIT")
-        continuous_resp = session.query("INIT:CONT?").strip().upper()
-        if continuous_resp not in {"1", "+1", "ON"}:
-            session.write("INIT:MODE:CONT")
-            time.sleep(0.05)
-
-        points = int(float(session.query("SWE:POIN?")))
-        start_hz = float(session.query("FREQ:STAR?"))
-        stop_hz = float(session.query("FREQ:STOP?"))
-
-        try:
-            first = self._read_binary_trace(
-                session, trace, points=points, start_hz=start_hz, stop_hz=stop_hz
-            )
-            deadline = time.monotonic() + timeout_s
-            first_sig = (first.powers_dbm[0], first.powers_dbm[-1], first.powers_dbm[points // 2])
-            while time.monotonic() < deadline:
-                time.sleep(0.03)
-                candidate = self._read_binary_trace(
-                    session, trace, points=points, start_hz=start_hz, stop_hz=stop_hz
-                )
-                cand_sig = (candidate.powers_dbm[0], candidate.powers_dbm[-1], candidate.powers_dbm[points // 2])
-                if cand_sig != first_sig or candidate.powers_dbm != first.powers_dbm:
-                    return candidate
-            return first
-        except Exception:
-            return self.fetch_current_trace(trace)
+        """Acquire a proven new sweep; never substitute an old continuous buffer."""
+        if type(timeout_s) not in (int, float) or not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise SafetyViolation("Anritsu acquisition timeout must be finite and positive.")
+        return self.acquire_single_sweep(trace, timeout_s=timeout_s)
 
     @staticmethod
     def _read_ascii_trace(
@@ -1330,19 +1502,22 @@ class AnritsuAdapter(DeviceAdapter):
         try:
             start_before = float(session.query("FREQ:STAR?"))
             stop_before = float(session.query("FREQ:STOP?"))
-            points = int(float(session.query("SWE:POIN?")))
-            # Match the working external MS2830A library exactly: request the
-            # current point count, select ASCII transfer, then immediately read
-            # TRAC1. FORM ASC changes only the response representation; it does
-            # not trigger, stop, or reconfigure the analyser measurement.
-            if prepare_ascii:
+            points = AnritsuAdapter._parse_integer(session.query("SWE:POIN?"), "sweep point count", minimum=2)
+            # Check transfer state rather than rewriting ASCII at every point.
+            # The format can change after Live or another instrument client.
+            AnritsuAdapter._check_scpi_errors(session, "before ASCII trace transfer")
+            if prepare_ascii and session.query("FORM?").strip().upper().split(",", 1)[0] != "ASC":
                 session.write("FORM ASC")
+                AnritsuAdapter._check_scpi_errors(session, "ASCII FORM ASC preparation")
+                if session.query("FORM?").strip().upper().split(",", 1)[0] != "ASC":
+                    raise DeviceError("Anritsu did not confirm ASCII transfer format.")
             raw = session.query(f"TRAC? {trace}")
+            AnritsuAdapter._check_scpi_errors(session, "ASCII FORM ASC / TRAC? " + trace)
             values = tuple(float(item) for item in raw.split(",") if item.strip())
             # Read the axis again after the trace transfer to guarantee temporal coherence
             start_after = float(session.query("FREQ:STAR?"))
             stop_after = float(session.query("FREQ:STOP?"))
-            points_after = int(float(session.query("SWE:POIN?")))
+            points_after = AnritsuAdapter._parse_integer(session.query("SWE:POIN?"), "sweep point count", minimum=2)
         except (TypeError, ValueError) as exc:
             raise DeviceError("Anritsu returned an invalid trace response.") from exc
         if not (

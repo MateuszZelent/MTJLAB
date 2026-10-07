@@ -82,7 +82,7 @@ def test_csv_export(tmp_path: Path):
     assert "# Sense Mode: Local (2-wire)" in content
     assert "# Compliance Policy: stop" in content
     assert "# NPLC: 1.0" in content
-    assert "# Source Autorange: True" in content
+    assert "# Source Autorange: False" in content
     assert "# Measure Voltage Autorange: True" in content
     assert "# Measure Current Autorange: True" in content
     assert "# Completion Status: completed" in content
@@ -229,7 +229,7 @@ def test_pdf_report_and_commentary_strictly_english(tmp_path: Path):
     assert "zero-bias resistance" in commentary_i
     assert "compliance limit" in commentary_i
     assert "saturation threshold" in commentary_i
-    assert "dielectric breakdown" in commentary_i
+    assert "does not establish that the sample remained undamaged" in commentary_i
     assert "clamped points" in commentary_i
 
     # 2. Clamped voltage mode
@@ -266,8 +266,7 @@ def test_pdf_report_and_commentary_strictly_english(tmp_path: Path):
     params_v_clamp = KeithleyCharacterizationAnalyzer.analyze(dataset_v_clamp)
     commentary_v = KeithleyPdfReportGenerator._generate_commentary(dataset_v_clamp, params_v_clamp)
 
-    assert "thermal degradation" in commentary_v
-    assert "electromigration" in commentary_v
+    assert "does not establish that the sample remained undamaged" in commentary_v
     assert "compliance threshold" in commentary_v
 
     # 3. Unclamped linear ohmic response
@@ -304,8 +303,8 @@ def test_pdf_report_and_commentary_strictly_english(tmp_path: Path):
     params_ohmic = KeithleyCharacterizationAnalyzer.analyze(dataset_ohmic)
     commentary_ohmic = KeithleyPdfReportGenerator._generate_commentary(dataset_ohmic, params_ohmic)
 
-    assert "high ohmic linearity" in commentary_ohmic
-    assert "zero compliance clamping" in commentary_ohmic
+    assert "Measured-data linearity" in commentary_ohmic
+    assert "Compliance was not detected in these recorded points" in commentary_ohmic
 
     # Disallow Polish vocabulary across all generated commentary
     polish_keywords = ["prąd", "napięcie", "odrzucenie", "kanał", "bezpieczeństwo", "próbka", "rezystancja", "zabezpieczen"]

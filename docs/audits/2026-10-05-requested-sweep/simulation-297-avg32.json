@@ -1,0 +1,14 @@
+{
+  "simulation": true,
+  "points": 297,
+  "signal_raw_sweeps": 9504,
+  "bins": 10001,
+  "background_sweeps": 898,
+  "background_minimum_duration_s": 30,
+  "waits_s": 5,
+  "point_waits_bypassed_in_simulation": true,
+  "pythat_valid": true,
+  "archive_sha256": "a80dbbc3a112323f6601b44b51d76dd2944f92773db48f34764e06771f7f93d6",
+  "archive_bytes": 996391924,
+  "runtime_s": 443.76494320016354
+}

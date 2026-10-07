@@ -9,10 +9,9 @@ from unittest.mock import MagicMock
 
 import h5py
 import pytest
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QEvent, QTimer
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
 
 from app.devices.anritsu_ms2830a import AnritsuAdapter
 from app.devices.anritsu_ms2830a.module import MODULE
@@ -20,12 +19,13 @@ from app.devices.anritsu_ms2830a.ui.page import AnritsuPage, AnritsuPageState
 from app.devices.simulators import SimulatedVisaFactory
 from app.ui.design_system import apply_application_theme
 from tests.helpers import simulation_settings
+from tests.shell_test_isolation import shell_qt_application as shell_qt_application  # noqa: PLC0414
 from tests.test_spectrum_correction_controller import wait_until
 
 
 @pytest.fixture
-def setup(tmp_path):
-    app = QApplication.instance() or QApplication([])
+def setup(tmp_path, shell_qt_application):
+    app = shell_qt_application
     font = Path("C:/Windows/Fonts/segoeui.ttf")
     if font.exists():
         QFontDatabase.addApplicationFont(str(font))
@@ -68,8 +68,9 @@ def setup(tmp_path):
     if page.correction_workspace.running:
         page.correction_workspace.stop_acquisition()
     wait_until(app, lambda: not page.correction_workspace.running, timeout=15)
-    page.close()
+    wait_until(app, page.close, timeout=15)
     page.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
     adapter.disconnect()
 
@@ -99,7 +100,7 @@ def test_background_setup_returns_to_main_and_live_starts_only_on_request(setup,
     assert path.exists()
     if start_live:
         assert requests[before] == "stop_live"
-    assert "read_full_configuration" in requests[before:]
+    assert "read_acquisition_configuration" in requests[before:]
     assert "single_sweep" in requests[before:]
     assert "start_live" not in requests[before:]
     with h5py.File(path, "r") as archive:
@@ -129,6 +130,25 @@ def test_cancelled_background_does_not_start_corrected_live(setup):
     assert page._background_assistant is None
     assert page.correction_workspace._kind == "reference"
     assert not page.correction_workspace.acquire_signal.isEnabled()
+
+
+def test_fault_holds_workflow_until_archive_close_and_does_not_retry_failed_close(setup, monkeypatch):
+    _app, page, _requests, _errors = setup
+    workspace = page.correction_workspace
+    stop = MagicMock()
+    monkeypatch.setattr(workspace._cpu, "stop_session", stop)
+    workspace._failed("single_sweep", "Injected transport failure")
+    assert workspace.running and workspace._stopping
+    assert not workspace.acquire_reference.isEnabled()
+    stop.assert_called_once_with("faulted")
+    workspace._processed("reference", object())
+    stop.assert_called_once_with("faulted")
+    workspace._processed("stop", None)
+    assert not workspace.running
+    assert workspace._recording_failed
+    workspace._failed("stop", "Injected close failure")
+    stop.assert_called_once_with("faulted")
+    assert not workspace.running
 
 
 @pytest.mark.parametrize("source_state", ["disconnected", "on", "off"])
@@ -180,6 +200,7 @@ def test_background_does_not_add_a_keithley_off_gate_to_normal_permission_checks
 
     station = SimpleNamespace(
         _leased_run_devices=set(), _audit_healthy=True, _require_permission=MagicMock(),
+        _refresh_audit_health=MagicMock(),
         anritsu_page=SimpleNamespace(_background_assistant=SimpleNamespace(phase="collecting")),
     )
     for operation, payload in (("set_output", ("A", True)), ("set_output_group", (("A", "B"), True)), ("quick_setpoint", None)):
@@ -211,7 +232,7 @@ def test_failed_recollection_does_not_reuse_old_background(setup):
     dialog.next.click()
     wait_until(app, lambda: dialog.phase == "failed")
     assert page.correction_workspace._profile is previous_profile
-    assert requests == ["read_full_configuration"]
+    assert requests == ["read_acquisition_configuration"]
     assert not dialog.next.isEnabled()
     assert not list(dialog.directory.glob("corrected_live_*.h5"))
     assert "Injected connection failure" in dialog.status.text()

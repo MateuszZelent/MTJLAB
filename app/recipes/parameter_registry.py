@@ -128,6 +128,8 @@ _DESCRIPTORS: Final[tuple[ParameterDescriptor, ...]] = (
             ("frequency", "Frequency", DIMENSION_FREQUENCY, "Hz"),
             ("high_level", "High level", DIMENSION_VOLTAGE, "V"),
             ("low_level", "Low level", DIMENSION_VOLTAGE, "V"),
+            ("amplitude", "Amplitude", DIMENSION_VOLTAGE, "V"),
+            ("offset", "Offset", DIMENSION_VOLTAGE, "V"),
         )
     ),
     ParameterDescriptor(
@@ -183,6 +185,27 @@ def parameter_descriptor(axis_target: str) -> ParameterDescriptor:
         raise KeyError(f"Unknown sweep target {axis_target!r}; allowed: {allowed}.") from exc
 
 
+def persisted_quantity_unit(key: str) -> str:
+    """Canonical units for registered axes and explicit measurement suffixes.
+
+    Flags and unknown scalars stay dimensionless. A substring within a word,
+    such as '_a' in 'ascending', never determines scientific units.
+    """
+    descriptor = PARAMETERS_BY_TARGET.get(key)
+    if descriptor is not None:
+        return descriptor.unit
+    leaf = key.rsplit(".", 1)[-1].lower()
+    suffixes = {
+        "hz": "Hz", "a": "A", "v": "V", "w": "W", "ohm": "Ω",
+        "s": "s", "t": "T", "dbm": "dBm", "db": "dB",
+    }
+    if "_" in leaf:
+        suffix = leaf.rsplit("_", 1)[-1]
+        if suffix in suffixes:
+            return suffixes[suffix]
+    return {"nplc": "PLC", "duration": "s", "settling_time": "s"}.get(leaf, "")
+
+
 def legacy_ui_parameter_definitions() -> tuple[dict[str, str], ...]:
     """Return the legacy picker surface without duplicating registry data."""
 
@@ -207,9 +230,13 @@ def legacy_ui_parameter_definitions() -> tuple[dict[str, str], ...]:
                 "rigol.1.frequency",
                 "rigol.1.high_level",
                 "rigol.1.low_level",
+                "rigol.1.amplitude",
+                "rigol.1.offset",
                 "rigol.2.frequency",
                 "rigol.2.high_level",
                 "rigol.2.low_level",
+                "rigol.2.amplitude",
+                "rigol.2.offset",
                 "anritsu.sg.frequency",
                 "anritsu.sg.power",
                 "anritsu.spectrum.start_frequency",

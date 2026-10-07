@@ -63,7 +63,7 @@ class MemoryWriter:
         self.recipe_sweeps.append(record)
         return len(self.recipe_sweeps) - 1
 
-    def append(self, point: object, trace: object = None) -> int:
+    def append(self, point: object, trace: object = None, *, device_states=None) -> int:
         self.points.append((point, trace))
         return len(self.points) - 1
 
@@ -86,6 +86,14 @@ class ShutdownProbe:
             self.state = DeviceState.UNKNOWN
             raise OSError("injected shutdown failure")
         self.state = DeviceState.OUTPUT_OFF
+
+    def abort_acquisition(self) -> bool:
+        self.calls += 1
+        if self.fail:
+            self.state = DeviceState.UNKNOWN
+            raise OSError("injected abort failure")
+        self.state = DeviceState.VERIFIED
+        return True
 
 
 @dataclass
@@ -306,6 +314,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             0,
             "dry-run-output-guard-failure",
             "schema_version: 1\n",
+            required_devices=frozenset({"rigol", "keithley", "anritsu"}),
         )
 
         result = RecipeRunner(
@@ -320,7 +329,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertIn("could not confirm all outputs OFF", result.error or "")
         self.assertGreaterEqual(rigol.calls, 2)
         self.assertGreaterEqual(keithley.calls, 2)
-        self.assertGreaterEqual(anritsu.calls, 2)
+        self.assertEqual(anritsu.calls, 1)  # acquisition abort, no RF output guard
         self.assertEqual(writer.status, "faulted")
 
     def test_moke_hall_action_stores_voltage_and_derived_field_checkpoint(self) -> None:
@@ -608,7 +617,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         anritsu_session = FakeVisaSession(
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
-                "*OPT?": "020",
+                "SYST:HARD:OPT:CAT?": "1,020,ON,Option 020",
                 "OUTP?": "0",
             }
         )
@@ -1785,7 +1794,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 50e-3,
                 nplc=0.5,
                 settle_time_s=0.2,
-                sense_mode="4wire",
+                sense_mode="2wire",
                 source_autorange=False,
                 source_range_si=1e-3,
                 measure_voltage_autorange=False,
@@ -1858,7 +1867,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 500e-6,
                 50e-3,
                 nplc=0.5,
-                sense_mode="4wire",
+                sense_mode="2wire",
                 source_autorange=False,
                 source_range_si=1e-3,
                 measure_voltage_autorange=False,
@@ -1920,7 +1929,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(channel_a.source_level_si, 500e-6)
         self.assertEqual(channel_a.compliance_si, 50e-3)
         self.assertEqual(channel_a.source_range_si, 1e-3)
-        self.assertEqual(channel_a.sense_mode, "4wire")
+        self.assertEqual(channel_a.sense_mode, "2wire")
         self.assertEqual(channel_a.nplc, 0.5)
         self.assertEqual(channel_a.source_delay_s, 0.003)
         self.assertIsNone(channel_a.measure_delay_s)
@@ -2153,7 +2162,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             writer=writer,  # type: ignore[arg-type]
         ).run(plan)
 
-        self.assertEqual((keithley.calls, rigol.calls, anritsu.calls), (2, 2, 2))
+        self.assertEqual((keithley.calls, rigol.calls, anritsu.calls), (2, 2, 1))
         self.assertEqual(result.state, ApplicationState.FAULT)
         self.assertEqual(writer.status, "faulted")
         self.assertTrue(any(name == "shutdown_error" for name, _data, _severity in writer.events))
@@ -2248,7 +2257,7 @@ finally: []
         self.assertGreaterEqual(elapsed, 1.95)
         self.assertLess(elapsed, 3.0)
 
-    def test_any_recipe_shutdown_attempts_all_station_outputs(self) -> None:
+    def test_recipe_shutdown_ignores_foreign_devices_in_legacy_manifest(self) -> None:
         keithley = ShutdownProbe()
         rigol = ShutdownProbe()
         anritsu = ShutdownProbe()
@@ -2276,9 +2285,9 @@ finally: []
         ).run(plan)
 
         self.assertEqual(result.state, ApplicationState.SAFE)
-        self.assertEqual((keithley.calls, rigol.calls, anritsu.calls), (1, 1, 1))
+        self.assertEqual((keithley.calls, rigol.calls, anritsu.calls), (0, 0, 0))
 
-    def test_faulted_single_device_recipe_also_attempts_all_station_outputs(self) -> None:
+    def test_faulted_single_device_recipe_only_shuts_down_its_device(self) -> None:
         keithley = ShutdownProbe()
         rigol = ShutdownProbe()
         anritsu = ShutdownProbe()
@@ -2300,7 +2309,7 @@ finally: []
         ).run(plan)
 
         self.assertEqual(result.state, ApplicationState.FAULT)
-        self.assertEqual((keithley.calls, rigol.calls, anritsu.calls), (1, 1, 1))
+        self.assertEqual((keithley.calls, rigol.calls, anritsu.calls), (0, 0, 1))
 
     def test_fault_runs_pending_finally_before_independent_station_shutdown(self) -> None:
         from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings
@@ -2346,7 +2355,7 @@ finally: []
             names.index("shutdown_action_started"),
         )
         self.assertEqual(keithley.state, DeviceState.OUTPUT_OFF)
-        self.assertEqual((rigol.calls, anritsu.calls), (1, 1))
+        self.assertEqual((rigol.calls, anritsu.calls), (0, 0))
 
     def test_runner_executes_hashed_shutdown_manifest_in_declared_order(self) -> None:
         keithley = ShutdownProbe()
@@ -2356,7 +2365,7 @@ finally: []
         manifest = (
             "rigol.outputs_off",
             "keithley.outputs_off",
-            "anritsu.rf_off_and_abort",
+            "anritsu.abort_acquisition",
             "storage.flush_checkpoint",
         )
         plan = ExecutionPlan(
@@ -2382,15 +2391,15 @@ finally: []
             if name == "shutdown_action_started"
         )
         self.assertEqual(result.state, ApplicationState.SAFE)
-        self.assertEqual(started, manifest)
-        self.assertEqual((rigol.calls, keithley.calls, anritsu.calls), (1, 1, 1))
+        self.assertEqual(started, tuple(action for action in manifest if not action.startswith("anritsu.")))
+        self.assertEqual((rigol.calls, keithley.calls, anritsu.calls), (1, 1, 0))
 
     def test_anritsu_live_trace_has_inclusive_frequency_axis(self) -> None:
         values = ",".join(str(-50 + index / 100) for index in range(101))
         session = FakeVisaSession(
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
-                "*OPT?": "041,008",
+                "SYST:HARD:OPT:CAT?": "2,041,ON,Option 041,008,ON,Option 008",
                 "INST?": "SPECT",
                 "FREQ:STAR?": "1000000",
                 "FREQ:STOP?": "2000000",
@@ -2462,7 +2471,7 @@ finally: []
         session = FakeVisaSession(
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
-                "*OPT?": "041,008",
+                "SYST:HARD:OPT:CAT?": "2,041,ON,Option 041,008,ON,Option 008",
                 "INST?": "SPECT",
                 "FREQ:STAR?": "1000000",
                 "FREQ:STOP?": "4000000000",
@@ -2486,7 +2495,8 @@ finally: []
             session.writes,
             [
                 "*IDN?",
-                "*OPT?",
+                "SYST:LANG?",
+                "SYST:HARD:OPT:CAT?",
                 "INST?",
                 "FREQ:STAR?",
                 "FREQ:STOP?",
@@ -2522,7 +2532,7 @@ finally: []
         self.assertEqual(len(trace.powers_dbm), 101)
         self.assertTrue(adapter.live)
         mutations = [command for command in session.writes if "?" not in command]
-        self.assertEqual(mutations, ["FORM ASC"])
+        self.assertEqual(mutations, [])
 
     def test_anritsu_live_enables_continuous_measurement_without_stopping_front_panel(self) -> None:
         session = FakeVisaSession(
@@ -2639,11 +2649,11 @@ finally: []
         self.assertFalse(adapter.set_signal_generator_output(False))
         self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
 
-    def test_anritsu_connect_and_disconnect_prove_optional_sg_output_off(self) -> None:
+    def test_anritsu_connect_and_disconnect_leave_unowned_sg_untouched(self) -> None:
         session = FakeVisaSession(
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
-                "*OPT?": "020",
+                "SYST:HARD:OPT:CAT?": "1,020,ON,Option 020",
                 "OUTP?": "0",
             }
         )
@@ -2654,23 +2664,23 @@ finally: []
 
         adapter.connect()
         self.assertEqual(
-            session.writes[:7],
-            ["*IDN?", "*OPT?", "INST SG", "OUTP 0", "OUTP?", "INST SPECT",],
+            session.writes,
+            ["*IDN?", "SYST:LANG?", "SYST:HARD:OPT:CAT?"],
         )
         session.writes.clear()
 
         adapter.disconnect()
         self.assertEqual(
             session.writes,
-            ["INST SG", "OUTP 0", "OUTP?", "INST SPECT", "ABORT"],
+            [],
         )
         self.assertEqual(adapter.state, DeviceState.DISCONNECTED)
 
-    def test_anritsu_connect_fails_closed_when_optional_sg_will_not_turn_off(self) -> None:
+    def test_anritsu_connect_does_not_query_or_change_unowned_sg(self) -> None:
         session = FakeVisaSession(
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
-                "*OPT?": "020",
+                "SYST:HARD:OPT:CAT?": "1,020,ON,Option 020",
                 "OUTP?": "1",
             }
         )
@@ -2679,11 +2689,10 @@ finally: []
             session_factory=FakeVisaSessionFactory(session),
         )
 
-        with self.assertRaisesRegex(DeviceError, "did not confirm RF OUTPUT OFF"):
-            adapter.connect()
-
-        self.assertEqual(adapter.state, DeviceState.DISCONNECTED)
-        self.assertIsNone(adapter.identity)
+        adapter.connect()
+        self.assertEqual(session.writes, ["*IDN?", "SYST:LANG?", "SYST:HARD:OPT:CAT?"])
+        self.assertEqual(adapter.state, DeviceState.VERIFIED)
+        adapter.disconnect()
 
     def test_anritsu_connect_enforces_profile_required_hardware_options(self) -> None:
         raw = simulation_settings(anritsu_enabled=False).model_dump(mode="python")
@@ -2691,7 +2700,7 @@ finally: []
         session = FakeVisaSession(
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
-                "*OPT?": "041",
+                "SYST:HARD:OPT:CAT?": "1,041,ON,Option 041",
             }
         )
         adapter = AnritsuAdapter(
@@ -2835,11 +2844,13 @@ root:
         )
         anritsu.connect()
         writer = MemoryWriter()
+        rigol = RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol"))
+        keithley = KeithleyAdapter(settings, session_factory=SimulatedVisaFactory("keithley"))
+        rigol.connect()
+        keithley.connect()
         result = RecipeRunner(
-            rigol=RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol")),
-            keithley=KeithleyAdapter(
-                settings, session_factory=SimulatedVisaFactory("keithley")
-            ),
+            rigol=rigol,
+            keithley=keithley,
             anritsu=anritsu,
             writer=writer,  # type: ignore[arg-type]
         ).run(plan)
@@ -2893,11 +2904,13 @@ finally:
         )
         anritsu.connect()
         writer = MemoryWriter()
+        rigol = RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol"))
+        keithley = KeithleyAdapter(settings, session_factory=SimulatedVisaFactory("keithley"))
+        rigol.connect()
+        keithley.connect()
         result = RecipeRunner(
-            rigol=RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol")),
-            keithley=KeithleyAdapter(
-                settings, session_factory=SimulatedVisaFactory("keithley")
-            ),
+            rigol=rigol,
+            keithley=keithley,
             anritsu=anritsu,
             writer=writer,  # type: ignore[arg-type]
         ).run(plan)
@@ -2988,6 +3001,8 @@ root:
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
                 "INST?": "SPECT",
                 "INIT:SWP?": "0",
+                "INIT:CONT?": "1",
+                "TRAC:TYPE?": "WRIT",
                 "FREQ:STAR?": "1000000",
                 "FREQ:STOP?": "2000000",
                 "SWE:POIN?": "101",
@@ -3004,6 +3019,8 @@ root:
         wait = commands.index("*WAI")
         status = commands.index("INIT:SWP?")
         trace = commands.index("TRAC? TRAC1")
+        self.assertNotIn("TRAC:TYPE?", commands)
+        self.assertLess(commands.index("TRAC1:TYPE WRIT"), single)
         self.assertLess(single, wait)
         self.assertLess(wait, status)
         self.assertLess(status, trace)
@@ -3518,7 +3535,7 @@ root:
                 "current",
                 0.001,
                 0.067,
-                sense_mode="4wire",
+                sense_mode="2wire",
                 source_autorange=False,
                 source_range_si=0.01,
                 measure_voltage_autorange=False,
@@ -3530,7 +3547,7 @@ root:
         self.assertIn("smub.source.autorangei = smub.AUTORANGE_OFF", session.writes)
         self.assertIn("smub.source.rangei = 0.01", session.writes)
         self.assertIn("smub.measure.rangev = 0.067", session.writes)
-        self.assertIn("smub.sense = smub.SENSE_REMOTE", session.writes)
+        self.assertIn("smub.sense = smub.SENSE_LOCAL", session.writes)
         self.assertNotIn("smub.sense = smub.SENSE_4WIRE", session.writes)
 
     def test_keithley_two_wire_uses_documented_2602a_local_sense_constant(self) -> None:
@@ -3567,13 +3584,13 @@ root:
                 "measure_only",
                 0,
                 0,
-                sense_mode="4wire",
+                sense_mode="2wire",
                 measure_voltage_autorange=False,
                 measure_voltage_range_si=0.067,
              source_range_si=None)
         )
         self.assertIn("smub.measure.rangev = 0.067", session.writes)
-        self.assertIn("smub.sense = smub.SENSE_REMOTE", session.writes)
+        self.assertIn("smub.sense = smub.SENSE_LOCAL", session.writes)
         self.assertNotIn("smub.sense = smub.SENSE_4WIRE", session.writes)
         self.assertNotIn("smub.source.rangev =", "\n".join(session.writes))
         with self.assertRaises(SafetyViolation):
@@ -3599,16 +3616,12 @@ root:
         adapter = RigolAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
         adapter.configure_channel(RigolChannelConfig(1, "SQU", 1000, .001, -.001))
+        before_enable = len(session.writes)
         self.assertTrue(adapter.set_output(1, True))
-        output_on_index = session.writes.index(":OUTP1 ON")
-        for command in (
-            ":OUTP1:LOAD INF",
-            ":OUTP1:POL NORM",
-            ":OUTP1:MODE NORM",
-            ":OUTP1:SYNC OFF",
-        ):
-            self.assertIn(command, session.writes)
-            self.assertLess(session.writes.index(command), output_on_index)
+        self.assertEqual(
+            [command for command in session.writes[before_enable:] if "?" not in command],
+            [":OUTP1 OFF", ":OUTP1 ON"],
+        )
 
     def test_runner_stores_one_checkpoint_for_a_spectrum(self) -> None:
         rigol_session = FakeVisaSession(
@@ -3640,6 +3653,7 @@ root:
                 "SWE:POIN?": "101",
                 "TRAC? TRAC1": values,
                 "INIT:SWP?": "0",
+                "TRAC:TYPE?": "WRIT",
                 "FREQ:CENT?": "1500000", "FREQ:SPAN?": "1000000",
                 "BAND:AUTO?": "1", "BAND?": "10000",
                 "BAND:VID:AUTO?": "1", "BAND:VID:MODE?": "VID", "BAND:VID?": "10000",

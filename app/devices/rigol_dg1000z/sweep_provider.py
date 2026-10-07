@@ -46,6 +46,8 @@ class RigolSweepProvider:
             "carrier.frequency": (f"rigol.{channel}.frequency", DIMENSION_FREQUENCY),
             "carrier.high_level": (f"rigol.{channel}.high_level", DIMENSION_VOLTAGE),
             "carrier.low_level": (f"rigol.{channel}.low_level", DIMENSION_VOLTAGE),
+            "carrier.amplitude": (f"rigol.{channel}.amplitude", DIMENSION_VOLTAGE),
+            "carrier.offset": (f"rigol.{channel}.offset", DIMENSION_VOLTAGE),
         }
         try:
             target, dimension = targets[parameter_id]
@@ -66,7 +68,7 @@ class RigolSweepProvider:
         if descriptor.device_module != self.module_key or not target.startswith(f"rigol.{channel}."):
             raise ConfigurationError(f"{node.id}: target {target!r} is not owned by Rigol CH{channel}.")
         parameter = target.rsplit(".", 1)[-1]
-        parameter_id = {"frequency": "carrier.frequency", "high_level": "carrier.high_level", "low_level": "carrier.low_level"}.get(parameter)
+        parameter_id = {key: f"carrier.{key}" for key in ("frequency", "high_level", "low_level", "amplitude", "offset")}.get(parameter)
         if parameter_id is None:
             raise ConfigurationError(f"{node.id}: unsupported Rigol target {target!r}.")
         return SweepAxisBinding(f"{node.id}.axis.{parameter_id.replace('.', '-')}", node.id, node.id, self.module_key, str(channel), parameter_id, target, descriptor.dimension, (), ())
@@ -74,6 +76,11 @@ class RigolSweepProvider:
     def validate_binding(self, node: RecipeNode, binding: SweepAxisBinding) -> None:
         if binding.device_module != self.module_key or binding.endpoint != str(self._channel(node)):
             raise ConfigurationError(f"{node.id}: Rigol sweep binding endpoint does not match configuration.")
+        expected = self.binding_for_target(node, binding.target)
+        if binding.parameter_id != expected.parameter_id or binding.dimension != expected.dimension:
+            raise ConfigurationError(
+                f"{node.id}: Rigol sweep parameter/dimension does not match target {binding.target!r}."
+            )
 
     def compile_point(self, node: RecipeNode, binding: SweepAxisBinding, value: Quantity, context: Mapping[str, Quantity], settings: StationSettings) -> CompiledAxisSetpoint:
         self.validate_binding(node, binding)
@@ -93,7 +100,7 @@ class RigolSweepProvider:
             # Explicit axes commonly own a configure_rigol child. Use that
             # authored fixed level for the non-swept side of a level pair.
             for child in node.children:
-                if child.type == "configure_rigol":
+                if child.type == "configure_rigol" and self._channel(child) == channel:
                     configuration = child.data
                     break
         def level(target: str, key: str) -> float:
@@ -101,7 +108,9 @@ class RigolSweepProvider:
             if item is not None:
                 item.require_dimension(DIMENSION_VOLTAGE)
                 return item.si_value
-            raw = configuration.get(key, "0 V")
+            raw = configuration.get(key)
+            if raw is None:
+                raise ConfigurationError(f"{node.id}: Rigol level sweep requires an explicit {key} baseline.")
             return parse_quantity(raw, DIMENSION_VOLTAGE).si_value
         if binding.parameter_id == "carrier.frequency":
             applied = quantize_rigol_frequency(value.si_value)
@@ -110,15 +119,21 @@ class RigolSweepProvider:
         low = level(f"rigol.{channel}.low_level", "low_level")
         if binding.parameter_id == "carrier.high_level":
             high = value.si_value
-        else:
+        elif binding.parameter_id == "carrier.low_level":
             low = value.si_value
+        elif binding.parameter_id == "carrier.amplitude":
+            offset = (high + low) / 2
+            high, low = offset + value.si_value / 2, offset - value.si_value / 2
+        else:
+            amplitude = high - low
+            high, low = value.si_value + amplitude / 2, value.si_value - amplitude / 2
         applied_high = quantize_rigol_voltage(high)
         applied_low = quantize_rigol_voltage(low)
         return CompiledAxisSetpoint(
             "update_rigol_levels",
             {"channel": channel, "high_level_v": applied_high, "low_level_v": applied_low},
             value.si_value,
-            applied_high if binding.parameter_id == "carrier.high_level" else applied_low,
+            applied_high if binding.parameter_id == "carrier.high_level" else applied_low if binding.parameter_id == "carrier.low_level" else applied_high - applied_low if binding.parameter_id == "carrier.amplitude" else (applied_high + applied_low) / 2,
         )
 
 

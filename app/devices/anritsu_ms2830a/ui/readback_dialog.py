@@ -303,15 +303,45 @@ class AnritsuReadbackDialog(StationDialog):
         footer_layout.addWidget(self.close_button)
 
         layout.addLayout(footer_layout)
+        self.refresh_form_values(form_values)
+
+    def refresh_form_values(self, form_values: dict[str, Any]) -> None:
+        """Compare against the actual form after its owner handles a request."""
+        self._form_values = dict(form_values)
+        for row, (key, _, _, hardware, _, assignable) in enumerate(self._param_definitions):
+            current = form_values.get(key)
+            compared = key in form_values and not (
+                current is None and (hardware is not None or (key == "vbw_hz" and form_values.get("vbw_auto")))
+            )
+            matches = compared and self._check_match(key, hardware, current)
+            status = self._status_items[key]
+            if not assignable:
+                text = "Info (read-only)"
+            elif not compared:
+                text = "Not compared (automatic or unavailable)"
+            else:
+                text = "MATCH" if matches else self._status_text(key, False, current)
+            color = (QColor("#168a45" if matches else "#c43b3b")
+                     if assignable and compared else self.palette().color(QPalette.ColorRole.PlaceholderText))
+            status.setText(text)
+            status.setToolTip(text)
+            status.setForeground(color)
+            self.table.item(row, 1).setForeground(color)
+            button = self._action_buttons.get(key)
+            if button is not None:
+                button.setEnabled(not matches)
+                button.setText("Matches form" if matches else "Use hardware value")
+        self.table.resizeColumnsToContents()
 
     @staticmethod
     def _check_match(key: str, hw_val: Any, form_val: Any) -> bool:
         if form_val is None:
-            return True
+            return hw_val is None
         if key == "detector":
             return normalize_anritsu_detector(str(hw_val)) == normalize_anritsu_detector(str(form_val))
         if isinstance(hw_val, float) and isinstance(form_val, (float, int)):
-            return math.isclose(hw_val, float(form_val), rel_tol=1e-5, abs_tol=1e-3)
+            return (math.isfinite(hw_val) and math.isfinite(float(form_val))
+                    and math.isclose(hw_val, float(form_val), rel_tol=5e-9, abs_tol=1e-12))
         if isinstance(hw_val, int) and isinstance(form_val, int):
             return hw_val == form_val
         if isinstance(hw_val, bool) and isinstance(form_val, bool):
@@ -339,22 +369,6 @@ class AnritsuReadbackDialog(StationDialog):
 
     def _on_assign(self, key: str, value: Any, row: int) -> None:
         self.assign_requested.emit(key, value)
-        status_item = self._status_items.get(key)
-        if status_item:
-            status_item.setText("MATCH")
-            status_item.setForeground(QColor("#168a45"))
-        btn = self._action_buttons.get(key)
-        if btn:
-            btn.setEnabled(False)
-            btn.setText("Applied")
 
     def _on_use_all(self) -> None:
         self.assign_all_requested.emit(self._readback)
-        for key, status_item in self._status_items.items():
-            if key in self._action_buttons:
-                status_item.setText("MATCH")
-                status_item.setForeground(QColor("#168a45"))
-                btn = self._action_buttons.get(key)
-                if btn:
-                    btn.setEnabled(False)
-                    btn.setText("Applied")

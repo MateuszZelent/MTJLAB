@@ -1,0 +1,83 @@
+# Katalog sprawdzonych okien
+
+64 okna, 256 stan?w renderowania Windows.
+
+- `ActionNodeEditorDialog`
+- `AddHeaderDialog`
+- `AnritsuAcquisitionEditorDialog`
+- `AnritsuNodeEditorDialog`
+- `AnritsuReadbackDialog`
+- `AnritsuSignalGeneratorNodeEditorDialog`
+- `BackgroundCorrectionAssistant`
+- `CatalogueSettingsDialog`
+- `CommentEditorDialog`
+- `DeviceParameterDialog`
+- `ElabFavoritesDialog`
+- `ElabUploadEditorDialog`
+- `FieldScenarioDialog`
+- `FixedValueDialog`
+- `ImageViewerDialog`
+- `InlineAnritsuAdvanced`
+- `InlineAnritsuRecording`
+- `InlineAnritsuReference`
+- `InlineKeithleyAdvanced`
+- `InlineMokeProtocolTrace`
+- `InlineRenumberRows`
+- `InlineSettingsChanges`
+- `InlineUserRoles`
+- `KeithleyLimitProposalDialog`
+- `KeithleyNodeEditorDialog`
+- `KeithleyPlotSettingsDialog`
+- `KeithleyShutdownMethodDialog`
+- `KeithleySweepBuilderDialog`
+- `LakeShoreLiveWindow`
+- `LimitEditDialog`
+- `ManualSpectrumSaveDialog`
+- `ManualStageDialog`
+- `MokeFloatingControlsWindow`
+- `MokeHallLiveWindow`
+- `ObservationDialog`
+- `OutputPolicyDialog`
+- `PeakTableDialog`
+- `PeakTrackingWindow`
+- `PlotScaleDialog`
+- `ProcessingQualityDialog`
+- `QuickControlPicker`
+- `RenameHeaderDialog`
+- `RenumberRowsDialog`
+- `RepeatCountDialog`
+- `RigolNodeEditorDialog`
+- `SampleProgrammingDialog`
+- `SpectrumAnalysisSettingsDialog`
+- `SpectrumDiagnosticDialog`
+- `SpectrumDifferenceDialog`
+- `SpectrumFinalizationResumeDialog`
+- `SpectrumFinalizationSelectionDialog`
+- `SpectrumResonanceDialog`
+- `SpectrumTrainingDialog`
+- `SpectrumValidationDialog`
+- `StationAlertDialog`
+- `StationSettingsGuidanceDialog`
+- `SweepDeviceReadinessDialog`
+- `SweepGeneratorDialog`
+- `SweepTreeDialog`
+- `_AnritsuSpectrogramWindow`
+- `_AnritsuSpectrumWindow`
+- `_AnritsuTraceDiagnosticsDialog`
+- `_KeithleyFloatingPanelWindow`
+- `_KeithleyReadbackDialog`
+
+## Zrzuty zbiorcze
+
+- [light 1](light-1.png)
+- [light 2](light-2.png)
+- [light 3](light-3.png)
+- [light 4](light-4.png)
+- [light 5](light-5.png)
+- [light 6](light-6.png)
+- [dark 1](dark-1.png)
+- [dark 2](dark-2.png)
+- [dark 3](dark-3.png)
+- [dark 4](dark-4.png)
+- [dark 5](dark-5.png)
+- [dark 6](dark-6.png)

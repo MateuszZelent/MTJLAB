@@ -18,6 +18,26 @@ from app.recipes.semantic_tree import (
 )
 
 
+def test_render_cache_is_reused_and_invalidated_after_state_and_tree_changes():
+    from unittest.mock import patch
+    from app.ui.measurement_tree.model import MeasurementTreeModel
+    app = QApplication.instance() or QApplication([])
+    model = MeasurementTreeModel(semantic_tree())
+    index = model.index_for_semantic_id("axis-current.set-roi-value")
+    with patch.object(model, "_render_data", wraps=model._render_data) as render:
+        for _ in range(100):
+            model.data(index)
+        assert render.call_count == 1
+        model.apply_state({"semantic_id": "axis-current.set-roi-value", "phase": "running"})
+        model.data(index)
+        assert render.call_count == 2
+        model.replace_tree(semantic_tree())
+        model.data(model.index_for_semantic_id("axis-current.set-roi-value"))
+        assert render.call_count == 3
+    model.deleteLater()
+    app.processEvents()
+
+
 def semantic_tree() -> SemanticMeasurementTree:
     binding = SweepAxisBinding(
         axis_id="axis-current",
@@ -110,7 +130,7 @@ def test_model_exposes_semantic_hierarchy_without_widget_items() -> None:
     assert model.headerData(1, Qt.Orientation.Horizontal) == "Configured / active value"
 
 
-def test_runtime_update_emits_data_changed_only_for_affected_row() -> None:
+def test_runtime_update_notifies_leaf_and_derived_ancestor_rows() -> None:
     from app.ui.measurement_tree import MeasurementTreeModel
 
     model = MeasurementTreeModel(semantic_tree())
@@ -118,7 +138,7 @@ def test_runtime_update_emits_data_changed_only_for_affected_row() -> None:
 
     signal = QSignalSpy(model.dataChanged)
     model.apply_state(operation_state("axis-current.set-roi-value"))
-    assert signal.count() == 2
+    assert signal.count() == 4
     assert signal.at(0)[0].row() == model.index_for_semantic_id("axis-current.set-roi-value").row()
     assert signal.at(0)[1].row() == signal.at(0)[0].row()
     changed_ids = {
@@ -128,7 +148,44 @@ def test_runtime_update_emits_data_changed_only_for_affected_row() -> None:
     assert changed_ids == {
         "axis-current.set-roi-value",
         "axis-current",
+        "axis-current.loop",
+        "sequence",
     }
+
+
+def test_batched_state_changes_refresh_visible_ancestors_once() -> None:
+    from PySide6.QtTest import QSignalSpy
+    from PySide6.QtWidgets import QTreeView
+    from app.ui.measurement_tree import MeasurementTreeModel
+
+    app = QApplication.instance() or QApplication([])
+    model = MeasurementTreeModel(semantic_tree())
+    view = QTreeView()
+    view.setModel(model)
+    view.resize(1000, 600)
+    view.show()
+    view.expandAll()
+    app.processEvents()
+    try:
+        changed = QSignalSpy(model.dataChanged)
+        reset = QSignalSpy(model.modelReset)
+        count = model.apply_states([
+            {"semantic_id": "axis-current.set-roi-value", "phase": "running", "action_index": 1},
+            {"semantic_id": "axis-current.set-roi-value", "phase": "applied", "action_index": 1},
+        ])
+        app.processEvents()
+        assert count == changed.count() == 4
+        assert reset.count() == 0
+        for semantic_id in ("sequence", "axis-current", "axis-current.loop", "axis-current.set-roi-value"):
+            index = model.index_for_semantic_id(semantic_id)
+            assert view.visualRect(index).height() > 0
+            assert view.viewport().rect().intersects(view.visualRect(index))
+            assert model.data(index.siblingAtColumn(3)) == "APPLIED"
+        assert not view.viewport().grab().isNull()
+    finally:
+        view.close()
+        view.deleteLater()
+        app.processEvents()
 
 
 def test_axis_value_and_progress_are_kept_in_separate_columns() -> None:
@@ -577,7 +634,7 @@ def test_dry_run_outputs_automatically_switch_to_disabled_in_tree_model() -> Non
     fin_idx = model.index_for_semantic_id("__finally__.keithley_outputs_off")
     assert model.data(fin_idx.siblingAtColumn(1)) == "OFF"
     assert model.data(fin_idx.siblingAtColumn(3)) == "READY"
-    assert model.data(model.index_for_semantic_id("__finally__").siblingAtColumn(3)) == "SAFE"
+    assert model.data(model.index_for_semantic_id("__finally__").siblingAtColumn(3)) == "PENDING"
 
     # 3. Switch back to normal measurement
     model.set_outputs_forced_off(False)
@@ -663,4 +720,3 @@ def test_branch_indicators_do_not_overlap_accent_bar_and_expand_cleanly() -> Non
     )
     view.viewportEvent(cell_press)
     assert view.isExpanded(axis_idx)
-

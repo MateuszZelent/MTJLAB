@@ -1,0 +1,13 @@
+{
+  "simulation_only": true,
+  "result": "153 passed, 5 subtests passed in 66.13s",
+  "command": "python -m pytest -q -p tests.shell_test_isolation tests/test_sweep_release_contracts.py tests/test_anritsu_fast_acquisition.py tests/test_sweep_recovery_reference.py tests/test_adapters_and_runner.py",
+  "sha256": {
+    "app/devices/anritsu_ms2830a/adapter.py": "e9e3a73c3300e09d6e75250234922dbe8129608b7fba5f6f3ab798a50a28438e",
+    "tests/test_sweep_release_contracts.py": "21dedcb3b96c5fc239e7502c8a68343c36e53e56db08cb9db81f612714f8df44",
+    "tests/test_adapters_and_runner.py": "07ee068f8a6374b0148c0aa0f1cffbf027fa7cedff7945221b55bd1cb8d28693",
+    "ANRITSU_TRACE_TIMEOUT_FIX_2026-10-05.md": "50af5922dde58d1e61906e979642031f76c66745fbb080a52e106d433ba168ff",
+    "SWEEPS_PRODUCTION_FOLLOWUP_2026-10-05.md": "de07d927f9c6ce4ee57fe5a3ed9ec0e1acad8a49bfd8848014f630883bc7f487",
+    "docs/audits/2026-10-05-production-followup/trace-timeout-tests.log": "b92eb8d720bb3fc7cd307585c0f7dd2bf1dad35259d6e67ec7a4500612590871"
+  }
+}

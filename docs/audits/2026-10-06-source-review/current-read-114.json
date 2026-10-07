@@ -1,0 +1,80 @@
+[
+  {
+    "path": "app/engine/policy.py",
+    "sha256": "40207793ccffee9fc3a8138a4d7db7e1aa9ca2d6bd77eb3dc1a4f6d0e0202e80",
+    "lines": 96,
+    "scope": "full source read in continuation 114; not a whole-repository or hardware qualification"
+  },
+  {
+    "path": "app/engine/recovery.py",
+    "sha256": "7ada09b0bdb83dfb978720c4b2f2c654cb8930db488ab5154efa4ba7f8a3e015",
+    "lines": 306,
+    "scope": "full source read in continuation 114; not a whole-repository or hardware qualification"
+  },
+  {
+    "path": "app/recipes/baseline_authoring.py",
+    "sha256": "5b6644616ebf24b6b15a63b3ff39ca658097c5514facac18a76bc20cb180329c",
+    "lines": 44,
+    "scope": "full source read in continuation 114; not a whole-repository or hardware qualification"
+  },
+  {
+    "path": "app/recipes/repository.py",
+    "sha256": "7f91a4d74b46d2d9688fe91528a16bb43b2e89484b060e7523587608d4f23d88",
+    "lines": 100,
+    "scope": "full source read in continuation 114; not a whole-repository or hardware qualification"
+  },
+  {
+    "path": "app/recipes/sweep_points.py",
+    "sha256": "342efc41f1148e17a82ace2e7cd966d4b62ce1bc4977ad016b49a5c37f1bebef",
+    "lines": 254,
+    "scope": "full source read in continuation 114; not a whole-repository or hardware qualification"
+  },
+  {
+    "path": "app/recipes/spectrum_processing.py",
+    "sha256": "570ce5dca013ae10b084e563365ca5c6f582be7994f9c13f9d88aa3b19c7970c",
+    "lines": 134,
+    "scope": "full source read in continuation 114; not a whole-repository or hardware qualification"
+  },
+  {
+    "path": "app/ui/resume_preparation.py",
+    "sha256": "692c35f423785593592f247353bc8b9b7f1da54635f4a88f6a26aa8ad664b0cf",
+    "lines": 87,
+    "scope": "full source read in continuation 114; not a whole-repository or hardware qualification"
+  },
+  {
+    "path": "app/ui/results/workers.py",
+    "sha256": "ad54e5e09e35c95b2b5dcee8f5e847d0c074c7e4c2a241e5757914505aee93eb",
+    "lines": 65,
+    "scope": "full source read in continuation 114; not a whole-repository or hardware qualification"
+  },
+  {
+    "path": "app/storage/reference_transaction.py",
+    "sha256": "c3d63463c767ae4102736b7180b390fbbaf2980e8c02c0e0b081c19e86f01549",
+    "lines": 10,
+    "scope": "full source read in continuation 114; not a whole-repository or hardware qualification"
+  },
+  {
+    "path": "app/storage/event_log.py",
+    "sha256": "5f212a023aff4366d33aa700297574b50dcc4de240dcc83a406b481c21143a3c",
+    "lines": 28,
+    "scope": "full source read in continuation 114; not a whole-repository or hardware qualification"
+  },
+  {
+    "path": "app/devices/keithley_2600/characterization/models.py",
+    "sha256": "21c2b57775c779d819f6901b2ea308bb0e2cc47f09d41b938e998ad44797d0d1",
+    "lines": 132,
+    "scope": "full source read in continuation 114; not a whole-repository or hardware qualification"
+  },
+  {
+    "path": "app/devices/keithley_2600/characterization/export.py",
+    "sha256": "1154e8be2c2f31bb33fc744488acb636131aadf5a5e1b32deb27cdc266ef7948",
+    "lines": 113,
+    "scope": "full source read in continuation 114; not a whole-repository or hardware qualification"
+  },
+  {
+    "path": "app/devices/keithley_2600/characterization/single_report.py",
+    "sha256": "6807ed834fad4e82b678f0dba051606b75dc1117de7cd4dcc872b6b16e19abc5",
+    "lines": 21,
+    "scope": "full source read in continuation 114; not a whole-repository or hardware qualification"
+  }
+]

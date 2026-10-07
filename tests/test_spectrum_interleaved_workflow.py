@@ -58,8 +58,10 @@ def acquisition(tmp_path):
             try:
                 state["requests"].append(operation)
                 result = MODULE.dispatch(adapter, operation, payload)
-                if operation == "read_full_configuration" and state["change_settings"]:
-                    result = replace(result, rbw_hz=result.rbw_hz * 2)
+                if operation == "read_acquisition_configuration" and state["change_settings"]:
+                    full, advanced = result
+                    result = (replace(full, rbw_hz=full.rbw_hz * 2),
+                              replace(advanced, rbw_hz=advanced.rbw_hz * 2))
                 if operation == "single_sweep":
                     size = len(result.frequencies_hz)
                     x = np.linspace(-1, 1, size)
@@ -134,8 +136,8 @@ def test_alternating_refresh_preserves_overlapping_signal_archives_and_replays(a
             assert workspace.grab().save(str(folder / f"interleaved-{theme}-{size[0]}.png"))
     assert not workspace.running and workspace._interleaved.reference_blocks == 3
     assert state["frame"] == 10
-    assert set(state["requests"]) == {"read_full_configuration", "read_advanced_spectrum", "single_sweep"}
-    assert state["requests"].count("read_full_configuration") == 5
+    assert set(state["requests"]) == {"read_acquisition_configuration", "single_sweep"}
+    assert state["requests"].count("read_acquisition_configuration") == 5
     records = list(replay_quantitative_session(state["path"]))
     results = [record.result for record in records if record.result is not None]
     assert [result.count for result in results] == [1, 2, 1, 2]

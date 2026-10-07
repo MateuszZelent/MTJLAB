@@ -5,13 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QUrl, QSize, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
     QHBoxLayout,
-    QSplitter,
     QSizePolicy,
+    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -72,11 +72,11 @@ def _read_result_payload(path: Path) -> _ResultPayload:
     except Exception:
         detail = None
     try:
-        points = Hdf5RunReader.points(path)
+        points = Hdf5RunReader.points(path, include_details=False)
     except Exception:
         points = ()
     try:
-        references = Hdf5RunReader.references(path)
+        references = Hdf5RunReader.references(path, metadata_only=True)
     except Exception:
         references = ()
     try:
@@ -259,7 +259,6 @@ class ResultsPage(QWidget):
     resume_requested = Signal(object)
     open_sweep_requested = Signal(object, object)
     result_selected = Signal(object)
-    _ASYNC_LOAD_BYTES = 4 * 1024 * 1024
 
     def __init__(
         self,
@@ -272,6 +271,7 @@ class ResultsPage(QWidget):
         self.owns_viewport = True
         self._selected_path: Path | None = None
         self._thatec_run = None
+        self._thatec_tree = ()
         self._thatec_tree_available = False
         self._result_request_id = 0
         self._result_task: ResultReadTask | None = None
@@ -407,6 +407,13 @@ class ResultsPage(QWidget):
             self.metadata_panel.show_device_state
         )
 
+        self.spectrum_tab.processing_controls.changed.connect(
+            lambda state: self._sync_processing(self.heatmap_tab, state)
+        )
+        self.heatmap_tab.processing_controls.changed.connect(
+            lambda state: self._sync_processing(self.spectrum_tab, state)
+        )
+
         # Cross-tab coordination: heatmap click → spectrum
         self.heatmap_tab.checkpoint_clicked.connect(
             self.spectrum_tab.show_thatec_spectrum
@@ -478,6 +485,7 @@ class ResultsPage(QWidget):
         self.resume_button.setEnabled(False)
         self.open_sweep_button.setEnabled(False)
         self._thatec_tree_available = False
+        self._thatec_tree = ()
         self._selected_artifact = None
         self.metadata_panel.clear()
         self.sweep_tree.clear()
@@ -553,6 +561,7 @@ class ResultsPage(QWidget):
         self.resume_button.setEnabled(False)
         self.open_sweep_button.setEnabled(False)
         self._thatec_tree_available = False
+        self._thatec_tree = ()
         self.metadata_panel.clear()
         self.sweep_tree.clear()
         self.spectrum_tab.clear()
@@ -604,27 +613,13 @@ class ResultsPage(QWidget):
             loading=True,
         )
         request_id = self._begin_result_request()
-        if self._should_load_async(path):
-            task = ResultReadTask(request_id, _read_result_payload, path)
-            self._result_task = task
-            task.signals.loaded.connect(self._on_result_loaded)
-            task.signals.failed.connect(self._on_result_failed)
-            self._read_pool.start(task)
-            return
-        try:
-            payload = _read_result_payload(path)
-        except Exception as exc:
-            self._on_result_failed(request_id, str(exc))
-            return
-        self._apply_result_payload(request_id, payload)
-
-    def _should_load_async(self, path: Path) -> bool:
-        """Keep large HDF5 reads and optional bridges off the GUI thread."""
-
-        try:
-            return path.stat().st_size >= self._ASYNC_LOAD_BYTES
-        except OSError:
-            return False
+        # File size cannot bound metadata/bridge latency, particularly on
+        # network storage. Every archive read uses the same worker boundary.
+        task = ResultReadTask(request_id, _read_result_payload, path)
+        self._result_task = task
+        task.signals.loaded.connect(self._on_result_loaded)
+        task.signals.failed.connect(self._on_result_failed)
+        self._read_pool.start(task)
 
     def _begin_result_request(self) -> int:
         self._result_request_id += 1
@@ -658,6 +653,7 @@ class ResultsPage(QWidget):
         if request_id != self._result_request_id:
             return
         self._thatec_run = payload.thatec_run
+        self._thatec_tree = payload.tree
         self._thatec_tree_available = payload.tree_available
         self.open_sweep_button.setEnabled(payload.tree_available)
 
@@ -684,13 +680,19 @@ class ResultsPage(QWidget):
         else:
             self.metadata_panel.show_thatec_summary(payload.path, payload.thatec_run)
         self.metadata_panel.show_pythat(payload.pythat_data)
-        self.spectrum_tab.load(payload.path, payload.thatec_run, payload.points)
+        self.spectrum_tab.load(payload.path, payload.thatec_run, payload.points, references=payload.references)
         if find_heatmap_rows(payload.thatec_run):
             self._set_heatmap_visible(True)
-            self.heatmap_tab.load(payload.path, payload.thatec_run, payload.points)
+            self.heatmap_tab.load(payload.path, payload.thatec_run, payload.points, references=payload.references)
         else:
             self._set_heatmap_visible(False)
         self.result_state.hide()
+
+    @staticmethod
+    def _sync_processing(tab, state) -> None:
+        if tab.processing_controls.state != state:
+            tab.processing_controls.set_state(state)
+            tab._processing_changed(state)
 
     def closeEvent(self, event) -> None:
         if not self.shutdown():
@@ -708,10 +710,14 @@ class ResultsPage(QWidget):
         self.file_browser._cancel_refresh()
         self.file_browser._read_pool.clear()
         self.spectrum_tab._invalidate_pending_reads()
+        self.spectrum_tab._cancel_filter_read()
+        self.sweep_tree.cancel_detail_read()
         self.heatmap_tab._invalidate_pending_read()
         deadline = time.monotonic() + timeout_ms / 1000
         for pool in (self._read_pool, self.file_browser._read_pool,
-                     self.spectrum_tab._read_pool, self.heatmap_tab._read_pool):
+                     self.spectrum_tab._read_pool, self.spectrum_tab._filter_pool,
+                     self.sweep_tree._detail_pool,
+                     self.heatmap_tab._read_pool):
             remaining = max(0, int((deadline-time.monotonic()) * 1000))
             if not pool.waitForDone(remaining):
                 return False
@@ -785,14 +791,9 @@ class ResultsPage(QWidget):
             or not self._thatec_tree_available
         ):
             return
-        try:
-            tree = ThatecRunReader.tree(self._selected_path)
-        except Exception as exc:
-            self.metadata_panel.metadata.setPlainText(
-                f"Cannot reconstruct THATEC Sweep:\n{exc}"
-            )
-            return
-        self.open_sweep_requested.emit(self._thatec_run, tree)
+        # Use the same immutable reader result shown by this page. Reopening
+        # HDF5 here both blocks Qt and can mix a newer tree with an older run.
+        self.open_sweep_requested.emit(self._thatec_run, self._thatec_tree)
 
     # ------------------------------------------------------------------
     # Backwards-compatibility aliases (used by existing tests and external

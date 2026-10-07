@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 
 from app.contracts.sweep_provider import CompiledAxisSetpoint
+from app.devices.anritsu_ms2830a.configuration import SignalGeneratorConfig, SpectrumConfig
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, Quantity
 from app.recipes.models import RecipeNode
@@ -13,21 +13,6 @@ from app.recipes.parameter_registry import parameter_descriptor
 from app.recipes.semantic_tree import SweepAxisBinding, SweepBindingDraft
 from app.safety.anritsu import validate_anritsu_signal_generator, validate_anritsu_spectrum
 from app.settings.models import StationSettings
-
-
-@dataclass(frozen=True, slots=True)
-class _SignalGeneratorConfig:
-    frequency_hz: float
-    power_dbm: float
-
-
-@dataclass(frozen=True, slots=True)
-class _SpectrumConfig:
-    start_hz: float
-    stop_hz: float
-    reference_level_dbm: float
-    points: int
-    trace: str = "TRAC1"
 
 
 class AnritsuSweepProvider:
@@ -39,7 +24,7 @@ class AnritsuSweepProvider:
 
         if binding.parameter_id.startswith(("signal_generator.", "sg.")):
             return frozenset({"update_anritsu_sg"})
-        # Spectrum axes compile to a complete configure_anritsu action.
+        # Spectrum axes use configure_anritsu with a selected-field mask.
         if binding.parameter_id.startswith("spectrum."):
             return frozenset({"configure_anritsu"})
         return frozenset()
@@ -88,35 +73,49 @@ class AnritsuSweepProvider:
         expected_endpoint = "SG" if binding.target.startswith("anritsu.sg.") else "SPECTRUM"
         if binding.endpoint.upper() != expected_endpoint:
             raise ConfigurationError(f"{node.id}: Anritsu binding endpoint does not match target.")
+        parameter = binding.parameter_id.replace("signal_generator.", "sg.", 1)
+        if parameter != binding.target.removeprefix("anritsu."):
+            raise ConfigurationError(f"{node.id}: Anritsu binding parameter does not match target.")
 
     def compile_point(self, node: RecipeNode, binding: SweepAxisBinding, value: Quantity, context: Mapping[str, Quantity], settings: StationSettings) -> CompiledAxisSetpoint:
         self.validate_binding(node, binding)
         descriptor = parameter_descriptor(binding.target)
         value.require_dimension(descriptor.dimension)
         if binding.target.startswith("anritsu.sg."):
-            current_frequency = context.get("anritsu.sg.frequency", Quantity(1e6, DIMENSION_FREQUENCY)).si_value
-            current_power = context.get("anritsu.sg.power", Quantity(-30, DIMENSION_DBM)).si_value
+            if any(key not in context for key in ("anritsu.sg.frequency", "anritsu.sg.power")):
+                raise ConfigurationError("Anritsu SG sweep requires an explicit frequency and power baseline.")
+            current_frequency = context["anritsu.sg.frequency"].si_value
+            current_power = context["anritsu.sg.power"].si_value
             if binding.target.endswith("frequency"):
                 current_frequency = value.si_value
             else:
                 current_power = value.si_value
             validate_anritsu_signal_generator(settings.anritsu, frequency_hz=current_frequency, power_dbm=current_power)
-            config = _SignalGeneratorConfig(current_frequency, current_power)
+            changed = "frequency_hz" if binding.target.endswith("frequency") else "power_dbm"
+            config = SignalGeneratorConfig(current_frequency, current_power, changed_fields=(changed,))
             return CompiledAxisSetpoint("update_anritsu_sg", {"config": config}, value.si_value, value.si_value)
-        # Spectrum updates are represented as a complete configuration; the compiler
-        # supplies the remaining fields from the active context.
-        start = context.get("anritsu.spectrum.start_frequency", Quantity(1e6, DIMENSION_FREQUENCY)).si_value
-        stop = context.get("anritsu.spectrum.stop_frequency", Quantity(2e6, DIMENSION_FREQUENCY)).si_value
-        reference = context.get("anritsu.spectrum.reference_level", Quantity(0.0, DIMENSION_DBM)).si_value
+        # Keep the baseline for validation; changed_fields limits the mutation
+        # to the selected axis instead of reapplying unrelated settings.
+        required = ("start_frequency", "stop_frequency", "reference_level", "points")
+        if any(f"anritsu.spectrum.{key}" not in context for key in required):
+            raise ConfigurationError("Anritsu spectrum sweep requires an explicit frequency, reference and points baseline.")
+        start = context["anritsu.spectrum.start_frequency"].si_value
+        stop = context["anritsu.spectrum.stop_frequency"].si_value
+        reference = context["anritsu.spectrum.reference_level"].si_value
         if binding.target.endswith("start_frequency"):
             start = value.si_value
         elif binding.target.endswith("stop_frequency"):
             stop = value.si_value
         else:
             reference = value.si_value
-        points = int(context.get("anritsu.spectrum.points", Quantity(1001, "ratio")).si_value)
+        points_value = context["anritsu.spectrum.points"]
+        points_value.require_dimension("ratio")
+        if not float(points_value.si_value).is_integer():
+            raise ConfigurationError("Anritsu points baseline must be an integer without rounding.")
+        points = int(points_value.si_value)
         validate_anritsu_spectrum(settings.anritsu.safety, start_hz=start, stop_hz=stop, reference_level_dbm=reference, points=points)
-        config = _SpectrumConfig(start, stop, reference, points)
+        changed = {"start_frequency": "start_hz", "stop_frequency": "stop_hz", "reference_level": "reference_level_dbm"}[binding.target.rsplit(".", 1)[-1]]
+        config = SpectrumConfig(start, stop, reference, points, changed_fields=(changed,))
         return CompiledAxisSetpoint("configure_anritsu", {"config": config}, value.si_value, value.si_value)
 
 

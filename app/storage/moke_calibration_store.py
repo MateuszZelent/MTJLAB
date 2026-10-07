@@ -94,7 +94,8 @@ class MokeCalibrationRepository:
                     request = json.loads(run["settings_yaml"].asstr()[()])
                     if request["context"] != asdict(model.context):
                         raise ConfigurationError("MOKE calibration raw context does not match its model.")
-                    names = list(raw["events/name"].asstr()[:])
+                    from app.storage.event_log import committed_event_count
+                    names = list(raw["events/name"].asstr()[:committed_event_count(raw["events"])])
                     finished = json.loads(raw["events/message"].asstr()[names.index("calibration_finished")])
                     if finished.get("status") != "completed" or finished.get("dac_zero_confirmed") is not True:
                         raise ConfigurationError("MOKE calibration raw run has no confirmed final DAC zero.")
@@ -186,4 +187,5 @@ class MokeCalibrationRunStore:
         if not self._closed:
             self._writer.close(status)
             self._closed = True
-        return hashlib.sha256(self.path.read_bytes()).hexdigest()
+        with self.path.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()

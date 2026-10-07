@@ -70,6 +70,7 @@ _UNITS: Final[dict[str, UnitDefinition]] = {
     "pw*hz": UnitDefinition(DIMENSION_SPECTRAL_AREA, 1e-12, "pW*Hz"),
     "fw*hz": UnitDefinition(DIMENSION_SPECTRAL_AREA, 1e-15, "fW*Hz"),
     "hz": UnitDefinition(DIMENSION_FREQUENCY, 1.0, "Hz"),
+    "millihz": UnitDefinition(DIMENSION_FREQUENCY, 1e-3, "mHz"),
     "khz": UnitDefinition(DIMENSION_FREQUENCY, 1e3, "kHz"),
     "mhz": UnitDefinition(DIMENSION_FREQUENCY, 1e6, "MHz"),
     "ghz": UnitDefinition(DIMENSION_FREQUENCY, 1e9, "GHz"),
@@ -135,10 +136,28 @@ def _canonical_unit(unit: str) -> str:
         "Mω": "Mohm",
         "mΩ": "milliohm",
         "mω": "milliohm",
+        "mohm": "milliohm",
+        "mOhm": "milliohm",
+        "milliohm": "milliohm",
     }
     if normalized in omega_aliases:
         return omega_aliases[normalized].lower()
-    return normalized.replace("μ", "u").replace("µ", "u").lower()
+    normalized = normalized.replace("μ", "u").replace("µ", "u")
+    for key, definition in _UNITS.items():
+        display = definition.display
+        if normalized == display:
+            return key
+        # Preserve the SI prefix, while accepting historical base-symbol
+        # casing (mv, uA, Mhz). Never reinterpret M as m or vice versa.
+        prefixed = display[0] in "munpfkMG" and len(display) > 1
+        if prefixed:
+            if normalized[:1] == display[:1] and normalized[1:].casefold() == display[1:].casefold():
+                return key
+        elif normalized.casefold() == display.casefold():
+            return key
+    # Do not return a lowercased dictionary key: that would reintroduce
+    # ambiguous prefix aliases such as MV -> mv.
+    return "unknown:" + normalized
 
 
 def _unit_definition(unit: str) -> UnitDefinition:

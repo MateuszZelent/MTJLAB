@@ -1,0 +1,17 @@
+{
+  "simulation_only": true,
+  "physical_hardware_tested": false,
+  "result": "224 passed, 5 subtests passed in 133.35s",
+  "targeted_result": "14 passed",
+  "sha256": {
+    "app/devices/anritsu_ms2830a/adapter.py": "53a318b133d05dfc61839378f4ac990669b34c8e0b9be324baef8f1c7d67cb99",
+    "app/devices/rigol_dg1000z/adapter.py": "15437217ece0b2444325df6029ef7f65bca6c67052b6e7bface80c91046bd99f",
+    "tests/test_protocol_regression_audit.py": "cb701d4edc9d0dff2371eba1e8f53bd13e211fa8a126965b2eb709ba04c315db",
+    "AUDYT_REGRESJI_KOMUNIKACJI_2026-10-05.md": "792dbfd487b697112ee7f6aa98dc9eb03dae44661ee55ac5fca8faa50fed56c8",
+    "SWEEPS_PRODUCTION_FOLLOWUP_2026-10-05.md": "513529fc5c0d8baad9f1c31d8e67d7394a657503493ff13b11b7edfe603917a7"
+  },
+  "logs_sha256": {
+    "protocol-audit-targeted.log": "58763247ae1fbf995d714dbf0beecc70088e2bbf922ad8eff5752c76736b3267",
+    "protocol-audit-tests.log": "9c11e0d78117fed2f1a635e876c1fe04bfab99261ab0dbbcb9a2c82cfb785e2a"
+  }
+}

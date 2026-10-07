@@ -2987,8 +2987,8 @@ class MainWindowTests(unittest.TestCase):
             trace_1 = SpectrumTrace((1e6, 2e6), (-10.0, -20.0), datetime.now(timezone.utc), "TRAC1")
             trace_2 = SpectrumTrace((1e6, 2e6), (0.0, -20.0), datetime.now(timezone.utc), "TRAC1")
             anritsu.start_averaging()
-            anritsu._result("fetch_trace", trace_1)
-            anritsu._result("fetch_trace", trace_2)
+            anritsu._result("single_sweep", trace_1)
+            anritsu._result("single_sweep", trace_2)
             self.assertIs(anritsu._latest_trace, trace_2)
             self.assertIsNotNone(anritsu._averaged_trace)
             self.assertNotEqual(anritsu._averaged_trace.powers_dbm[0], -5.0)
@@ -3342,7 +3342,7 @@ class MainWindowTests(unittest.TestCase):
             keithley._controller.call = Mock()
             keithley._device_state_changed("verified")
             updated = deepcopy(keithley._station_settings.model_dump(mode="python"))
-            updated["devices"]["keithley"]["safety"]["channels"]["B"]["sense_mode"] = "4wire"
+            updated["devices"]["keithley"]["safety"]["channels"]["B"]["sense_mode"] = "2wire"
             keithley.set_settings(StationSettings.model_validate(updated))
             keithley.channel.setCurrentText("B")
             keithley.mode.setCurrentText("current")
@@ -3361,8 +3361,8 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(request.level_si, 500e-6)
             self.assertEqual(request.compliance_si, 50e-3)
             self.assertEqual(request.settle_time_s, 0.2)
-            self.assertEqual(request.sense_mode, "4wire")
-            self.assertTrue(request.source_autorange)
+            self.assertEqual(request.sense_mode, "2wire")
+            self.assertFalse(request.source_autorange)
             self.assertTrue(request.measure_voltage_autorange)
             self.assertTrue(request.measure_current_autorange)
             self.assertIsNone(keithley._auto_enable_channel)
@@ -3590,6 +3590,9 @@ class MainWindowTests(unittest.TestCase):
         try:
             keithley = window.keithley_page
             keithley._controller.call = Mock()
+            raw = deepcopy(keithley._station_settings.model_dump(mode="python"))
+            raw["devices"]["keithley"]["safety"]["channels"]["A"]["defaults"]["source_autorange"] = True
+            keithley.set_settings(StationSettings.model_validate(raw))
             window.resize(1600, 900)
             window.show()
             window._navigate_to("keithley")
@@ -3616,7 +3619,7 @@ class MainWindowTests(unittest.TestCase):
                         source_autorange=True,
                         source_range_si=1e-3,
                         nplc=0.5,
-                        sense_mode="4wire",
+                        sense_mode="2wire",
                         measure_voltage_autorange=True,
                         measure_voltage_range_v=100e-3,
                         measure_current_autorange=False,
@@ -3633,11 +3636,11 @@ class MainWindowTests(unittest.TestCase):
                         source_level_si=10e-3,
                         compliance_si=1e-3,
                         source_autorange=False,
-                        source_range_si=67e-3,
+                        source_range_si=100e-3,
                         nplc=2.0,
                         sense_mode="2wire",
                         measure_voltage_autorange=False,
-                        measure_voltage_range_v=70e-3,
+                        measure_voltage_range_v=100e-3,
                         measure_current_autorange=True,
                         measure_current_range_a=10e-3,
                         source_delay_s=0.007,
@@ -3682,7 +3685,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(table_values["Source mode"], ("CURRENT", "VOLTAGE"))
             self.assertEqual(table_values["Source level"], ("500 uA", "10 mV"))
             self.assertEqual(table_values["Compliance limit"], ("50 mV", "1 mA"))
-            self.assertEqual(table_values["Sense mode"], ("4-wire", "2-wire"))
+            self.assertEqual(table_values["Sense mode"], ("2-wire", "2-wire"))
             self.assertEqual(
                 table_values["Hardware source delay"], ("3 ms", "7 ms")
             )
@@ -3752,7 +3755,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(keithley.level.text(), "2 mA")
             self.assertEqual(keithley.compliance.text(), "670 mV")
             self.assertTrue(keithley.source_autorange.isChecked())
-            self.assertEqual(keithley.source_range.text(), "AUTO")
+            self.assertFalse(keithley.source_range.isEnabled())
 
             # Individual assignment of Source level only changes level
             dialog.assign_requested.emit("A", "Source level")
@@ -3766,20 +3769,22 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(keithley.compliance.text(), "1 mA")
             self.assertEqual(keithley.nplc.text(), "2")
             self.assertFalse(keithley.source_autorange.isChecked())
-            self.assertEqual(keithley.source_range.text(), "67 mV")
+            self.assertEqual(keithley.source_range.text(), "100 mV")
             self.assertFalse(keithley.measure_voltage_autorange.isChecked())
-            self.assertEqual(keithley.measure_voltage_range.text(), "70 mV")
+            # In voltage mode the hardware range follows source range; the
+            # independent preference is retained for current mode.
+            self.assertEqual(keithley.measure_voltage_range.text(), "AUTO")
 
             keithley.channel.setCurrentText("A")
             self.assertEqual(keithley.mode.currentText(), "current")
             self.assertEqual(keithley.level.text(), "500 uA")
             self.assertEqual(keithley.compliance.text(), "50 mV")
             self.assertEqual(keithley.nplc.text(), "0.5")
-            self.assertEqual(keithley._station_settings.keithley.safety.channels["A"].sense_mode, "4wire")
+            self.assertEqual(keithley._station_settings.keithley.safety.channels["A"].sense_mode, "2wire")
             self.assertTrue(keithley.source_autorange.isChecked())
-            self.assertEqual(keithley.source_range.text(), "AUTO")
+            self.assertFalse(keithley.source_range.isEnabled())
             self.assertFalse(keithley.measure_current_autorange.isChecked())
-            self.assertEqual(keithley.measure_current_range.text(), "1 mA")
+            self.assertEqual(keithley.measure_current_range.text(), "AUTO")
             self.assertFalse(keithley._readback_pending)
             self.assertTrue(keithley.read_configuration_button.isEnabled())
             self.assertFalse(keithley._output_states["A"])
@@ -3810,6 +3815,7 @@ class MainWindowTests(unittest.TestCase):
             repository = SettingsRepository(path)
             raw = repository.load().raw
             raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+            raw["devices"]["keithley"]["safety"]["channels"]["A"]["defaults"]["source_autorange"] = True
             repository.save_raw(raw)
             window = MainWindow(path, simulation=False, authenticated_username=TEST_ENGINEER)
             try:
@@ -3821,7 +3827,7 @@ class MainWindowTests(unittest.TestCase):
                         compliance="50 mV",
                         nplc="0.5",
                         settling_time="100 ms",
-                        sense_mode="4wire",
+                        sense_mode="2wire",
                         source_autorange=True,
                         source_range="AUTO",
                         measure_voltage_autorange=True,
@@ -3855,7 +3861,7 @@ class MainWindowTests(unittest.TestCase):
                     SettingsRepository(path).load().raw["devices"]["keithley"]["safety"]["channels"]
                 )
                 self.assertEqual(saved["A"]["defaults"]["source_current"], "500 uA")
-                self.assertEqual(saved["A"]["defaults"]["sense_mode"], "4wire")
+                self.assertEqual(saved["A"]["defaults"]["sense_mode"], "2wire")
                 self.assertEqual(saved["B"]["defaults"]["source_current"], "2 mA")
                 self.assertEqual(saved["B"]["defaults"]["source_range"], "10 mA")
                 before_invalid_save = path.read_text(encoding="utf-8")
@@ -3884,7 +3890,7 @@ class MainWindowTests(unittest.TestCase):
                 self.assertEqual(keithley.source_range.text(), "10 mA")
                 keithley.channel.setCurrentText("A")
                 self.assertEqual(keithley.level.text(), "500 uA")
-                self.assertEqual(keithley._station_settings.keithley.safety.channels["A"].sense_mode, "4wire")
+                self.assertEqual(keithley._station_settings.keithley.safety.channels["A"].sense_mode, "2wire")
                 self.assertFalse(keithley.measure_current_autorange.isChecked())
                 self.assertEqual(keithley.measure_current_range.text(), "1 mA")
             finally:
@@ -3921,6 +3927,7 @@ class MainWindowTests(unittest.TestCase):
 
             anritsu._spectrogram_buffer.append(first, now=100.0)
             anritsu._spectrogram_buffer.append(second, now=131.0)
+            self.assertTrue(wait_for_ui(lambda: anritsu._spectrogram_matrix(source="raw", window_s=30) is not None))
             raw = anritsu._spectrogram_matrix(source="raw", window_s=30)
             self.assertIsNotNone(raw)
             assert raw is not None
@@ -3956,6 +3963,9 @@ class MainWindowTests(unittest.TestCase):
         try:
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
+            anritsu.overlay_analysis_source.setChecked(False)
+            anritsu.auto_peak_detection.setChecked(True)
+            anritsu.highlight_peaks.setChecked(True)
             trace = synthetic_anritsu_peaks()
             anritsu.cleanup_filters["denoise"].setChecked(True)
 
@@ -3970,7 +3980,8 @@ class MainWindowTests(unittest.TestCase):
                 anritsu._cleanup_result.values_dbm,
                 trace.powers_dbm,
             )
-            self.assertFalse(anritsu.spectrum_plot._curves["Raw"].isVisible())
+            raw_curve = anritsu.spectrum_plot._curves.get("Raw")
+            self.assertTrue(raw_curve is None or not raw_curve.isVisible())
             anritsu.overlay_analysis_source.setChecked(True)
             self.assertEqual(
                 anritsu.spectrum_plot._traces["Raw"][1].tolist(),
@@ -4206,7 +4217,9 @@ class MainWindowTests(unittest.TestCase):
             self.application.processEvents()
 
             row = quick._rows["rigol.1.amplitude"]
-            row.set_value_text("0.200 V")
+            # Exercise a real slider step inside the configured safety range;
+            # 0.200 V exceeds the default 0.100 V ceiling and pins the slider.
+            row.set_value_text("0.020 V")
             position = row.slider.slider.value()
             row.slider.slider.setValue(position + 1)
             self.application.processEvents()

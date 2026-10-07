@@ -1,0 +1,50 @@
+{
+  "hardware_io": false,
+  "scenario": "1309 spectrum checkpoints using current analyzer defaults; no output actions",
+  "analyzer_defaults": {
+    "application": "MANUAL",
+    "continuous_sweep": false,
+    "start_frequency": "100 MHz",
+    "stop_frequency": "6 GHz",
+    "center_frequency": "3.05 GHz",
+    "span": "5.9 GHz",
+    "rbw": "3 MHz",
+    "vbw": "30 kHz",
+    "reference_level": "-10 dBm",
+    "sweep_points": 10001,
+    "trace": "TRAC1",
+    "rbw_auto": true,
+    "vbw_mode": "manual",
+    "detector": "NORM",
+    "attenuation": "10 dB",
+    "attenuation_auto": false,
+    "preamplifier_enabled": false,
+    "sweep_time": "39 ms",
+    "sweep_time_auto": true
+  },
+  "acquisition": {
+    "single_sweep_mode": "standard_scpi_opc",
+    "operation_complete_timeout": "30 s",
+    "application_average_count": 198,
+    "live_refresh_interval": "50 ms"
+  },
+  "advanced": {
+    "control_protocol": "standard_scpi",
+    "qualified_firmware": [
+      "7.03.00"
+    ]
+  },
+  "estimate": {
+    "nominal_duration_s": 4254.288090000128,
+    "retry_upper_duration_s": 51416.75,
+    "uncompressed_hdf5_bytes": 1179908051,
+    "csv_bytes": 17425408,
+    "checkpoints": 1309,
+    "spectra": 1309,
+    "spectrum_values": 26182618,
+    "warnings": [],
+    "public_import_upper_bytes": 922378048
+  },
+  "configured_import_budget_bytes": 536870912,
+  "capacity_result": "PyThat eager import requires an estimated 922378048 bytes; the configured/available memory budget is 536870912 bytes. Use bounded checkpoint readers or qualify a larger import budget before running."
+}

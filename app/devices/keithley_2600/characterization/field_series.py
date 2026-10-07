@@ -7,6 +7,8 @@ Every acquired value is passed synchronously to a durable journal before proceed
 
 from __future__ import annotations
 
+from app.devices.keithley_2600.characterization.output_state import require_output_off
+
 from dataclasses import asdict, dataclass, replace
 import math
 import threading
@@ -185,7 +187,7 @@ class FieldSeriesRunner:
         for channel in channels:
             try:
                 self.device.set_output(channel, False)
-                self.device.confirm_output_off(channel)
+                require_output_off(self.device, channel)
             except Exception as exc:
                 errors.append(f"{channel}: {exc}")
         if errors:
@@ -227,7 +229,7 @@ class FieldSeriesRunner:
         self._checkpoint("field_observation", asdict(observation))
         self._check()
         if observation.compliance_active:
-            self.device.confirm_output_off("B")
+            require_output_off(self.device, "B")
             return observation
         self.device.assert_output_state("B", expected_enabled=True)
         tolerance = max(self.config.current_tolerance_a,
@@ -237,7 +239,7 @@ class FieldSeriesRunner:
         return observation
 
     def _ramp(self, start: float, stop: float) -> bool:
-        self.device.confirm_output_off("A")
+        require_output_off(self.device, "A")
         limits = self.settings.keithley.safety.channels["B"].lab_limits
         for level in build_keithley_ramp_levels(start, stop, self.config.ramp_step_a,
                                                max_points=limits.sweep_points_max):
@@ -266,11 +268,11 @@ class FieldSeriesRunner:
         return True
 
     def _recover(self, channel: str) -> None:
-        self.device.confirm_output_off(channel)
+        require_output_off(self.device, channel)
         result = self.device.recover_from_compliance(channel, "keep_off")
         if not isinstance(result, dict) or result.get("outputs_confirmed_off") is not True:
             raise DeviceError(f"Compliance recovery for {channel} was not confirmed.")
-        self.device.confirm_output_off(channel)
+        require_output_off(self.device, channel)
         self._checkpoint("compliance_recovered", {"channel": channel})
 
     def run(self) -> tuple[FieldSeriesEntry, ...]:
@@ -281,7 +283,7 @@ class FieldSeriesRunner:
             self.config.sweep.start_level_si, self.config.sweep.stop_level_si,
             self.config.sweep.points_count)[0]
         for channel in ("A", "B"):
-            self.device.confirm_output_off(channel)
+            require_output_off(self.device, channel)
             if self.device.compliance_policy(channel) != "stop":
                 raise SafetyViolation(f"Channel {channel} must confirm STOP before a field series.")
         # Apply both reviewed card requests while both channels remain OFF.
@@ -301,7 +303,7 @@ class FieldSeriesRunner:
                     self._check()
                 self._hold_started = time.monotonic()
                 self._check()
-                self.device.confirm_output_off("A")
+                require_output_off(self.device, "A")
                 self._checkpoint("field_start", {"target_a": self._target, "history_segment": segment})
                 self._check()
                 if not active_b:

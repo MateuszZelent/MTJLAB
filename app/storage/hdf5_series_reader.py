@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 from typing import Any
 
 from app.storage.hdf5_reader import Hdf5RunReader
+from app.recipes.parameter_registry import persisted_quantity_unit
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,9 +76,15 @@ class Hdf5SeriesReader:
                 # 1. Try reading scalar sweep points
                 points_grp = file.get("points")
                 if points_grp is not None and len(points_grp) > 0:
-                    return Hdf5SeriesReader._extract_points_series(
+                    scalar = Hdf5SeriesReader._extract_points_series(
                         p.name, points_grp, preferred_y_channel
                     )
+                    if preferred_y_channel is not None or scalar.available_y_channels:
+                        return scalar
+                    # A reference or spectrum-only checkpoint has provenance
+                    # but no scalar Y channel. Do not mask its recorded trace.
+                    if "spectra" not in file:
+                        return scalar
 
                 # 2. Try reading first spectrum trace if scalar points absent
                 spectra_grp = file.get("spectra")
@@ -102,7 +110,7 @@ class Hdf5SeriesReader:
     def _extract_points_series(
         title: str, points_grp: Any, preferred_y: str | None
     ) -> MeasurementSeries:
-        numeric_names = Hdf5RunReader._numeric_names(points_grp)
+        numeric_names = Hdf5RunReader._committed_point_names(points_grp.file)
         if not numeric_names:
             return MeasurementSeries(
                 title=title,
@@ -116,17 +124,21 @@ class Hdf5SeriesReader:
                 curve_kind="empty",
             )
 
-        # Inspect first point to detect available channels
-        first_grp = points_grp[numeric_names[0]]
-        setpoints_first = Hdf5SeriesReader._parse_json(first_grp, "setpoints_json")
-        measurements_first = Hdf5SeriesReader._parse_json(first_grp, "measurements_json")
+        # Channels can appear after the first checkpoint. Keep stable order,
+        # but never use an uncommitted row to choose a plotted quantity.
+        setpoint_keys: dict[str, None] = {}
+        measurement_keys: dict[str, None] = {}
+        for name in numeric_names:
+            group = points_grp[name]
+            setpoint_keys.update(dict.fromkeys(Hdf5SeriesReader._parse_json(group, "setpoints_json")))
+            measurement_keys.update(dict.fromkeys(Hdf5SeriesReader._parse_json(group, "measurements_json")))
 
         # Pick X channel (first setpoint, or 'field', 'voltage', or fallback to index)
-        x_channel = Hdf5SeriesReader._select_x_channel(setpoints_first)
-        all_y_channels = tuple(measurements_first.keys())
+        x_channel = Hdf5SeriesReader._select_x_channel(setpoint_keys)
+        all_y_channels = tuple(measurement_keys)
 
         # Pick Y channel (preferred or 'resistance', 'current', 'voltage')
-        y_channel = preferred_y if preferred_y in all_y_channels else Hdf5SeriesReader._select_y_channel(all_y_channels)
+        y_channel = preferred_y if preferred_y is not None else Hdf5SeriesReader._select_y_channel(all_y_channels)
 
         xs: list[float] = []
         ys: list[float] = []
@@ -136,25 +148,10 @@ class Hdf5SeriesReader:
             sp = Hdf5SeriesReader._parse_json(grp, "setpoints_json")
             meas = Hdf5SeriesReader._parse_json(grp, "measurements_json")
 
-            # Extract X
-            if x_channel and x_channel in sp:
-                x_val = sp[x_channel]
-            else:
-                x_val = float(idx)
-
-            # Extract Y
-            if y_channel and y_channel in meas:
-                y_val = meas[y_channel]
-            elif meas:
-                y_val = next(iter(meas.values()))
-            else:
-                y_val = 0.0
-
-            try:
-                xs.append(float(x_val))
-                ys.append(float(y_val))
-            except (ValueError, TypeError):
-                continue
+            # Preserve row alignment and gaps. Missing values are neither a
+            # different measurement nor an index expressed in physical units.
+            xs.append(Hdf5SeriesReader._finite_or_gap(sp.get(x_channel) if x_channel else idx))
+            ys.append(Hdf5SeriesReader._finite_or_gap(meas.get(y_channel)))
 
         x_lbl, x_un = Hdf5SeriesReader._format_channel_label(x_channel or "Index")
         y_lbl, y_un = Hdf5SeriesReader._format_channel_label(y_channel or "Signal")
@@ -183,10 +180,12 @@ class Hdf5SeriesReader:
                 x_values=(),
                 y_label="Power",
                 y_unit="dBm",
+                y_values=(),
                 point_count=0,
                 curve_kind="empty",
             )
         first_trace = spectra_grp[names[0]]
+        Hdf5RunReader._require_committed_spectrum(spectra_grp.file, int(names[0]))
         freqs = first_trace.get("frequency_hz")
         powers = first_trace.get("power_dbm")
         if freqs is None or powers is None:
@@ -197,11 +196,11 @@ class Hdf5SeriesReader:
                 x_values=(),
                 y_label="Power",
                 y_unit="dBm",
+                y_values=(),
                 point_count=0,
                 curve_kind="empty",
             )
-        xs = tuple(float(v) for v in freqs[:])
-        ys = tuple(float(v) for v in powers[:])
+        xs, ys = Hdf5RunReader._read_spectrum_axes(first_trace, f"Spectrum {names[0]}")
         return MeasurementSeries(
             title=title,
             x_label="Frequency",
@@ -223,7 +222,8 @@ class Hdf5SeriesReader:
             raw = group[dataset_name][()]
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
-            return json.loads(str(raw)) if raw else {}
+            decoded = json.loads(str(raw)) if raw else {}
+            return decoded if isinstance(decoded, dict) else {}
         except Exception:
             return {}
 
@@ -246,28 +246,38 @@ class Hdf5SeriesReader:
         # Priority for resistance, current, voltage
         for priority in ("resistance", "r_dut", "r_mtj", "r", "current", "i_dut", "voltage", "v_dut"):
             for c in channels:
-                if priority in c.lower():
+                leaf = c.rsplit(".", 1)[-1].lower()
+                if leaf == priority or leaf.startswith(priority + "_"):
                     return c
         return channels[0]
 
     @staticmethod
     def _format_channel_label(channel_name: str) -> tuple[str, str]:
         c = channel_name.lower()
+        unit = persisted_quantity_unit(channel_name)
         if c.startswith("moke_box.") and c.endswith("_t"):
             direction = "ascending" if "ascending" in c else "descending"
             return f"Estimated magnetic field ({direction})", "T"
         if c.startswith("lakeshore.") and c.endswith("_t"):
             return "Measured magnetic field", "T"
         if "field" in c or "magnet" in c or c.endswith("_b") or c.endswith("_h"):
-            return "Magnetic Field (B)", "Oe"
+            return "Magnetic Field", unit
         if "resistance" in c or c == "r":
-            return "Resistance (R)", "Ω"
+            return "Resistance (R)", unit
         if "voltage" in c or c == "v":
-            return "Voltage (V)", "V"
+            return "Voltage (V)", unit
         if "current" in c or c == "i":
-            return "Current (I)", "A"
+            return "Current (I)", unit
         if "freq" in c:
-            return "Frequency (f)", "Hz"
+            return "Frequency (f)", unit
         if "power" in c:
-            return "Power (P)", "dBm"
-        return channel_name.replace("_", " ").title(), ""
+            return "Power (P)", unit
+        return channel_name.replace("_", " ").title(), unit
+
+    @staticmethod
+    def _finite_or_gap(value: object) -> float:
+        try:
+            result = float(value)
+        except (ValueError, TypeError, OverflowError):
+            return math.nan
+        return result if math.isfinite(result) else math.nan

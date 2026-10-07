@@ -8,11 +8,11 @@ from typing import Any
 from PySide6.QtCore import QMimeData, Qt
 from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (
-    QApplication, QFormLayout, QHBoxLayout, QVBoxLayout, QWidget,
+    QApplication, QFormLayout, QHBoxLayout, QVBoxLayout, QWidget, QFrame, QLayout,
 )
 from qfluentwidgets import (
     BodyLabel, CardWidget, CheckBox, ComboBox, LineEdit, PlainTextEdit,
-    PrimaryPushButton, PushButton, SpinBox, StrongBodyLabel,
+    PrimaryPushButton, PushButton, SpinBox, StrongBodyLabel, ScrollArea,
 )
 
 from app.domain.errors import ConfigurationError
@@ -32,6 +32,7 @@ from app.ui.common import line_edit as _line
 from app.ui.dialogs import StationMessageBox as QMessageBox
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
+from app.ui.recipes.configuration_comparison import ConfigurationReview, ConfigurationComparisonRow, current_parameter_setting
 from app.recipes.spectrum_processing import REFERENCE_OPERATIONS, REFERENCE_UNITS
 from app.ui.recipes.spectrum_options import RecipeSpectrumOptions
 
@@ -181,6 +182,9 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
         heading = StrongBodyLabel(node.type.replace("_", " ").title(), surface)
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
+        self.review = ConfigurationReview(surface, baseline_label="the saved action (not live hardware)",
+                                          current_label="Saved action value")
+        layout.addWidget(self.review)
         note = BodyLabel(
             "These values are stored in the recipe only. Hardware limits and output "
             "interlocks are validated again during preflight and by the device adapter.",
@@ -189,7 +193,8 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
         note.setObjectName("muted")
         note.setWordWrap(True)
         layout.addWidget(note)
-        form = QFormLayout()
+        form_host = QWidget(surface)
+        form = QFormLayout(form_host)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         for key, value in node.data.items():
             if key == "disabled":
@@ -213,8 +218,11 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
             empty.setObjectName("muted")
             empty.setWordWrap(True)
             form.addRow(empty)
-        layout.addLayout(form)
-        layout.addStretch(1)
+        scroll = ScrollArea(surface)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(form_host)
+        layout.addWidget(scroll, 1)
         footer = QHBoxLayout()
         footer.addStretch(1)
         self.cancel_button = PushButton("Cancel", surface)
@@ -224,6 +232,15 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
         layout.addLayout(footer)
         self.cancel_button.clicked.connect(self.reject)
         self.apply_button.clicked.connect(self.accept)
+        self.review.bind(form_host, self._comparison_rows)
+
+    def _comparison_rows(self):
+        rows = []
+        for key, (editor, kind) in self._editors.items():
+            value = editor.currentData() if kind == "choice" else (
+                editor.isChecked() if kind == "bool" else editor.value() if kind == "int" else editor.text())
+            rows.append(ConfigurationComparisonRow(key, self._field_label(key), self._node.data.get(key), value, "Set"))
+        return rows
 
     @staticmethod
     def _field_label(key: str) -> str:
@@ -233,18 +250,38 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
             "channel": "Channel",
         }.get(key, key.replace("_", " ").title())
 
+    def _channel_choices(self) -> tuple[object, ...]:
+        device = self._node.data.get("device_module", self._node.data.get("device"))
+        if "moke" in self._node.type or device == "moke_box":
+            return tuple(range(8))
+        if "rigol" in self._node.type or device == "rigol":
+            return (1, 2)
+        if "keithley" in self._node.type or device == "keithley":
+            return ("A", "B")
+        return ()
+
     def _editor_for(self, key: str, value: object) -> tuple[QWidget | None, str]:
         if key == "channel":
+            # A numeric channel does not identify an instrument: MOKE uses
+            # 0..7, whereas Rigol uses 1..2. Never silently select a fallback.
+            if not self._literal(value):
+                line = LineEdit(self.modal_shell.surface)
+                line.setText(str(value))
+                return line, "str"
+            values = self._channel_choices()
+            if not values:
+                return None, "readonly"
             combo = ComboBox(self.modal_shell.surface)
-            values: tuple[object, ...] = (
-                (1, 2)
-                if isinstance(value, int) or "rigol" in self._node.type
-                else ("A", "B")
-            )
+            is_moke = values == tuple(range(8))
             for choice in values:
-                combo.addItem(str(choice), userData=choice)
-            index = combo.findData(value)
-            combo.setCurrentIndex(index if index >= 0 else 0)
+                combo.addItem(f"VOUT {choice}" if is_moke else str(choice), userData=choice)
+            index = next((i for i, choice in enumerate(values)
+                          if type(choice) is type(value) and choice == value), -1)
+            if index < 0:
+                combo.addItem(f"{value} — INVALID", userData=value)
+                index = combo.count() - 1
+                combo.setItemEnabled(index, False)
+            combo.setCurrentIndex(index)
             return combo, "choice"
         if key == "enabled":
             combo = ComboBox(self.modal_shell.surface)
@@ -264,7 +301,7 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
         )
         choices = {
             "mode": mode_choices,
-            "sense_mode": ("2wire", "4wire"),
+            "sense_mode": ("2wire",),
             "device": ("rigol", "keithley", "anritsu"),
             "operator": ("<", "<=", "==", "!=", ">=", ">"),
             "trace": ("TRAC1",),
@@ -277,6 +314,10 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
             for choice in choices:
                 combo.addItem(choice, userData=choice)
             index = combo.findData(str(value))
+            if key == "sense_mode" and index < 0:
+                combo.addItem(f"{value} — PROHIBITED", userData=str(value))
+                index = combo.count() - 1
+                combo.setItemEnabled(index, False)
             combo.setCurrentIndex(index if index >= 0 else 0)
             return combo, "choice"
         if isinstance(value, bool):
@@ -323,6 +364,13 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
         return not (isinstance(value, str) and value.startswith("${") and value.endswith("}"))
 
     def _validate_fields(self, fields: dict[str, object]) -> None:
+        if "channel" in fields and self._literal(fields["channel"]):
+            choices = self._channel_choices()
+            if choices and not any(type(fields["channel"]) is type(choice)
+                                   and fields["channel"] == choice for choice in choices):
+                raise ConfigurationError(f"Invalid channel {fields['channel']!r}; allowed: {choices}.")
+        if "sense_mode" in fields and fields["sense_mode"] != "2wire":
+            raise ConfigurationError("4-wire / remote sense is prohibited; only 2wire is allowed.")
         for key in self._TIME_FIELDS:
             if key in fields and self._literal(fields[key]):
                 parse_quantity(fields[key], DIMENSION_TIME)
@@ -404,6 +452,7 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         parameters = CardWidget(self.segment_panel)
         parameters.setObjectName("recipeEditorParameters")
         parameter_layout = QVBoxLayout(parameters)
+        parameter_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         parameter_layout.setContentsMargins(10, 8, 10, 8)
         title = BodyLabel("Keithley source settings", parameters)
         title.setObjectName("sectionTitle")
@@ -421,20 +470,24 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         self.compliance = _line(self._last_default_compliance)
         self.nplc = _line("1")
         self.settle_time = _line("100 ms")
-        for editor in (self.compliance, self.nplc, self.settle_time):
+        self.source_range = _line("")
+        self.source_range.setPlaceholderText("Explicit fixed range, e.g. 10 mA or 1 V")
+        for editor in (self.compliance, self.nplc, self.settle_time, self.source_range):
             editor.setParent(parameters)
         self.sense_mode = ComboBox(parameters)
-        self.sense_mode.addItems(("2wire", "4wire"))
+        self.sense_mode.addItem("2wire")
         form.addRow("Channel", self.channel)
         form.addRow("Source mode", self.mode)
         form.addRow("Compliance", self.compliance)
+        form.addRow("Source range", self.source_range)
         form.addRow("NPLC", self.nplc)
         form.addRow("Settling time", self.settle_time)
         form.addRow("Sense", self.sense_mode)
         parameter_layout.addLayout(form)
         guidance = BodyLabel(
-            "The source is configured at every generated point. This window only designs "
-            "the recipe; it never enables OUTPUT.",
+            "The recipe configures the source once before the sweep. Each point changes "
+            "only the source level, then waits for the selected settling time. "
+            "Add an explicit OUTPUT ON action if required.",
             parameters,
         )
         guidance.setObjectName("muted")
@@ -447,20 +500,57 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         segment_layout = self.segment_panel.layout()
         if not isinstance(segment_layout, QVBoxLayout):
             raise RuntimeError("Keithley sweep segment panel has no vertical layout.")
-        segment_layout.insertWidget(0, parameters)
+        self.parameter_scroll = ScrollArea(self.segment_panel)
+        self.parameter_scroll.setWidgetResizable(True)
+        self.parameter_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.parameter_scroll.setMinimumHeight(90)
+        self.parameter_scroll.setWidget(parameters)
+        segment_layout.insertWidget(0, self.parameter_scroll, 1)
         self.channel.currentTextChanged.connect(self._parameter_changed)
         self.mode.currentTextChanged.connect(self._parameter_changed)
         self._parameter_changed()
         self._update_responsive_layout()
+        self._review_current = {}
+        owner = parent
+        while owner is not None and not hasattr(owner, "_keithley_snapshot_for"):
+            owner = owner.parentWidget()
+        for channel in ("A", "B"):
+            for mode in ("current", "voltage"):
+                try:
+                    current = owner._keithley_snapshot_for(channel) if owner else None
+                except Exception:
+                    current = None
+                self._review_current[channel, mode] = current
+        self.review.bind(self, self._comparison_rows)
+
+    def _comparison_rows(self):
+        current = self._review_current.get((self.channel.currentText(), self.mode.currentText()))
+        fields = {
+            "source_mode": self.mode.currentText(), "compliance": self.compliance.text(),
+            "nplc": self.nplc.text(), "settling_time": self.settle_time.text(),
+            "sense_mode": self.sense_mode.currentText(),
+            "source_range": self.source_range.text(),
+        }
+        rows = [ConfigurationComparisonRow(
+            key, key.replace("_", " ").capitalize(), getattr(current, key, None), value, "Set",
+        ) for key, value in fields.items()]
+        rows.insert(0, ConfigurationComparisonRow(
+            "source_level", self.definition["label"], getattr(current, "source_level", None),
+            "Values defined by the ROI below", "Sweep"))
+        return rows
 
     def _update_responsive_layout(self) -> None:
         """Keep Keithley settings beside the plot at supported dialog widths."""
 
+        self.segments.setMinimumHeight(90)
+        self.plot.setMinimumHeight(110)
         if self.width() >= 1040:
             self.segments.setHorizontalScrollBarPolicy(
                 Qt.ScrollBarPolicy.ScrollBarAlwaysOff
             )
             super()._update_responsive_layout()
+            self.segments.setMinimumHeight(90)
+            self.plot.setMinimumHeight(110)
             return
         if self.width() >= 860 and hasattr(self, "splitter"):
             self.splitter.setOrientation(Qt.Orientation.Horizontal)
@@ -497,6 +587,7 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         self._set_plot_labels()
         self._refresh_safety_bound()
         if previous_dimension != definition["dimension"]:
+            self.source_range.clear()
             self.segments.blockSignals(True)
             self.segments.setRowCount(0)
             self.segments.blockSignals(False)
@@ -549,11 +640,14 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         self.limit_status.style().polish(self.limit_status)
 
     def keithley_options(self) -> dict[str, object]:
+        if self.sense_mode.currentText() != "2wire":
+            raise ConfigurationError("4-wire / remote sense is prohibited; only 2wire is allowed.")
         return {
             "compliance": self.compliance.text().strip(),
             "nplc": float(self.nplc.text()),
             "settle_time": self.settle_time.text().strip(),
             "sense_mode": self.sense_mode.currentText(),
+            "source_range": self.source_range.text().strip(),
         }
 
     def accept(self) -> None:
@@ -562,6 +656,9 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
             if float(self.nplc.text()) <= 0:
                 raise ConfigurationError("NPLC must be positive.")
             parse_quantity(self.settle_time.text(), DIMENSION_TIME)
+            source_range = parse_quantity(self.source_range.text(), self.definition["dimension"])
+            if source_range.si_value <= 0:
+                raise ConfigurationError("Select a positive fixed source range.")
         except Exception as exc:
             QMessageBox.warning(self, "Keithley sweep", str(exc))
             return
@@ -578,6 +675,9 @@ class FixedValueDialog(FluentRecipeDialog):
         self.setWindowTitle(f"Fixed value — {definition['label']}")
         surface = self.use_modal_shell_content().surface
         layout = self.modal_content_layout(spacing=10)
+        self.review = ConfigurationReview(surface)
+        layout.addWidget(self.review)
+        self._current_value = current_parameter_setting(parent, definition.get("target", ""))
         is_moke = str(definition.get("target", "")).startswith("moke_box.")
         layout.addWidget(BodyLabel(
             "This node applies one programming voltage through the approved MOKE ramp and then confirms DAC zero."
@@ -611,6 +711,9 @@ class FixedValueDialog(FluentRecipeDialog):
         self.create_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
         self._validate()
+
+        self.review.bind(self, lambda: [ConfigurationComparisonRow(
+            "setpoint", definition["label"], self._current_value, self.value.text(), "Set")])
 
     def _validate(self) -> None:
         try:
@@ -678,6 +781,23 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         )
         form.addRow("Average complete spectra", self.average_count)
         self.average_count_label = form.labelForField(self.average_count)
+        self.minimum_duration = LineEdit(surface)
+        self.minimum_duration.setText(str(node.data.get("minimum_duration", "0 s")))
+        self.minimum_duration.setToolTip("Collect for at least this time AND the requested sweep count. 0 s uses the count only.")
+        self.reference_purpose = ComboBox(surface)
+        self.reference_purpose.addItem("Reference", userData="reference")
+        self.reference_purpose.addItem("Background", userData="background")
+        self.reference_purpose.setCurrentIndex(1 if node.data.get("purpose") == "background" else 0)
+        if self._reference_only:
+            form.addRow("Minimum collection time", self.minimum_duration)
+            form.addRow("Saved role", self.reference_purpose)
+        else:
+            self.minimum_duration.hide()
+            self.reference_purpose.hide()
+        self.inter_sweep_delay = LineEdit(surface)
+        self.inter_sweep_delay.setText(str(node.data.get("inter_sweep_delay", "0 s")))
+        self.inter_sweep_delay.setToolTip("Delay between complete raw spectra in this average. Use a Wait node before the first spectrum after a setpoint change.")
+        form.addRow("Delay between raw spectra", self.inter_sweep_delay)
         self.reference_operation = ComboBox(surface)
         for label, value in self.operations:
             self.reference_operation.addItem(label, userData=value)
@@ -753,11 +873,24 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             self.store_processed.setChecked(False)
 
     def node_fields(self) -> dict[str, object]:
+        delay = parse_quantity(self.inter_sweep_delay.text().strip(), DIMENSION_TIME).si_value
+        if not 0 <= delay <= 3600:
+            raise ValueError("Delay between raw spectra must be in 0..3600 s.")
         fields: dict[str, object] = {
             "trace": self.trace.currentText(),
             "average_count": self.average_count.value(),
+            "inter_sweep_delay": self.inter_sweep_delay.text().strip(),
         }
         fields.update(self.processing_options.node_fields())
+        if self._reference_only:
+            fields["purpose"] = self.reference_purpose.currentData()
+            duration = parse_quantity(self.minimum_duration.text().strip(), DIMENSION_TIME).si_value
+            if not 0 <= duration <= 3600:
+                raise ValueError("Minimum collection time must be in 0..3600 s.")
+            if duration:
+                if fields.get("source_file"):
+                    raise ValueError("Minimum collection time requires acquisition, not a file import.")
+                fields["minimum_duration"] = self.minimum_duration.text().strip()
         if not self._reference_only:
             if self.processing_options.filters["emi_reject"].isChecked():
                 if self.processing_options.source_unit not in {"dB", "dBm"}:

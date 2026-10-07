@@ -12,7 +12,7 @@ from app.devices.anritsu_ms2830a import AnritsuAdapter
 from app.devices.keithley_2600 import KeithleyAdapter
 from app.devices.rigol_dg1000z import RigolAdapter
 from app.devices.simulators import SimulatedVisaFactory
-from app.domain.errors import ExecutionError
+from app.domain.errors import DeviceError, ExecutionError
 from app.domain.spectrum_correction import SpectrumFrameRole, SweepEvidence
 from app.engine import RecipeCompiler, RecipeRunner
 from app.recipes import parse_recipe_text
@@ -59,8 +59,8 @@ def execute(path, *, failure=False, monkeypatch=None, source=SOURCE, configurati
     acquired = []
     original_acquire = anritsu.acquire_single_sweep
 
-    def capture(name):
-        trace = original_acquire(name)
+    def capture(name, **kwargs):
+        trace = original_acquire(name, **kwargs)
         if configuration_change and len(acquired) == 1:
             trace = replace(trace, configuration_generation=trace.configuration_generation + 1)
         acquired.append(trace)
@@ -130,8 +130,35 @@ def test_reference_and_signal_blocks_preserve_all_raw_and_public_means(tmp_path)
     settings = simulation_settings()
     plan = RecipeCompiler(settings).compile(parse_recipe_text(SOURCE))
     estimate = PlanEstimator(settings).estimate(plan)
-    assert estimate.spectrum_values == 7 * 101  # Five raw sources plus raw/processed checkpoint.
+    from app.engine.policy import ExecutionPolicy
+
+    attempts = 1 + ExecutionPolicy.from_settings(settings).retry_count
+    assert estimate.spectrum_values == (5 * attempts + 2) * 101
     assert estimate.uncompressed_hdf5_bytes > path.stat().st_size
+
+
+def test_reference_retry_keeps_failed_attempt_sources_outside_successful_mean(tmp_path, monkeypatch):
+    original = RecipeRunner._read_spectrum_identity
+    calls = 0
+
+    def fail_first_final_readback(runner):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise DeviceError("Injected final identity readback failure")
+        return original(runner)
+
+    monkeypatch.setattr(RecipeRunner, "_read_spectrum_identity", fail_first_final_readback)
+    path = tmp_path / "retry.h5"
+    result, acquired = execute(path)
+    assert result.error is None and result.stored_points == 1
+    rows = list(iter_recipe_spectrum_sweeps(path))
+    assert len(rows) == len(acquired) == 8
+    assert [record.average_index for _, _, record in rows] == [0, 1, 2, 0, 1, 2, 0, 1]
+    with h5py.File(path, "r") as file:
+        assert len(file["references"]) == 1
+        assert file["references/0/source_recipe_sweep_indices"][:].tolist() == [3, 4, 5]
+    assert ThatecCompatibilityValidator().validate(path, require_pythat=True).valid
 
 
 def test_storage_fault_stops_block_and_preserves_committed_prefix(tmp_path, monkeypatch):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sys
 from weakref import WeakSet
 
 from PySide6.QtCore import QEvent, QObject
@@ -28,6 +29,19 @@ from .tokens import ThemeTokens, tokens_for
 class AppliedTheme:
     name: str
     tokens: ThemeTokens
+
+
+def configure_widget_style(application: QApplication) -> None:
+    """Use a handle-independent Qt base beneath Fluent's QSS on Windows.
+
+    WindowsVista/Windows11 styles resolve BUTTON metrics through UXTheme
+    HWNDs, which can be invalid during frameless-window recreation/teardown.
+    Fusion paints those fallback controls in Qt; Fluent still owns the theme.
+    Install once, before constructing the station windows where possible.
+    """
+    if sys.platform == "win32" and not application.property("stationWidgetStyleConfigured"):
+        application.setStyle("Fusion")
+        application.setProperty("stationWidgetStyleConfigured", True)
 
 
 def apply_application_theme(application: QApplication, mode: str) -> AppliedTheme:
@@ -266,6 +280,12 @@ def _apply_station_control_styles(application: QApplication, tokens: ThemeTokens
             _apply_station_control_style(widget, tokens)
 
 
+def _set_style_if_changed(widget: QWidget, stylesheet: str) -> None:
+    """Avoid Qt repolishing a subtree when Show reasserts identical rules."""
+    if widget.styleSheet() != stylesheet:
+        widget.setStyleSheet(stylesheet)
+
+
 def _apply_station_control_style(widget: QWidget, tokens: ThemeTokens) -> None:
     # Do not skip a widget merely because it saw this token before. QFluent
     # can repolish controls after that point (notably hidden Settings routes),
@@ -277,7 +297,7 @@ def _apply_station_control_style(widget: QWidget, tokens: ThemeTokens) -> None:
         # stylesheet directly, as FluentWidgetTitleBar already does.
         FluentStyleSheet.FLUENT_WINDOW.apply(widget)
     if isinstance(widget, QDialog):
-        widget.setStyleSheet(dialog_qss(tokens))
+        _set_style_if_changed(widget, dialog_qss(tokens))
     _apply_station_surface(widget, tokens)
     _apply_semantic_text(widget, tokens)
     if widget.property("validationState") is not None:
@@ -291,13 +311,13 @@ def _apply_station_control_style(widget: QWidget, tokens: ThemeTokens) -> None:
     _apply_station_card_frame(widget, tokens)
     _apply_station_button(widget, tokens)
     if widget.objectName() == "eventLogText":
-        widget.setStyleSheet(event_log_qss(tokens))
+        _set_style_if_changed(widget, event_log_qss(tokens))
         viewport = getattr(widget, "viewport", lambda: None)()
         if viewport is not None:
             _set_widget_background(
                 viewport, tokens.surface_raised, tokens.text_primary
             )
-            viewport.setStyleSheet(
+            _set_style_if_changed(viewport, 
                 f"background: {tokens.surface_raised}; color: {tokens.text_primary};"
             )
         widget.update()
@@ -316,14 +336,14 @@ def apply_validation_style(
     marker = "/* station-validation */"
     base = editor.styleSheet().split(marker, 1)[0].rstrip()
     if editor.property("validationState") == "error":
-        editor.setStyleSheet(
+        _set_style_if_changed(editor, 
             f"{base}\n{marker}\n"
             "QLineEdit, LineEdit, QComboBox, ComboBox, QSpinBox, SpinBox {"
             f"border: 2px solid {resolved_tokens.danger};"
             "}"
         )
     else:
-        editor.setStyleSheet(base)
+        _set_style_if_changed(editor, base)
     if warning is not None:
         _apply_inline_validation_warning_style(warning, resolved_tokens)
 
@@ -345,7 +365,7 @@ def _apply_inline_validation_warning_style(
 ) -> None:
     marker = "/* station-inline-validation */"
     base = warning.styleSheet().split(marker, 1)[0].rstrip()
-    warning.setStyleSheet(
+    _set_style_if_changed(warning, 
         f"{base}\n{marker}\n"
         "QLabel, BodyLabel {"
         f"color: {tokens.danger}; font-weight: 600;"
@@ -360,7 +380,7 @@ def _apply_station_button(widget: QWidget, tokens: ThemeTokens) -> None:
         return
     marker = "/* station-disabled-button */"
     base = widget.styleSheet().split(marker, 1)[0].rstrip()
-    widget.setStyleSheet(
+    _set_style_if_changed(widget, 
         f"{base}\n{marker}\n"
         "QPushButton:disabled, PushButton:disabled, PrimaryPushButton:disabled {"
         "color: palette(placeholder-text);"
@@ -404,7 +424,7 @@ def _apply_station_card_frame(widget: QWidget, tokens: ThemeTokens) -> None:
         base = widget.styleSheet().split(marker, 1)[0].rstrip()
     else:
         base = widget.styleSheet().rstrip()
-    widget.setStyleSheet(
+    _set_style_if_changed(widget, 
         f"{base}\n{marker}\n"
         "CardWidget {"
         f"background-color: {color if is_dialog_surface else 'palette(base)'};"
@@ -432,7 +452,7 @@ def _apply_station_surface(widget: QWidget, tokens: ThemeTokens) -> None:
         _set_widget_background(widget, color, tokens.text_primary)
     if widget.objectName() == "fluentApplicationStack":
         widget.setProperty("isTransparent", True)
-        widget.setStyleSheet(
+        _set_style_if_changed(widget, 
             "QStackedWidget#fluentApplicationStack {"
             "border: none; border-radius: 0; background: transparent;"
             "}"

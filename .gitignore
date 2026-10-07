@@ -24,6 +24,8 @@ tmp/
 artifacts/
 recipes/*
 !recipes/example_spectrum_background_filters.yml
+!recipes/anritsu_background_reference_smoke_test.yml
+!recipes/moke_30_50mV_keithley_B25_35mA_A0_1p6mA_avg32.yml
 .tmp-characterization/20260903T115022.922794Z_responsiveness.csv
 *.csv
 *.h5
@@ -79,3 +81,43 @@ docs/audits/*
 !docs/audits/2026-10-04-sweeps/*.png
 !docs/audits/2026-10-04-sweeps/cartesian-simulation.h5
 !docs/audits/2026-10-04-sweeps/cartesian-simulation.csv
+
+# Regression evidence for the sweep corrections.
+!docs/audits/2026-10-05-sweep-fixes/
+!docs/audits/2026-10-05-sweep-fixes/*.md
+!docs/audits/2026-10-05-sweep-fixes/*.png
+!docs/audits/2026-10-05-sweep-fixes/*.json
+!docs/audits/2026-10-05-sweep-fixes/*.log
+!docs/audits/2026-10-05-sweep-fixes/cartesian-simulation.h5
+!docs/audits/2026-10-05-sweep-fixes/cartesian-simulation.csv
+
+# Follow-up review of current analyzer configuration integration.
+!docs/audits/2026-10-05-sweep-analyzer-recheck/
+!docs/audits/2026-10-05-sweep-analyzer-recheck/*.py
+!docs/audits/2026-10-05-sweep-analyzer-recheck/*.json
+!docs/audits/2026-10-05-sweep-analyzer-recheck/*.log
+
+# Analyzer and Rigol follow-up repair qualification.
+!docs/audits/2026-10-05-production-followup/
+!docs/audits/2026-10-05-production-followup/*.png
+!docs/audits/2026-10-05-production-followup/*.json
+!docs/audits/2026-10-05-production-followup/*.log
+!docs/audits/2026-10-05-production-followup/*.md
+!docs/audits/2026-10-05-requested-sweep/
+!docs/audits/2026-10-05-requested-sweep/*.md
+!docs/audits/2026-10-05-requested-sweep/*.json
+!docs/audits/2026-10-05-requested-sweep/*.png
+!docs/audits/2026-10-05-requested-sweep/*.log
+
+# Reproducible execution audit and production-readiness evidence.
+!docs/audits/2026-10-05-execution-performance/
+!docs/audits/2026-10-05-execution-performance/*.md
+!docs/audits/2026-10-05-execution-performance/*.png
+!docs/audits/2026-10-05-execution-performance/*.json
+!docs/audits/2026-10-06-production-readiness/
+!docs/audits/2026-10-06-production-readiness/*.md
+!docs/audits/2026-10-06-production-readiness/*.json
+!docs/audits/2026-10-06-production-readiness/*.xml
+!docs/audits/2026-10-06-source-review/
+!docs/audits/2026-10-06-source-review/*.md
+!docs/audits/2026-10-06-source-review/*.json

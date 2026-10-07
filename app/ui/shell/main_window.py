@@ -44,6 +44,7 @@ from qfluentwidgets import (
     RoundMenu,
     SimpleCardWidget,
     TransparentDropDownToolButton,
+    qrouter,
 )
 from qfluentwidgets.common.style_sheet import styleSheetManager
 
@@ -71,11 +72,9 @@ from app.devices.keithley_2600.settings_defaults import (
     validate_keithley_default_snapshots,
 )
 from app.devices.simulators import simulated_station_settings
-from app.engine.compiler import RecipeCompiler
+from shiboken6 import isValid
 from app.engine.estimation import PlanEstimator
-from app.engine.recovery import RunRecoveryManager
 from app.engine.runner import ExecutionMode
-from app.recipes import parse_recipe_text
 from app.inventory import ActiveSampleTarget, InventoryStore, SampleRunRecord
 from app.platform.paths import default_catalogue_root
 from app.settings import SettingsRepository
@@ -85,7 +84,6 @@ from app.security import AccessPolicy, Permission
 from app.safety.keithley_limit_reconciliation import (
     propose_keithley_limit_adjustments,
 )
-from app.storage import Hdf5RunReader
 from app.ui.settings_page import SettingsPage
 from app.ui.settings_guidance import SettingsIssue, settings_issue_for_error
 from app.ui.dialogs import SweepDeviceReadinessDialog, StationMessageBox as QMessageBox
@@ -107,6 +105,7 @@ from app.ui.recipes.page import (  # noqa: F401
     SweepLibraryButton,
 )
 from app.ui.shell.page_host import FluentPageHost
+from app.ui.shell.navigation import StationNavigationTreeWidget
 from app.ui.shell.safety_strip import StationSafetySnapshot, StationSafetyStrip
 from app.ui.widgets import (
     KeithleyLimitProposalDialog,
@@ -222,6 +221,10 @@ class MainWindow(FluentWindow):
             actor_roles=tuple(sorted(role.value for role in self._access.identity.roles)),
         )
         self._audit_healthy = True
+        self._audit_health_timer = QTimer(self)
+        self._audit_health_timer.setInterval(250)
+        self._audit_health_timer.timeout.connect(self._refresh_audit_health)
+        self._audit_health_timer.start()
         self._run_correlation_id: str | None = None
         self.setMinimumSize(820, 560)
         self.resize(1360, 880)
@@ -349,6 +352,7 @@ class MainWindow(FluentWindow):
                 simulation=self._simulation,
             ),
             operator_context_provider=lambda: self._access.identity.as_context(),
+            simulation=self._simulation,
         )
         self._run_read_only_controls: dict[QWidget, bool] = {}
         self._pending_execution_previews: dict[str, dict[str, object]] = {}
@@ -362,9 +366,14 @@ class MainWindow(FluentWindow):
         # latest confirmed snapshot and repaint those pages at a bounded rate;
         # instrument I/O and safety decisions remain entirely in RunWorker.
         self._pending_execution_readback: tuple[str, dict[str, object]] | None = None
+        self._last_execution_readback: tuple[str, dict[str, object]] | None = None
+        self._execution_output_status: dict[str, str] = {}
         self._execution_page_projection_cache: dict[
             str, tuple[dict[str, object], dict[str, str]]
         ] = {}
+        self.stackedWidget.currentChanged.connect(
+            lambda _index: QTimer.singleShot(0, self._refresh_visible_execution_readback)
+        )
         self._execution_readback_timer = QTimer(self)
         self._execution_readback_timer.setSingleShot(True)
         self._execution_readback_timer.setInterval(100)
@@ -491,9 +500,14 @@ class MainWindow(FluentWindow):
         self.recipe_page.set_keithley_snapshot_provider(
             self.keithley_page.configuration_snapshot_for
         )
-        self.recipe_page.set_rigol_snapshot_provider(self.rigol_page.configuration_snapshot_for)
+        self.recipe_page.set_rigol_snapshot_provider(
+            self.rigol_page.configuration_snapshot_for,
+            self.rigol_page.configuration_review_snapshot_for,
+        )
+        self.recipe_page.parameter_snapshot_provider = self.moke_box_page.field_workflow.quick_control_drafts
         self.recipe_page.set_anritsu_snapshot_provider(
-            self.anritsu_page.configuration_panel.configuration_snapshot
+            self.anritsu_page.configuration_panel.configuration_snapshot,
+            self.anritsu_page.advanced_settings_snapshot,
         )
         self.recipe_page.set_anritsu_sg_snapshot_provider(
             self.anritsu_page.signal_generator_snapshot
@@ -678,11 +692,12 @@ class MainWindow(FluentWindow):
             (self.settings_page, "settings", "Settings"),
         )
         self.navigation_routes: dict[str, FluentPageHost] = {}
-        self.apparatus_navigation_item = self.navigationInterface.addItem(
+        self.apparatus_navigation_item = StationNavigationTreeWidget(
+            FluentIcon.DEVELOPER_TOOLS, "Devices", False, self.navigationInterface.panel
+        )
+        self.navigationInterface.addWidget(
             routeKey="apparatusMenu",
-            icon=FluentIcon.DEVELOPER_TOOLS,
-            text="Devices",
-            selectable=False,
+            widget=self.apparatus_navigation_item,
             position=NavigationItemPosition.TOP,
             tooltip="Connected measurement devices",
         )
@@ -725,13 +740,24 @@ class MainWindow(FluentWindow):
                 parent_key = "apparatusMenu"
             else:
                 parent_key = None
-            self.addSubInterface(
-                host,
-                route_icons[route],
-                display_name,
-                position=position,
-                parent=parent_key,
+            host.setProperty("isStackedTransparent", False)
+            self.stackedWidget.addWidget(host)
+            navigation_item = StationNavigationTreeWidget(
+                route_icons[route], display_name, True, self.navigationInterface.panel
             )
+            self.navigationInterface.addWidget(
+                routeKey=host.objectName(),
+                widget=navigation_item,
+                onClick=lambda checked=False, page=host: self.switchTo(page),
+                position=position,
+                tooltip=display_name,
+                parentRouteKey=parent_key,
+            )
+            if self.stackedWidget.count() == 1:
+                self.stackedWidget.currentChanged.connect(self._onCurrentInterfaceChanged)
+                self.navigationInterface.setCurrentItem(host.objectName())
+                qrouter.setDefaultRouteKey(self.stackedWidget, host.objectName())
+            self._updateStackedBackground()
             widget._scroll_area = host.scroll_area
         # Keep the equipment group open on launch: device controls remain a
         # single click away while the navigation still communicates hierarchy.
@@ -917,6 +943,8 @@ class MainWindow(FluentWindow):
                 p = getattr(p, "treeParent", None)
         self.switchTo(target)
         self._sync_shell_splitter_layout()
+        if self._last_execution_readback is not None:
+            self._apply_runner_device_readback(*self._last_execution_readback)
 
     def _toggle_event_log_requested(self) -> None:
         """Toggle global event log panel visibility from the navigation bar."""
@@ -1030,20 +1058,24 @@ class MainWindow(FluentWindow):
             item.setEnabled(enabled)
 
     def _refresh_safety_strip(self) -> None:
-        active_outputs = sum(state == "output_on" for state in self._device_states.values())
+        runner_outputs = getattr(self, "_execution_output_status", {})
+        runner_devices = {endpoint.split(".", 1)[0] for endpoint in runner_outputs}
+        active_outputs = sum(state == "on" for state in runner_outputs.values()) + sum(
+            state == "output_on" for device, state in self._device_states.items()
+            if device not in runner_devices)
         unknown_outputs = sum(
-            state in {"unknown", "fault"}
+            state in {"unknown", "fault", "disconnected", "connecting"}
             for device, state in self._device_states.items()
-            if device != "lakeshore_gaussmeter"
-        )
+            if device != "lakeshore_gaussmeter" and device not in runner_devices
+        ) + sum(state == "unknown" for state in runner_outputs.values())
         # A valid DAC reply verifies communication, never Kepco power-off.
         moke_state = self._device_states.get("moke_box")
         moke_power_uncertain = moke_state not in {None, "disconnected"} or self.moke_box_page.field_workflow.busy
-        if moke_power_uncertain and moke_state not in {"unknown", "fault"}:
+        if moke_power_uncertain and moke_state not in {"unknown", "fault"} and "moke_box" not in runner_devices:
             unknown_outputs += 1
         self.safety_strip.update_snapshot(
             StationSafetySnapshot(
-                ready=self.dashboard.evaluate_readiness().ready,
+                ready=self.dashboard.evaluate_readiness(display_only=True).ready,
                 active_outputs=active_outputs,
                 unknown_outputs=unknown_outputs,
                 simulation=self._simulation,
@@ -1689,23 +1721,15 @@ class MainWindow(FluentWindow):
         self.dashboard.record_device_error(device, error)
 
     def _set_device_state(self, device: str, state: str) -> None:
+        if not self._run_controller.running:
+            self._execution_output_status = {endpoint: value for endpoint, value in self._execution_output_status.items()
+                if endpoint.split(".", 1)[0] != device}
         self._device_states[device] = state
         self.dashboard.update_device_state(device, state)
         self._refresh_safety_strip()
 
     def _guard_manual_operation(self, device: str, operation: str, payload: object) -> None:
         """Fail closed for new energy-producing operations after audit I/O failure."""
-
-        if device in self._leased_run_devices and operation not in {
-            "emergency_off",
-            "stop_vout",
-            "disarm_voltage_plan",
-            "recover_from_compliance",
-            "set_compliance_policy",
-        }:
-            raise ConfigurationError(
-                f"{getattr(self._settings, device).display_name} is leased to the active recipe run."
-            )
 
         # De-energising and disconnecting are never blocked by RBAC or audit
         # health. This invariant is stronger than any normal user permission.
@@ -1736,6 +1760,11 @@ class MainWindow(FluentWindow):
                 enabled = True
             if not bool(enabled):
                 return
+        if device in self._leased_run_devices:
+            raise ConfigurationError(
+                f"{getattr(self._settings, device).display_name} is leased to the active recipe run."
+            )
+        self._refresh_audit_health()
         energizing_operations = {
             "arm_voltage_plan", "arm_field_calibration", "ramp_vout", "start_field_calibration",
             "configure",
@@ -1808,6 +1837,7 @@ class MainWindow(FluentWindow):
         self._assert_audit_ready_for_run()
 
     def _assert_audit_ready_for_run(self) -> None:
+        self._refresh_audit_health()
         if not self._audit_healthy:
             raise ConfigurationError(
                 "The durable audit log is unavailable. A measurement run cannot start."
@@ -2047,6 +2077,7 @@ class MainWindow(FluentWindow):
             len(plan.actions),  # type: ignore[union-attr]
             estimate.nominal_duration_s,
             plan_actions=plan.actions,  # type: ignore[union-attr]
+            safe_shutdown_actions=plan.safe_shutdown_actions,
             recipe_source=plan.recipe_source,  # type: ignore[union-attr]
             semantic_tree=semantic_tree,
             execution_mode=selected_execution_mode.value,
@@ -2087,45 +2118,38 @@ class MainWindow(FluentWindow):
         if path is None:
             QMessageBox.warning(self, "Resume run", "No valid run file was selected.")
             return
-        try:
-            detail = Hdf5RunReader.detail(path)
-            outputs_forced_off = bool(detail.simulation_metadata.get("outputs_forced_off", False))
-            stored_execution_mode = ExecutionMode.coerce(
-                str(detail.simulation_metadata.get("execution_mode", "measurement"))
-            )
-            if outputs_forced_off:
-                stored_execution_mode = ExecutionMode.DRY_RUN
-            outputs_forced_off = stored_execution_mode is ExecutionMode.DRY_RUN
-            current_settings_source = serialize_settings_snapshot(
-                self._settings,
-                self._repository.path,
-                simulation=self._simulation,
-            )
-            if current_settings_source != detail.settings_yaml:
-                raise ConfigurationError(
-                    "The current settings differ from the immutable run snapshot. "
-                    "Restore the exact station configuration before resuming."
-                )
-            recipe = parse_recipe_text(detail.recipe_yaml, origin=str(path))
-            plan = RecipeCompiler(
-                self._settings,
-                outputs_forced_off=outputs_forced_off,
-                device_registry=self._composition.registry,
-            ).compile(
-                recipe
-            )
-            checkpoint = RunRecoveryManager().inspect(path, plan)
-            if (
-                checkpoint.stored_points >= plan.total_points
-                and checkpoint.next_action_index >= len(plan.actions)
-            ):
-                raise ConfigurationError("The selected run has no remaining actions.")
-        except Exception as exc:
-            box = MessageBox("Resume unavailable", str(exc), self)
-            box.cancelButton.hide()
-            box.exec()
-            self._log(f"RUN RECOVERY REJECTED: {exc}")
+        from app.ui.resume_preparation import ResumePreparation
+        if not hasattr(self, "_resume_preparation"):
+            self._resume_preparation = ResumePreparation(self)
+            self._resume_preparation.ready.connect(self._resume_prepared)
+            self._resume_preparation.failed.connect(self._resume_preparation_failed)
+        self._log("Inspecting recovery archive and compiling its plan...")
+        if not self._resume_preparation.start(path, self._settings, self._repository.path,
+                                              self._simulation, self._composition.registry):
+            QMessageBox.warning(self, "Resume unavailable", "Previous recovery inspection is still stopping. Try again when it finishes.")
+
+    def _resume_preparation_failed(self, message):
+        box = MessageBox("Resume unavailable", message, self)
+        box.cancelButton.hide()
+        box.exec()
+        self._log(f"RUN RECOVERY REJECTED: {message}")
+
+    def _resume_prepared(self, prepared):
+        if self._run_controller.running:
+            self._log("Recovery preparation discarded: another run is active.")
             return
+        if self._settings != prepared.settings or self._simulation != prepared.simulation:
+            self._resume_preparation_failed("Station settings changed during recovery inspection. Select the run again.")
+            return
+        try:
+            self._require_permission(Permission.RUN_RECIPE, "resuming a measurement run", audit=True)
+            self._assert_audit_ready_for_run()
+        except (AuthorizationError, ConfigurationError) as exc:
+            self._resume_preparation_failed(str(exc))
+            return
+        plan, checkpoint = prepared.plan, prepared.checkpoint
+        stored_execution_mode = prepared.mode
+        outputs_forced_off = stored_execution_mode is ExecutionMode.DRY_RUN
         discarded = checkpoint.committed_points_found - checkpoint.stored_points
         msg = (
             "Resume only from the last confirmed safe boundary?\n\n"
@@ -2167,8 +2191,21 @@ class MainWindow(FluentWindow):
     ) -> None:
         if dialog.missing_devices:
             return
+        if getattr(self, "_emergency_inhibit", False):
+            QMessageBox.warning(
+                self, "E-STOP Latched",
+                "Emergency stop has been triggered and outputs are inhibited. "
+                "Clear the emergency stop before resuming a measurement.",
+            )
+            return
         try:
             estimate = PlanEstimator(self._settings).estimate(plan)  # type: ignore[arg-type]
+            readiness = self.dashboard.evaluate_readiness(plan, estimate)
+            if readiness.blocking_items:
+                details = "\n".join(
+                    f"• {item.label}: {item.detail}" for item in readiness.blocking_items
+                )
+                raise ConfigurationError("Station preflight is blocked:\n" + details)
             semantic_tree = self.recipe_page.semantic_tree_snapshot(plan.recipe_source, plan)
             active_controllers = self._active_device_controllers()
             self._run_controller.start(
@@ -2192,6 +2229,8 @@ class MainWindow(FluentWindow):
         self.run_monitor.run_started(
             remaining + len(checkpoint.prelude_actions),
             estimate.nominal_duration_s * remaining_fraction,
+            timeline_action_offset=checkpoint.next_action_index - len(checkpoint.prelude_actions),
+            safe_shutdown_actions=plan.safe_shutdown_actions,
             plan_actions=(
                 *checkpoint.prelude_actions,
                 *plan.actions[checkpoint.next_action_index :],
@@ -2212,10 +2251,15 @@ class MainWindow(FluentWindow):
             )
         )
 
+    def _refresh_visible_execution_readback(self) -> None:
+        if self._last_execution_readback is not None:
+            self._apply_runner_device_readback(*self._last_execution_readback)
+
     def _run_event(self, name: str, data: object) -> None:
         payload = data if isinstance(data, dict) else {"data": data}
         if name == "run_started":
             self._execution_page_projection_cache.clear()
+            self._last_execution_readback = None
         preview_event = name in {"spectrum_preview", "reference_preview"}
         # Heartbeats carry no confirmed state and previews are rendered at a
         # bounded cadence. Read-only device pages also use a latest-state
@@ -2266,6 +2310,7 @@ class MainWindow(FluentWindow):
             "spectrum_preview",
             "reference_preview",
             "action_started",
+            "moke_ramp_progress",
             "action_finished",
             "recovery_prelude_started",
             "recovery_prelude_finished",
@@ -2426,6 +2471,16 @@ class MainWindow(FluentWindow):
     ) -> None:
         """Schedule one latest-state repaint for read-only device pages."""
 
+        self._last_execution_readback = (event_name, dict(payload))
+        snapshot = payload.get("state_snapshot")
+        statuses = snapshot.get("output_status") if isinstance(snapshot, dict) else None
+        if isinstance(statuses, dict) and statuses:
+            confirmed = {str(endpoint): state if isinstance(state, str) and state in {"on", "off", "unknown"} else "unknown"
+                for endpoint, state in statuses.items()}
+            if confirmed != self._execution_output_status:
+                self._execution_output_status = confirmed
+                self._refresh_safety_strip()
+
         if (
             not self._run_controller.running
             or event_name in self._IMMEDIATE_READBACK_EVENTS
@@ -2488,7 +2543,6 @@ class MainWindow(FluentWindow):
                 continue
             if (
                 self._run_controller.running
-                and event_name not in self._IMMEDIATE_READBACK_EVENTS
                 and not page.isVisibleTo(self)
             ):
                 # The Execution page owns the live plot and semantic state.
@@ -2897,6 +2951,7 @@ class MainWindow(FluentWindow):
                         else format_quantity_auto(advanced.vbw_hz, DIMENSION_FREQUENCY)
                     ),
                     "vbw_mode": advanced.vbw_mode,
+                    "vbw_filter_mode": advanced.vbw_filter_mode,
                     "detector": advanced.detector,
                     "attenuation": f"{advanced.attenuation_db:.9g} dB",
                     "attenuation_auto": advanced.attenuation_auto,
@@ -2916,7 +2971,7 @@ class MainWindow(FluentWindow):
         try:
             if captured is None:
                 snapshot = self.anritsu_page.configuration_panel.configuration_snapshot()
-                advanced = self.anritsu_page.advanced_configuration_panel.settings_snapshot()
+                advanced = self.anritsu_page.advanced_settings_snapshot()
                 signal_generator = self.anritsu_page.signal_generator_snapshot()
                 average_count = self.anritsu_page.average_count.value()
                 refresh_ms = self.anritsu_page.refresh.value()
@@ -3206,7 +3261,7 @@ class MainWindow(FluentWindow):
             preview_defaults = self.anritsu_page.preview_settings_snapshot()
             anritsu_defaults = (
                 self.anritsu_page.configuration_panel.configuration_snapshot(),
-                self.anritsu_page.advanced_configuration_panel.settings_snapshot(),
+                self.anritsu_page.advanced_settings_snapshot(),
                 self.anritsu_page.signal_generator_snapshot(),
                 self.anritsu_page.average_count.value(),
                 self.anritsu_page.refresh.value(),
@@ -3598,11 +3653,13 @@ class MainWindow(FluentWindow):
                 ):
                     controls.update(page.findChildren(widget_type))
                 for control in controls:
+                    if control.property("executionReadOnlyNavigation") is True:
+                        continue
                     self._run_read_only_controls[control] = control.isEnabled()
                     control.setEnabled(False)
             return
         for control, enabled in self._run_read_only_controls.items():
-            if control is not None:
+            if control is not None and isValid(control):
                 control.setEnabled(enabled)
         self._run_read_only_controls.clear()
         for page in self._device_pages.values():
@@ -3667,15 +3724,28 @@ class MainWindow(FluentWindow):
                 critical=critical,
             )
         except (OSError, RuntimeError) as exc:
-            first_failure = self._audit_healthy
-            self._audit_healthy = False
-            if hasattr(self, "dashboard"):
-                self.dashboard.update_audit_health(False)
-            if first_failure and hasattr(self, "log"):
-                self.log.appendPlainText(
-                    "CRITICAL: durable audit logging failed; OUTPUT ON and new runs are locked: "
-                    + str(exc)
-                )
+            self._mark_audit_failed(exc)
+
+    def _refresh_audit_health(self) -> None:
+        try:
+            self._audit.check_health()
+        except (OSError, RuntimeError) as exc:
+            self._mark_audit_failed(exc)
+
+    def _mark_audit_failed(self, error: Exception) -> None:
+        first_failure = self._audit_healthy
+        self._audit_healthy = False
+        if not first_failure:
+            return
+        if hasattr(self, "dashboard"):
+            self.dashboard.update_audit_health(False)
+        if hasattr(self, "_run_controller"):
+            self._run_controller.request_stop()
+        if hasattr(self, "log"):
+            self.log.appendPlainText(
+                "CRITICAL: durable audit logging failed; OUTPUT ON and new runs are locked: "
+                + str(error)
+            )
 
     @staticmethod
     def _log_classification(message: str) -> tuple[str, str, bool]:
@@ -3713,7 +3783,9 @@ class MainWindow(FluentWindow):
         )
         self._event_log_entries.append(message)
         if not self.traffic_only_button.isChecked() or self._is_transport_log(message):
-            if getattr(self, "_simulation", False) or critical or severity in {"error", "critical"}:
+            if critical or severity in {"error", "critical"} or (
+                getattr(self, "_simulation", False) and not self._run_controller.running
+            ):
                 self._flush_pending_log_ui()
                 self.log.appendPlainText(message)
             else:
@@ -3893,6 +3965,11 @@ class MainWindow(FluentWindow):
         if not self.recipe_page.confirm_close():
             event.ignore()
             return
+        preparation = getattr(self, "_resume_preparation", None)
+        if preparation is not None and not preparation.close():
+            self._log("Application close is waiting for recovery archive inspection to finish.")
+            event.ignore()
+            return
         if not self.moke_box_page.field_workflow.prepare_application_shutdown():
             self._navigate_to("moke_box")
             self.moke_box_page.views.setCurrentIndex(3)
@@ -3983,13 +4060,14 @@ class MainWindow(FluentWindow):
         self._close_owned_floating_windows()
         self.quick_control_coordinator.cancel_all("Application closing")
         self.anritsu_page._timer.stop()
-        try:
-            self.anritsu_page.close_manual_archive_session()
-        except Exception as exc:
-            self._log(f"Manual spectrum archive close warning: {exc}")
-        self.anritsu_page._analysis_controller.close()
-        self.anritsu_page._background_config_timer.stop()
-        self.anritsu_page._spectrogram_analysis_controller.close()
+        if not self.anritsu_page.prepare_manual_archive_shutdown():
+            self._log("Application close is waiting for manual spectrum archive I/O to finish.")
+            event.ignore()
+            return
+        if not self.anritsu_page.shutdown_analysis():
+            self._log("Application close is waiting for spectrum analysis threads to finish.")
+            event.ignore()
+            return
         if not DeviceController.close_all(self._controllers.values()):
             self._audit_record(
                 "Application close delayed: background device threads did not terminate cleanly within timeout",

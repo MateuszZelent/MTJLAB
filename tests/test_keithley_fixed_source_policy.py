@@ -23,9 +23,12 @@ from tests.helpers import simulation_settings as base_settings
 
 
 def simulation_settings():
-    settings = base_settings()
-    settings.keithley.safety.channels["A"] = settings.keithley.safety.channels["A"].model_copy(update={"enabled": True})
-    return settings
+    from app.settings.models import StationSettings
+    raw = base_settings().model_dump(mode="python")
+    channels = raw["devices"]["keithley"]["safety"]["channels"]
+    channels["A"]["enabled"] = True
+    channels["B"]["lab_limits"]["measured_current_trip"]["min"] = "-2 mA"
+    return StationSettings.model_validate(raw)
 
 
 
@@ -236,10 +239,13 @@ def test_settings_auto_exception_reaches_compiler_adapter_and_characterization(c
     settings = simulation_settings()
     settings.keithley.safety.channels[channel].defaults["source_autorange"] = True
     compiler = RecipeCompiler(settings)
-    # Old recipes with OFF cannot override the operator's Settings choice.
-    request = compiler._compile_keithley({"channel": channel, "mode": mode,
+    # An explicit conflict is rejected, never silently rewritten to AUTO.
+    data = {"channel": channel, "mode": mode,
         "level": level, "compliance": compliance, "source_autorange": False,
-        "source_range": "10 mA"}, "settings-policy")["request"]
+        "source_range": "10 mA"}
+    with pytest.raises(SafetyViolation, match="conflicts"):
+        compiler._compile_keithley(data, "settings-policy")
+    request = compiler._compile_keithley(dict(data, source_autorange=True), "settings-policy")["request"]
     assert request.source_autorange is True
     assert request.source_range_si is None
     session = KeithleySimulator()

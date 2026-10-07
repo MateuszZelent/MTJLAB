@@ -85,7 +85,7 @@ class BackgroundCorrectionAssistant(StationDialog):
         record_layout.addWidget(BodyLabel("Minimum background collection time", self.record_fields))
         self.duration = ComboBox(content)
         default = workspace.duration.text()
-        for value in dict.fromkeys((default, "10 s", "30 s", "60 s")):
+        for value in dict.fromkeys((default, "10 s", "30 s", "60 s", "120 s", "300 s")):
             self.duration.addItem(value, userData=value)
         record_layout.addWidget(self.duration)
         minimum = workspace._settings.anritsu.spectrum_correction.calibration_min_sweeps
@@ -95,7 +95,9 @@ class BackgroundCorrectionAssistant(StationDialog):
         note = CaptionLabel(
             "When the background is ready, this window closes and Background correction is enabled. "
             "Restore your measurement operating point, then press Start Live in the main window. "
-            "Combine Background with Narrow peaks and Denoise as needed.", content)
+            "Use Avg: 16 or 32 for the measurement as well. Longer background collection reduces "
+            "background uncertainty, but cannot remove noise in a single measurement frame. "
+            "Averaging does not remove drifting interference lines.", content)
         note.setWordWrap(True)
         fields.addWidget(note)
         archive_note = CaptionLabel(f"Raw spectra and background will be saved automatically in:\n{directory}", content)

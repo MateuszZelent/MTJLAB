@@ -10,6 +10,11 @@ from app.recipes.parameter_registry import parameter_descriptor
 from app.recipes.sweep_points import generate_sweep_points
 
 
+SETPOINT_EVIDENCE_ROLES = ("requested", "applied", "readback")
+SCALAR_CHECKPOINT_ROLES = frozenset({"setpoint", "measurement", *SETPOINT_EVIDENCE_ROLES})
+CHECKPOINT_ROLES = SCALAR_CHECKPOINT_ROLES | {"spectrum", "spectrum_processed"}
+
+
 @dataclass(frozen=True, slots=True)
 class ThatecSweepAxis:
     target: str

@@ -62,6 +62,7 @@ class Device:
     def confirm_output_off(self, channel):
         if self.outputs[channel]:
             raise DeviceError(f"{channel} still ON")
+        return True
 
     def assert_output_state(self, channel, *, expected_enabled):
         assert self.outputs[channel] == expected_enabled

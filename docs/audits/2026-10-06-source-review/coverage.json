@@ -1,0 +1,2942 @@
+[
+  {
+    "path": "app/audit/__init__.py",
+    "lines": 5,
+    "sha256": "54fe0b8bbdc8e6ef843c586efd5d23dc4d0b473586843fd496f2c2087dfbe3c5",
+    "read_ranges": [
+      [
+        1,
+        5
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/audit/logger.py",
+    "lines": 266,
+    "sha256": "6d6d490380b779d4c19e5ee131015357f48b5209a7043d6c4d7daddb10af8feb",
+    "read_ranges": [
+      [
+        1,
+        266
+      ]
+    ],
+    "review_note": "Read complete. Background I/O exceptions swallowed yet durable ack set; blocking queue.put can block GUI; concurrent sequence/enqueue reorder and close race.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/bootstrap.py",
+    "lines": 48,
+    "sha256": "a089104fdaf645a14018d2b6d01fd15320449c0c8a89a88282c0a1d60816db32",
+    "read_ranges": [
+      [
+        1,
+        48
+      ]
+    ],
+    "review_note": "Full source read. Composition creates DeviceController wrappers and shared simulation context; confirms GUI uses module dispatch.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/contracts/__init__.py",
+    "lines": 18,
+    "sha256": "b38976e13f425f8339e198942831e7d52782fa4ffd1f9e48c2687cf980f6ecb1",
+    "read_ranges": [
+      [
+        1,
+        18
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/contracts/device_module.py",
+    "lines": 173,
+    "sha256": "0ce3bd2eea2a440f896b80c73c2e63583ca19670aa845d14d8bbc316109b3f9f",
+    "read_ranges": [
+      [
+        1,
+        173
+      ]
+    ],
+    "review_note": "Read complete: registry, factories, telemetry protocol. sweep_providers uses all_modules despite enabled description.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/contracts/sweep_provider.py",
+    "lines": 47,
+    "sha256": "cc74ac4da717b63881d8cc157f2050178a15ffd40c71eaa652db6be9af7ae8a5",
+    "read_ranges": [
+      [
+        1,
+        47
+      ]
+    ],
+    "review_note": "Przeczytano w ca?o?ci. Protocol wymaga binding/validation/compile_point; CompiledAxisSetpoint frozen, lecz payload Mapping mo?e by? mutowalny ? prze?ledzi? zamra?anie planu w compiler/runner.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/__init__.py",
+    "lines": 27,
+    "sha256": "7d55c795e73da3f320b1b8132b411b2007aea2016bac9ec77d36014394a230ac",
+    "read_ranges": [
+      [
+        1,
+        27
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/__init__.py",
+    "lines": 55,
+    "sha256": "a07a537ebce2c3c0946e97223babee373253da399be806eff3587b4791e6dbce",
+    "read_ranges": [
+      [
+        1,
+        55
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/acquisition_context.py",
+    "lines": 26,
+    "sha256": "5c6fd2ccdb519542d994fdbb02f25df894b56599743404a9a1705a14acc9c05e",
+    "read_ranges": [
+      [
+        1,
+        26
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/adapter.py",
+    "lines": 1458,
+    "sha256": "f1ef5f5569f4a2b9520580d222b6756a90e69160195041d9cbce9c84271cba4d",
+    "read_ranges": [
+      [
+        1,
+        1458
+      ]
+    ],
+    "review_note": "Read complete. Fingerprint bypass outside adapter; cached binary grid can go stale, fresh acquisition fallback returns unqualified buffer; basic configuration RBW/VBW validation/readback omissions; single sweep timeout bounded by shorter transport timeout; exception cleanup may enter SG via emergency_off.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/configuration.py",
+    "lines": 28,
+    "sha256": "e6e5ff6aa7a67ff4fcd49f05811616a045c1d0db4d59b0510fafa8a747dee684",
+    "read_ranges": [
+      [
+        1,
+        28
+      ]
+    ],
+    "review_note": "Read complete: immutable requests; changed field mask excludes basic bandwidth fields.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/hardware.py",
+    "lines": 52,
+    "sha256": "491587a9925c1c180230ab231dd59848bed80c77f65df2c1214531528b4d78dd",
+    "read_ranges": [
+      [
+        1,
+        52
+      ]
+    ],
+    "review_note": "Read complete: options tables/parser; protocol facts not independently requalified on hardware.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/module.py",
+    "lines": 73,
+    "sha256": "d9dcaece283f8f9b5187b119fd574b2f6d1b2bf0daf15ac5fef5344869b5bd67",
+    "read_ranges": [
+      [
+        1,
+        73
+      ]
+    ],
+    "review_note": "Read complete: dispatcher includes fast/fresh methods; ordinary simulation adapter uses own factory rather than shared context.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/sweep_provider.py",
+    "lines": 119,
+    "sha256": "369359c5e6cece0be553c19f94208e79353e6ea2bb5e0ff4f60e23891873f74a",
+    "read_ranges": [
+      [
+        1,
+        119
+      ]
+    ],
+    "review_note": "Ca?o??: target/dimension/endpoint valid, decyzja akcji po target, baseline kontekst. Sweep SpectrumConfig domy?lnie TRAC1: sprawdzi? czy changed_fields zapobiega zmianie trace wybranego baseline. Nie u?ywa parameter_id do doboru fizycznego parametru.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/__init__.py",
+    "lines": 29,
+    "sha256": "769e2aa6ae6f81b1729295f64602edbf85ae5513938504102d099272039e84e3",
+    "read_ranges": [
+      [
+        1,
+        29
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/analysis_settings_dialog.py",
+    "lines": 646,
+    "sha256": "a290513169ed9ba14c5cd2655316a63881058001da9c63060c85a1f75c451766",
+    "read_ranges": [
+      [
+        1,
+        646
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/analysis_worker.py",
+    "lines": 366,
+    "sha256": "f6ecb8fa4a306bc316661ab3b393bedf6f1ebe8eb2d177b7d8b5ed2068724117",
+    "read_ranges": [
+      [
+        1,
+        366
+      ]
+    ],
+    "review_note": "Full source read, including all GUI callbacks and worker shutdown; findings in working report.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/background_assistant.py",
+    "lines": 310,
+    "sha256": "367af63074cc0b312911d925f0800957ad4f99098dcd3df21fc9cf98f19cf5dc",
+    "read_ranges": [
+      [
+        1,
+        310
+      ]
+    ],
+    "review_note": "Full source read, including all GUI callbacks and worker shutdown; findings in working report.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/correction_card.py",
+    "lines": 1475,
+    "sha256": "53c54642d892c73af9a4042dc2d63b0de9a7d04ffbaabbbf33cbf33b6edef1fb",
+    "read_ranges": [
+      [
+        1,
+        1475
+      ]
+    ],
+    "review_note": "Full source read, including all GUI callbacks and worker shutdown; findings in working report.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/correction_controller.py",
+    "lines": 727,
+    "sha256": "8502d155698528956e47970f8d1ce1f2a2c55c6cf55cbe76b674943094733a7e",
+    "read_ranges": [
+      [
+        1,
+        727
+      ]
+    ],
+    "review_note": "Full source read, including all GUI callbacks and worker shutdown; findings in working report.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/diagnostic_dialog.py",
+    "lines": 240,
+    "sha256": "18b9806fd72d5861b6af36b4e17012efe211523580c0ebc09373a76b0251370f",
+    "read_ranges": [
+      [
+        1,
+        240
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/difference_dialog.py",
+    "lines": 216,
+    "sha256": "78e81f60560a70519d5ca241043d028cd8a9bbf10a4c4094fd1b5d3cd097e8c1",
+    "read_ranges": [
+      [
+        1,
+        216
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/finalization_resume_dialog.py",
+    "lines": 292,
+    "sha256": "28db502310cb1e3c767f2b7262fc380d748767de2b654e86ece8ee6c38424011",
+    "read_ranges": [
+      [
+        1,
+        292
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/finalization_selection_dialog.py",
+    "lines": 404,
+    "sha256": "68ad5286e7b79a30da899baf486f85a56c01bcd91752c1c9688e665b5ab90a00",
+    "read_ranges": [
+      [
+        1,
+        404
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/manual_save.py",
+    "lines": 314,
+    "sha256": "067d53264ea956472dda9a4aba269a85b45791053163ec31b6160ab9345011d9",
+    "read_ranges": [
+      [
+        1,
+        314
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/page.py",
+    "lines": 5973,
+    "sha256": "89541145170579130b1fb237200d0b58013ad6d5086b7d0748ae89765599dcfb",
+    "read_ranges": [
+      [
+        1,
+        5973
+      ]
+    ],
+    "review_note": "Full source read, including all GUI callbacks and worker shutdown; findings in working report.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/peak_analysis.py",
+    "lines": 293,
+    "sha256": "ddb5953e61dc40af5e5678520b73942854e55e8043ac37f2aa7041ad59f2e2a4",
+    "read_ranges": [
+      [
+        1,
+        293
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/processing_quality_dialog.py",
+    "lines": 116,
+    "sha256": "7d625fae457665c0d69a90e6f1c6832b5e9ed878192dfbc5f2af79125e3ab5b4",
+    "read_ranges": [
+      [
+        1,
+        116
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/readback_dialog.py",
+    "lines": 360,
+    "sha256": "d5dc70590cddde607fe0a2d8180f0ed8179b1b548b3c83e002de43eb49d25cce",
+    "read_ranges": [
+      [
+        1,
+        360
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/recipe_dialog.py",
+    "lines": 778,
+    "sha256": "a89ab985bf62143d5d683e16239c723c4b21c0ee9605c17d211cfac00bba6b8f",
+    "read_ranges": [
+      [
+        1,
+        778
+      ]
+    ],
+    "review_note": "Read complete. Dialog values, mutation visibility, lifecycle and source mapping reviewed; findings in working report.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/recipe_extension.py",
+    "lines": 24,
+    "sha256": "39800eb6dce16b95680f8a81cad4987b3c0974e38655a00859f608be608a18bb",
+    "read_ranges": [
+      [
+        1,
+        24
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/resonance_dialog.py",
+    "lines": 221,
+    "sha256": "dbd9db459b6bd570d3c172759cdf2362f61bf83c23ae5f54d472322f54ce8aaa",
+    "read_ranges": [
+      [
+        1,
+        221
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/spectrum_controls.py",
+    "lines": 280,
+    "sha256": "73a39c61cc9a45dcc855668b0869913ba1548f4ff78f446660193087f51553e6",
+    "read_ranges": [
+      [
+        1,
+        280
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/spectrum_workbench.py",
+    "lines": 577,
+    "sha256": "c7490769e7180d84530d6ee4e1f1bcf101a6b6fbfc31b838a3d8b913e5b85eda",
+    "read_ranges": [
+      [
+        1,
+        577
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/training_dialog.py",
+    "lines": 229,
+    "sha256": "9b09e921ced21700338c12bf7ae28c4fc5cad2749c75bb417a58263c7867b0e4",
+    "read_ranges": [
+      [
+        1,
+        229
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/anritsu_ms2830a/ui/validation_dialog.py",
+    "lines": 186,
+    "sha256": "12c12575ba95738096cd42ddc3121de83ee96b94a871353a58b99f51b7c08bd4",
+    "read_ranges": [
+      [
+        1,
+        186
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/base.py",
+    "lines": 199,
+    "sha256": "38abaa924e1666ef34c4e47e6df78d52caadb6851927edccb2f82f58a1ea0c0f",
+    "read_ranges": [
+      [
+        1,
+        199
+      ]
+    ],
+    "review_note": "Read complete. io_timeout only lowers per-command timeout, not whole operation; identity validation uses substring over full IDN; connected derived from state.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/discovery.py",
+    "lines": 427,
+    "sha256": "13883c61da3ff018315dfe525b7bc928e937a01a9b61c873571c0ff6750fb198",
+    "read_ranges": [
+      [
+        1,
+        427
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/keithley_2600/__init__.py",
+    "lines": 38,
+    "sha256": "4545f6ae7100ca1fbb6d70d052844bebea4eafa51aaf59db3dae6055f4307a3f",
+    "read_ranges": [
+      [
+        1,
+        38
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/keithley_2600/adapter.py",
+    "lines": 2077,
+    "sha256": "91c029149387387ddd065e110592630172be08dfa375dea1b85fb5ebd5296074",
+    "read_ranges": [
+      [
+        1,
+        2077
+      ]
+    ],
+    "review_note": "Full source read. Direct step preserves OUTPUT but is not ramp. measure_only enable lacks rejection; compliance changed path lacks cached-output check and mismatch shutdown; readout OFF helper can change offmode; ramp result overwrites quantized cache with raw target; some transport reads outside emergency try.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/keithley_2600/module.py",
+    "lines": 120,
+    "sha256": "dbe3cd5a042a521e539a915b128a1accf04b59ac46d17c58ff30d3024fa1568a",
+    "read_ranges": [
+      [
+        1,
+        120
+      ]
+    ],
+    "review_note": "Full source read. Explicit typed quick controls and dispatch. No standalone measure_only ON protection.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/keithley_2600/settings_defaults.py",
+    "lines": 199,
+    "sha256": "d63d98e23d03653d1c1e860d11a55867187e1e9406c08d08fa78364f1b161660",
+    "read_ranges": [
+      [
+        1,
+        199
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/keithley_2600/sweep_provider.py",
+    "lines": 158,
+    "sha256": "5b632e69df0b12ea33c92c86e8e958e4b16aff66ba19eb4ab46ff2b48e80c5a2",
+    "read_ranges": [
+      [
+        1,
+        158
+      ]
+    ],
+    "review_note": "Ca?o??: endpoint/target channel sprawdzane, lecz parameter_id nie zwi?zany ?ci?le z target; ka?dy nie-source.level (po special settling) staje si? compliance. Quantization + dalszy range-flow. stages filtruje elementy nie-Mapping zamiast odrzuca? (compiler generator mo?e jeszcze odrzuca?).",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/keithley_2600/ui/__init__.py",
+    "lines": 17,
+    "sha256": "fe898e4ccddd3987d9107a81dca7e706e16ed847154eefa5bc9649cd5cb48d20",
+    "read_ranges": [
+      [
+        1,
+        17
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/keithley_2600/ui/characterization_card.py",
+    "lines": 2976,
+    "sha256": "5da924b05ad04c37ec1396cc725b7b26e1baee50495ae9a97a01b75b4905b9b6",
+    "read_ranges": [
+      [
+        1,
+        2976
+      ]
+    ],
+    "review_note": "Read complete. GUI repeated snapshot measurements, pending operation/channel attribution and synchronous characterization I/O reviewed; see final audit and working findings.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/keithley_2600/ui/field_scenario_dialog.py",
+    "lines": 66,
+    "sha256": "1fe1cbcde446a0409f29895fd2fc25539f9be4b5ade6a971f300d2881e128b7c",
+    "read_ranges": [
+      [
+        1,
+        66
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/keithley_2600/ui/field_series_panel.py",
+    "lines": 265,
+    "sha256": "74c244f4f7ac693a318087ebb570101eb81c082e720008538d34f49d65e01673",
+    "read_ranges": [
+      [
+        1,
+        265
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/keithley_2600/ui/observation_dialog.py",
+    "lines": 60,
+    "sha256": "7920428df72ec6501aa9ce321725c949d61d4811d5ed453abc77458aad210dfc",
+    "read_ranges": [
+      [
+        1,
+        60
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/keithley_2600/ui/page.py",
+    "lines": 6090,
+    "sha256": "4bcb43c69f9f89eebf8ac6dce6430242e5d2887ff99b7d21792bd2bbad9fd83c",
+    "read_ranges": [
+      [
+        1,
+        6090
+      ]
+    ],
+    "review_note": "Read complete. GUI repeated snapshot measurements, pending operation/channel attribution and synchronous characterization I/O reviewed; see final audit and working findings.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/keithley_2600/ui/recipe_extension.py",
+    "lines": 17,
+    "sha256": "f404a4220284cb8b54fb6a2ed8e010581a146d369b64e52fe82495c80e9ad4d0",
+    "read_ranges": [
+      [
+        1,
+        17
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/keithley_2600/ui/twin_axis_plot.py",
+    "lines": 262,
+    "sha256": "69ef2db53c70b176ab0f0e7284b0c99345ec4d62f3ad00b97497a65657d2c242",
+    "read_ranges": [
+      [
+        1,
+        262
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/lakeshore_475/__init__.py",
+    "lines": 18,
+    "sha256": "d681d0d67465e6f86c9e82138aaa94c2a76ffc1624c66d85adf3333c29426a54",
+    "read_ranges": [
+      [
+        1,
+        18
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/lakeshore_475/adapter.py",
+    "lines": 432,
+    "sha256": "31689f977b3da1707c8f92f5606a6fb45eb51257fc069263fe0d169950537f99",
+    "read_ranges": [
+      [
+        1,
+        432
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/lakeshore_475/models.py",
+    "lines": 151,
+    "sha256": "66ea18a7a007880beccb2908e936ca8df0fe9c47dca40a766b60e9b36e2dcda4",
+    "read_ranges": [
+      [
+        1,
+        151
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/lakeshore_475/module.py",
+    "lines": 82,
+    "sha256": "4b80074ccb9b8fb542a9936f6c98693cc541ffb2c6953fb0e844be8b3489abb9",
+    "read_ranges": [
+      [
+        1,
+        82
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/lakeshore_475/simulator.py",
+    "lines": 25,
+    "sha256": "06ed69d66adaddade06773a9d7727ec0403b35f0d1f5b024cd7606f9069b958e",
+    "read_ranges": [
+      [
+        1,
+        25
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/lakeshore_475/ui/__init__.py",
+    "lines": 5,
+    "sha256": "f677a2ab56a3956721ad4adf7d582d1fc4ab45c8b2172817a5906e73f5847327",
+    "read_ranges": [
+      [
+        1,
+        5
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/lakeshore_475/ui/page.py",
+    "lines": 806,
+    "sha256": "3168d82342e8635fe7cb891d20afa4b79d540256b1832986abd5c6e9f47e1092",
+    "read_ranges": [
+      [
+        1,
+        806
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/__init__.py",
+    "lines": 32,
+    "sha256": "af8b4c15aa04e4f38ca24d92b6e6c5156c9502e8eb581d1d2362a5b3fc685c08",
+    "read_ranges": [
+      [
+        1,
+        32
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/adapter.py",
+    "lines": 759,
+    "sha256": "c23b95d4da43b51eeff5f92141607834a9bd1e007495182b26b62d79adda81e8",
+    "read_ranges": [
+      [
+        1,
+        759
+      ]
+    ],
+    "review_note": "Full source read. Armed trajectories bounded ramp; zero per approved channel. Readback failure closes stream with unknown output; stop exact target loop versus confirmation tolerance; full plan validated on each step can be quadratic.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/calibration.py",
+    "lines": 232,
+    "sha256": "2f1d01dc77bac0e56390a2dcddb81e5a77fc227f542f31e1f526f5ed5d8f2a8f",
+    "read_ranges": [
+      [
+        1,
+        232
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/calibration_runner.py",
+    "lines": 248,
+    "sha256": "2c68d850aa44acdb87da242c0da03233b8a91fb2c26099e4e5a1dfebbb53d01e",
+    "read_ranges": [
+      [
+        1,
+        248
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/models.py",
+    "lines": 135,
+    "sha256": "661f06f64dbd6a88cc6c766d9f4e044636e06cb5717a2a458a7f75f70502a049",
+    "read_ranges": [
+      [
+        1,
+        135
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/module.py",
+    "lines": 112,
+    "sha256": "8eb36e43a6533ddc526fc975fe5603215027219c8c2d3cabae30a7192aada2af",
+    "read_ranges": [
+      [
+        1,
+        112
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/protocol.py",
+    "lines": 176,
+    "sha256": "2e8b80b03158b850921219f19961a7b29840828500204053896968c33ddbd13d",
+    "read_ranges": [
+      [
+        1,
+        176
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/simulator.py",
+    "lines": 78,
+    "sha256": "968a30e9593a494707010bf1f825d08a9cdf3b58702f5cf31823f08b502c5dfa",
+    "read_ranges": [
+      [
+        1,
+        78
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/sweep_provider.py",
+    "lines": 74,
+    "sha256": "0bcefc4d0760b07eca69a9c09fae4a5468dab9012812d4c2d36bf440ddafb0bc",
+    "read_ranges": [
+      [
+        1,
+        74
+      ]
+    ],
+    "review_note": "Ca?o??: regex VOUT 0..7, endpoint/parameter ?cis?e, qualified profile i plan.validate, applied_voltage. Simulation wnioskuje z endpoint; sprawdzi? zgodno?? execution mode i adapter.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/transport.py",
+    "lines": 102,
+    "sha256": "19f035d8af3bf87071fc8af651bb7f3c7dae6b5e2dcf876ff0b0881678333133",
+    "read_ranges": [
+      [
+        1,
+        102
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/ui/__init__.py",
+    "lines": 5,
+    "sha256": "4e8d4027ed4834f336532984baa3458dd43341e50fe8588b8149a96a5fdd5c04",
+    "read_ranges": [
+      [
+        1,
+        5
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/ui/configuration_panel.py",
+    "lines": 95,
+    "sha256": "09aa4e1103c5b2a566209ca91ca740efa6d37f9836bc4a95383dc1270273224f",
+    "read_ranges": [
+      [
+        1,
+        95
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/ui/field_control.py",
+    "lines": 1469,
+    "sha256": "acfec1dc25f2998235fd9595974f93e1cbee068c6b08a182e8a55d8d52f24c32",
+    "read_ranges": [
+      [
+        1,
+        1469
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/ui/floating_controls.py",
+    "lines": 48,
+    "sha256": "ed766f528783b953273f4fa9258d410c965218f01f33ffcca036bd7ab96eb8a3",
+    "read_ranges": [
+      [
+        1,
+        48
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/ui/page.py",
+    "lines": 905,
+    "sha256": "cab4b114655ad0f7ed68227a81cf78832e62da10ff8d658f920f99957e36fa88",
+    "read_ranges": [
+      [
+        1,
+        905
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/moke_box/ui/voltage_history.py",
+    "lines": 170,
+    "sha256": "fff0752fe57ebee0e3531ef47c17eaecb0d0ed57f0dedc59340b7c9ded98fe32",
+    "read_ranges": [
+      [
+        1,
+        170
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/registry.py",
+    "lines": 24,
+    "sha256": "0499ac96646c4f2afb3adcc663c1dc62c2c25d0f1fe9856b6c0dcc684fefd8f1",
+    "read_ranges": [
+      [
+        1,
+        24
+      ]
+    ],
+    "review_note": "Full source read. Imports modules including UI via module manifests; scope expansion noted.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/rigol_dg1000z/__init__.py",
+    "lines": 36,
+    "sha256": "0895cd8ed402bfc746d936eaa4bf32aec6fb6dfe1a1f9de011aaca37c309aadd",
+    "read_ranges": [
+      [
+        1,
+        36
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/rigol_dg1000z/adapter.py",
+    "lines": 2621,
+    "sha256": "15437217ece0b2444325df6029ef7f65bca6c67052b6e7bface80c91046bd99f",
+    "read_ranges": [
+      [
+        1,
+        2621
+      ]
+    ],
+    "review_note": "Full source read. Optional queries continue after timeout; reenable cycles OFF; explicit configuration defaults reset advanced/output fields. Live updates vary cached-output checks and query failure handling; output-path verification absent from most updates; trigger rechecks only subset of advanced fields.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/rigol_dg1000z/module.py",
+    "lines": 121,
+    "sha256": "b00f62548409773668f03cce0a57291b37ae039feb568b2a4b698da112784d70",
+    "read_ranges": [
+      [
+        1,
+        121
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/rigol_dg1000z/sweep_provider.py",
+    "lines": 135,
+    "sha256": "8c1412ae79626a905369cbe529aa55eebb6b586f6e0463302810a37c3ad16f1b",
+    "read_ranges": [
+      [
+        1,
+        135
+      ]
+    ],
+    "review_note": "Ca?o??: validate_binding por?wnuje endpoint z owner, NIE target z endpoint ani parameter_id z target. Podejrzenie realnego sterowania innym kana?em ni? axis target. Unknown parameter id wpada w offset. Compile point nie waliduje ca?ej pary high/low, downstream adapter konieczny.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/rigol_dg1000z/ui/__init__.py",
+    "lines": 6,
+    "sha256": "c5e57e04a27ee3ec19e1c69acbdb0c17d43135a473d1925abdec88ce177214ef",
+    "read_ranges": [
+      [
+        1,
+        6
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/rigol_dg1000z/ui/page.py",
+    "lines": 3166,
+    "sha256": "a313ab8689086c95875d98d4faeb705d0d58af1e152d3d5c532bfbabb4318a3a",
+    "read_ranges": [
+      [
+        1,
+        3166
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/rigol_dg1000z/ui/recipe_dialog.py",
+    "lines": 713,
+    "sha256": "db4f842d681bb30131174664db9e2ab1081a4c92ee76d6c22ef9e92a02142d26",
+    "read_ranges": [
+      [
+        1,
+        713
+      ]
+    ],
+    "review_note": "Read complete. Dialog values, mutation visibility, lifecycle and source mapping reviewed; findings in working report.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/rigol_dg1000z/ui/recipe_extension.py",
+    "lines": 6,
+    "sha256": "4009fa8b1043f5d182e94cadee967db5bc9de4aaa572a411190b45537f0ca537",
+    "read_ranges": [
+      [
+        1,
+        6
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/simulation.py",
+    "lines": 59,
+    "sha256": "cefae9a7e01c1a04a1597b78d802c615928dfa7460f7a5cdb55d44b86947a727",
+    "read_ranges": [
+      [
+        1,
+        59
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/simulators.py",
+    "lines": 1030,
+    "sha256": "aeb4a3a9a02973d896a276bbc7e54c973a6d4d535029c7a61745541d09ac4b64",
+    "read_ranges": [
+      [
+        1,
+        1030
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/devices/visa.py",
+    "lines": 414,
+    "sha256": "4d6217de533e7abf1134ecd81d0de04bc1856bf79f0dfbff7c3f6675aa998af3",
+    "read_ranges": [
+      [
+        1,
+        414
+      ]
+    ],
+    "review_note": "Read complete. Bulk traces suppressed in logs. Manager lifetime and open failure cleanup need follow-up. Fake readbacks derived from writes can mask real protocol rejection.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/__init__.py",
+    "lines": 15,
+    "sha256": "21a8f7c36325a994cd878bd2e68779b671fae4f3c4e76e52b5d30730ca251032",
+    "read_ranges": [
+      [
+        1,
+        15
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/errors.py",
+    "lines": 37,
+    "sha256": "2bff8ed3c8098e4f330b7cc037b6605be173e313e5d02be1da2b03d3140b1e89",
+    "read_ranges": [
+      [
+        1,
+        37
+      ]
+    ],
+    "review_note": "Full source read: exception inheritance. RunInterrupted derives SafetyViolation.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/execution_state.py",
+    "lines": 35,
+    "sha256": "557b4578627dc523875b9db67f9eb3930e1569332fed5fcac80b3eb45f1e69e1",
+    "read_ranges": [
+      [
+        1,
+        35
+      ]
+    ],
+    "review_note": "Full source read: immutable projection schema with verification provenance.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/manual_metadata.py",
+    "lines": 48,
+    "sha256": "1bbff1843ee3c4d27a82bc7c3ab79c8b5dc43f964dc64756164b2b5700edc8ba",
+    "read_ranges": [
+      [
+        1,
+        48
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/models.py",
+    "lines": 65,
+    "sha256": "0c9ec72a9c36a5cff4fb26d9ec0dec4c47b4f4869f51e074c1370c423639705d",
+    "read_ranges": [
+      [
+        1,
+        65
+      ]
+    ],
+    "review_note": "Read complete: state enums and frozen models with mutable dictionaries; no model-level validation.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/quantities.py",
+    "lines": 256,
+    "sha256": "f5916f042fd80473c12e4a0539d5d9d4c851c0d33d5dd7c70335c9296b4ef928",
+    "read_ranges": [
+      [
+        1,
+        256
+      ]
+    ],
+    "review_note": "Ca?o??: finite i dimension checks poprawne na parser boundary; _canonical_unit lower() miesza wielko?? prefiksu np MV/mV, mHz/MHz. Quantity sam nie waliduje finite. Sprawdzi? wej?cia i udokumentowa? reprodukcj?.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/quick_controls.py",
+    "lines": 206,
+    "sha256": "9a88606ee5d82929a81a60065747a5577a0d0766e684d9465978f212c7643dab",
+    "read_ranges": [
+      [
+        1,
+        206
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/readiness.py",
+    "lines": 204,
+    "sha256": "c2b105d0422151f728446778265b20ced9732806deb7ca8dba1cb133c825a0fd",
+    "read_ranges": [
+      [
+        1,
+        204
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/recipe_spectrum.py",
+    "lines": 88,
+    "sha256": "827ea7c2c23ae85ef9807998a582be646963dcdbdf1f0460bb4d3bdd6c4ee5d6",
+    "read_ranges": [
+      [
+        1,
+        88
+      ]
+    ],
+    "review_note": "Read complete: immutable numeric source sweeps and provenance; bounded metadata and timestamps.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/spectrum_correction.py",
+    "lines": 316,
+    "sha256": "9992e2b1385f89f322dd077cfc182ca18ac8395f78fd8354d28e49cd34550e4e",
+    "read_ranges": [
+      [
+        1,
+        316
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/spectrum_decisions.py",
+    "lines": 43,
+    "sha256": "7fcacbf6f793e9541341ff31cf15ffe5a3600926971d23bd8105daf9fba90b80",
+    "read_ranges": [
+      [
+        1,
+        43
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/spectrum_finalization.py",
+    "lines": 100,
+    "sha256": "3b5668ed9951c9dfd89d7a8594bd3990c53603f19045031626d03dfb724a70ac",
+    "read_ranges": [
+      [
+        1,
+        100
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/spectrum_interference.py",
+    "lines": 106,
+    "sha256": "81b0968608c016d764f83aef23c299128ee47dcecda0e1cb7e2ac8c45f0fe9d8",
+    "read_ranges": [
+      [
+        1,
+        106
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/domain/spectrum_interleaved.py",
+    "lines": 64,
+    "sha256": "1acafa290ab6786ae37159d84b7bf8d01b8477c00e5b1aba08ccce1b34a683a0",
+    "read_ranges": [
+      [
+        1,
+        64
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/engine/__init__.py",
+    "lines": 27,
+    "sha256": "ad81789365c01f33af7e584db7af6bf212c70e69e82f277901e1603529a64a2d",
+    "read_ranges": [
+      [
+        1,
+        27
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/engine/compiler.py",
+    "lines": 3138,
+    "sha256": "d4c27aaf73ee3301eba02df22f9550f6e86fd5b78c77464c041b50872f35514b",
+    "read_ranges": [
+      [
+        1,
+        3138
+      ]
+    ],
+    "review_note": "Ca?o?? 1..3138 przeczytana; uzupe?niono uci?te fragmenty 1931..2020 i 2641..2900. Zale?no?ci do sprawdzenia: mutowalne payload/hash; dut_limits metadata-only; Rigol continue mo?e ignorowa? fixed Set; raw configure_rigol_output wprowadza domy?lne pola; source_autorange=False ignorowane gdy Settings=True; drugi generator legacy _sweep_values inny od semantic points; brak jawnego odrzucenia mieszanego if condition+comparison; hidden wait/OFF w lokalnych DeviceNode; explicit binding zgodno?? endpoint/parameter.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/engine/estimation.py",
+    "lines": 253,
+    "sha256": "28f889ff5a6315de6069388fe388db17ec5bc356c523ffeba21c48842a169938",
+    "read_ranges": [
+      [
+        1,
+        253
+      ]
+    ],
+    "review_note": "Ca?o??: przed I/O dysk i rezerwa; domy?lne spectrum_points z settings, bez configured action nie zna realnego gridu. Retry-upper dodaje overhead/backoff zamiast pe?nych deadlines powt?rek; storage raw_count nie uwzgl?dnia retained raw z nieudanych powt?rek. To nie jest ?cis?a g?rna granica. Context payload koszty O(actions).",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/engine/policy.py",
+    "lines": 80,
+    "sha256": "583009ac3995e0ab9f288297cea2c5dfc3e2fb0d9a1f367ef1b20992dfe1d0c4",
+    "read_ranges": [
+      [
+        1,
+        80
+      ]
+    ],
+    "review_note": "Ca?o??: finite positive timers, retries 0..5, deadline liczone dla ca?ego bloku avg/minimum/delay. Konfiguracja deadline command_timeout+grace cho? adapter wykonuje wiele komend ? sprawdzi? actual long paths. Bool timeout direct dataclass dopuszczony, settings parser explicit unit.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/engine/recovery.py",
+    "lines": 301,
+    "sha256": "0bfc4ebdfbdedeb5ea5d1d2f468276b68f78d4ffd8b9e09865239943cdeca37e",
+    "read_ranges": [
+      [
+        1,
+        301
+      ]
+    ],
+    "review_note": "Ca?o??: hash/status/contiguous/checkpointcount/outputOFF, backward chunks500, prelude merge i durable actual. Sprawdzi? writer/settings identity dalej. MOKE brak prelude odmawia bezsafeproof, celowo fail closed. configure_rigol_output mo?e nadpisa? actual channel snapshot brakuj?ce carrierfields i uniemo?liwi? resume; sprawdzi? ?cie?k? runner. RecoveredReference sprawdza grid/trace, fingerprint z eventstate.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/engine/runner.py",
+    "lines": 2481,
+    "sha256": "548ca7c4bdc35fb90ac0a14a4c75d84a36241d83db065880f9e1274a7b8ce469",
+    "read_ranges": [
+      [
+        1,
+        2481
+      ]
+    ],
+    "review_note": "Ca?o?? 1..2481. Nie weryfikuje ponownie digest mutable planu. Realny dry/manual oznacza semantic verification simulated_ack; MOKE stop aktualizuje dac_shutdown, ale nie active actual_v; ramp_zero pomija invalidacj? axis confirmations/timestamp. _read_spectrum_identity zale?y od isinstance AnritsuAdapter ? sprawdzi? proxy z DeviceController. _can_retry pozwala ramp/outputs OFF i akwizycj? (RAW pozostaje przy retry). _safe_shutdown potwierdza status, ale cached output_active i context output_enabled mog? pozosta? ON. Konfiguracje readback i safety IV przed ka?dym raw frame. _run_pending_finally omija _execute_with_policy. Odczyt wszystkich zale?no?ci w toku.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/platform/__init__.py",
+    "lines": 19,
+    "sha256": "af12f1767da060eacc387e9d58a42fd6f3d4c927f4fef7f41095ad91bd55a9ea",
+    "read_ranges": [
+      [
+        1,
+        19
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/platform/paths.py",
+    "lines": 136,
+    "sha256": "a9777476cecc3bdbe0294fa9f7489ccfa3e60a719c2e1b86afa6a3f317c4897d",
+    "read_ranges": [
+      [
+        1,
+        136
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/recipes/__init__.py",
+    "lines": 64,
+    "sha256": "f98c2304f81330982a1261fbb85a4588e21d6a8aaa70d385c58831792d670811",
+    "read_ranges": [
+      [
+        1,
+        64
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/recipes/baseline_authoring.py",
+    "lines": 44,
+    "sha256": "5b6644616ebf24b6b15a63b3ff39ca658097c5514facac18a76bc20cb180329c",
+    "read_ranges": [
+      [
+        1,
+        44
+      ]
+    ],
+    "review_note": "Ca?o??: jawny baseline ze snapshotu, odrzucenie konfliktuj?cych alias?w. Rigol baseline pomija output_polarity/mode/sync; Anritsu baseline pomija advanced. Zweryfikowa? widoczno?? i oczekiwania akcji Add baseline.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/recipes/editing.py",
+    "lines": 393,
+    "sha256": "1fed6edc9b369a8180510f4d359edfca6f2785c7cbbf065742523838e7d91bb1",
+    "read_ranges": [
+      [
+        1,
+        393
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/recipes/models.py",
+    "lines": 463,
+    "sha256": "774432d07fc1bee72c242542f0fa4bedf086fec039dbd93256214e4ee06014af",
+    "read_ranges": [
+      [
+        1,
+        463
+      ]
+    ],
+    "review_note": "Przeczytano w ca?o?ci. Strict fields, unique IDs, struktura children/else. Otwarte: dut_limits jawnie metadata-only; brak typu disabled w parserze; segmenty wraz z start/stop/points nie s? wzajemnie wykluczane; sprawdzi? odrzucenie/semantyk? w compiler. Brak limitu g??boko?ci/alias?w YAML. Nie oceniono jeszcze skutk?w downstream.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/recipes/parameter_registry.py",
+    "lines": 339,
+    "sha256": "7d9d317444778b9ca1cf5b6be46122c4221e2e5c4bd01b3a8b25446a5674994f",
+    "read_ranges": [
+      [
+        1,
+        339
+      ]
+    ],
+    "review_note": "Ca?o??: rejestr osi, SI, suffix-based persisted units, quick controls. VOUT 0..7 sp?jne. sweep_default brak time mimo settling_time w rejestrze ? sprawdzi? caller. Registry deklaruje requires_output_cycle=False dla Rigol, sprawdzi? adapter.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/recipes/repository.py",
+    "lines": 100,
+    "sha256": "7f91a4d74b46d2d9688fe91528a16bb43b2e89484b060e7523587608d4f23d88",
+    "read_ranges": [
+      [
+        1,
+        100
+      ]
+    ],
+    "review_note": "Ca?o??: parse przed zapisem, historia, replace w tym samym katalogu, autosave bez parse celowe. Brak fsync: atomowo?? nazwy, nie dow?d trwa?o?ci po utracie zasilania. History folder zale?y od stem (kolizja r??nych rozszerze?).",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/recipes/semantic_tree.py",
+    "lines": 929,
+    "sha256": "d9be29879f93e9c81e15738841626660774a0f7be1c9b246d92d2a41f193c242",
+    "read_ranges": [
+      [
+        1,
+        929
+      ]
+    ],
+    "review_note": "Ca?o??: immutable-ish mapping (p?ytki), Cartesian lazy, allocation guard, generated finally. Nie dodaje trailing OUTPUT OFF dla output_policy=on, cho? compiler dodaje; channel etykiety z top-level z fallback B/1, compiler z configuration; normalization obu ga??zi if; provider.validate_binding dopiero compile_point.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/recipes/spectrum_processing.py",
+    "lines": 134,
+    "sha256": "f3e63cd33554738993e342f0b61b824419af4fa154b500592254c77199ffe462",
+    "read_ranges": [
+      [
+        1,
+        134
+      ]
+    ],
+    "review_note": "Ca?o??: operacje/jednostki, canonical filter ordering, liczby finite/dodatnie, constraints EMI/denoise. protected_bands nie sprawdza porz?dku granic tu; sprawdzi? SpectrumAnalysisParameters/downstream.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/recipes/sweep_points.py",
+    "lines": 254,
+    "sha256": "342efc41f1148e17a82ace2e7cd966d4b62ce1bc4977ad016b49a5c37f1bebef",
+    "read_ranges": [
+      [
+        1,
+        254
+      ]
+    ],
+    "review_note": "Przeczytano w ca?o?ci. SI, finite, endpoint inclusive, znaki kroku i log, cancellation co 256, limit milion/segment. Estymator nie odrzuca >milion na segment; generator przechowuje dodatkow? list? values tylko dla ko?ca/deduplikacji. Start==stop z points powtarza t? sam? warto??, step daje jeden punkt; zweryfikowa? UI i estymacj?.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/safety/__init__.py",
+    "lines": 6,
+    "sha256": "2863391b9521ff5e57790ce3e2db7d013999d24cfa9576dbfcb02acd2f48c82d",
+    "read_ranges": [
+      [
+        1,
+        6
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/safety/anritsu.py",
+    "lines": 243,
+    "sha256": "e7e6b5f5ce55a3338757177bb8f3e11cce95124d119baa558683844076201163",
+    "read_ranges": [
+      [
+        1,
+        243
+      ]
+    ],
+    "review_note": "Read complete: explicit finite/range/option validation; passive read path bypass and basic bandwidth application require trace.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/safety/keithley.py",
+    "lines": 391,
+    "sha256": "06e9d0938f3c57655611a5f9ba972cd5c0de933e6cd17c4a16edecd7086b11fe",
+    "read_ranges": [
+      [
+        1,
+        391
+      ]
+    ],
+    "review_note": "Full source read. 2wire enforced; autorange Settings-owned; measure_only accepted with zero nominal source but adapter ON path not forbidden. Source settle envelope not enforced here, only nonnegative.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/safety/keithley_limit_reconciliation.py",
+    "lines": 457,
+    "sha256": "723fce45d2c775e79315efbeab6930e3a7b36d0abfbd1c4f61ce34fde58f15ed",
+    "read_ranges": [
+      [
+        1,
+        457
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/safety/moke_box.py",
+    "lines": 238,
+    "sha256": "3fcef6f28dac0720d88c3cb1a6c1ef4ced217966712089153eb4f9a6ab33e44b",
+    "read_ranges": [
+      [
+        1,
+        238
+      ]
+    ],
+    "review_note": "Full source read. Profiles enforce LSB, slew, zero within station range, independent 0..7 profiles. Plan validates entire tuple on each ramp call.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/safety/precision.py",
+    "lines": 44,
+    "sha256": "6e68e9c79ea7f970c5fe752a4fa8747844a6135d7680873904f6a21adb8b21e7",
+    "read_ranges": [
+      [
+        1,
+        44
+      ]
+    ],
+    "review_note": "Full source read. Decimal HALF_UP; magnitude/precision edge cases require boundary proof.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/safety/quick_controls.py",
+    "lines": 153,
+    "sha256": "862de74f7ad88de55559c93cf640095c9000e5d28dbb3d70852c241c50d1e730",
+    "read_ranges": [
+      [
+        1,
+        153
+      ]
+    ],
+    "review_note": "Full source read; consequences recorded in working findings, dependency validation pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/safety/rigol_current.py",
+    "lines": 368,
+    "sha256": "8bc9494e6ea5e611accad08502b0a6fd323b2cae558363bd446ade6a76135ba5",
+    "read_ranges": [
+      [
+        1,
+        368
+      ]
+    ],
+    "review_note": "Full source read. Hardware peak/power model, explicit units. Source resistance >=50 accepted; verify settings require exact50 before claiming conservative current. Amplitude/offset quantization paths may round before raw limits.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/settings/__init__.py",
+    "lines": 15,
+    "sha256": "b175d8cc71c967ce01454250ea491840d1bde39d71d3a3419b6c3228676ffdf0",
+    "read_ranges": [
+      [
+        1,
+        15
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/settings/diagnostics.py",
+    "lines": 76,
+    "sha256": "bd5ff2ae407396250b4b39d3c37359870fb5c3592e497ec3a660d0bbbcce7bbc",
+    "read_ranges": [
+      [
+        1,
+        76
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/settings/models.py",
+    "lines": 812,
+    "sha256": "bac8230fdc6457d5e9e510dd2ef820797c05f84950095a96dfd47d454faaaade",
+    "read_ranges": [
+      [
+        1,
+        812
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/settings/repository.py",
+    "lines": 578,
+    "sha256": "1f2d5834244e9e496eaf144e5bf5565168a36f5c1aa2d969de199fd365e7f735",
+    "read_ranges": [
+      [
+        1,
+        578
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/settings/validation.py",
+    "lines": 91,
+    "sha256": "2499786760070b435ddbc7ce093f73e1249ad4dccb6e06bb9e15744dd8868a77",
+    "read_ranges": [
+      [
+        1,
+        91
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/__init__.py",
+    "lines": 47,
+    "sha256": "9a5ccc519b4a1dbd6bcb45883ffa434d4ad1b09926712633f5d2400cad134e3f",
+    "read_ranges": [
+      [
+        1,
+        47
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/analysis.py",
+    "lines": 749,
+    "sha256": "4472de7c6e8b2c1374c3db06e21326d598d3a46cd2160c463e51527df2b89d55",
+    "read_ranges": [
+      [
+        1,
+        749
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/background_profile.py",
+    "lines": 96,
+    "sha256": "9b61d52128842b98975c3f5ecf15ae93835d3f4dea838580efef2edf52299bd7",
+    "read_ranges": [
+      [
+        1,
+        96
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/comparison_view.py",
+    "lines": 86,
+    "sha256": "a7638443e7ec91dfd33cfcf86ee9b81c1d680e9119b3a978e686107736a06bb2",
+    "read_ranges": [
+      [
+        1,
+        86
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/display_model.py",
+    "lines": 190,
+    "sha256": "0aa54f25bc0ff2c5ff5388af25958140d66455a32a9079da6308842f872ed541",
+    "read_ranges": [
+      [
+        1,
+        190
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/display_processing.py",
+    "lines": 63,
+    "sha256": "d5b46b60622aada5cf144ea04a42c0ed84652f6d358e579c404ed90701179bbd",
+    "read_ranges": [
+      [
+        1,
+        63
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/finalize.py",
+    "lines": 134,
+    "sha256": "034ed3bf52e1377a9d84b76680b6159b5451fadefbeb0f537dce6487bb2269ba",
+    "read_ranges": [
+      [
+        1,
+        134
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/frequency_regions.py",
+    "lines": 22,
+    "sha256": "ae7659cfbb272c351b99d4262d8e27730e0ca39306029114ff261caae4edbf63",
+    "read_ranges": [
+      [
+        1,
+        22
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/interference_model.py",
+    "lines": 168,
+    "sha256": "72d1c1e6c442f16cf51e6d927462df23069aa49e3a1ca2e3f7e9061d36159514",
+    "read_ranges": [
+      [
+        1,
+        168
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/interference_training.py",
+    "lines": 144,
+    "sha256": "bed8c48f0dc77106ec2f20b8eecb2c6fe28b6178e08c5756aee8540f5301b079",
+    "read_ranges": [
+      [
+        1,
+        144
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/interference_validation.py",
+    "lines": 88,
+    "sha256": "8885acf687dd15e37709bb9ec8bccf9d768204e0892a660568c7eaaa766efab2",
+    "read_ranges": [
+      [
+        1,
+        88
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/interleaved_acquisition.py",
+    "lines": 82,
+    "sha256": "b8483b90be464889a8c97133ba3b504e65081334bcb480c5bdadf5f25957c370",
+    "read_ranges": [
+      [
+        1,
+        82
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/narrow_spikes.py",
+    "lines": 189,
+    "sha256": "7fd84ded56c7a63debe0c4f6bec4a606962e087d993557a57a8c92e775e82137",
+    "read_ranges": [
+      [
+        1,
+        189
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/preview_processing.py",
+    "lines": 177,
+    "sha256": "5bdf8514a43501afa72b3fcf0d7f3a163e90aaf9d7c29299434402e931ab38b6",
+    "read_ranges": [
+      [
+        1,
+        177
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/processing.py",
+    "lines": 135,
+    "sha256": "18085f8136fc855e752a36b4bfd6a772227f31c7377ce1f4e277f911fcce1c9b",
+    "read_ranges": [
+      [
+        1,
+        135
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/realtime_processor.py",
+    "lines": 291,
+    "sha256": "c54f0506bc418dd1cc5dfb2a397fb9fda4cffab5bcd2206d0dce0b49f457a877",
+    "read_ranges": [
+      [
+        1,
+        291
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/reference_diagnostics.py",
+    "lines": 263,
+    "sha256": "bd72f568ac038bd2aa3d039404ace3c7f8ad16d0bded636a1a99e9c65cbca5e0",
+    "read_ranges": [
+      [
+        1,
+        263
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/reference_estimator.py",
+    "lines": 70,
+    "sha256": "63caea1ca332d5d38f9ec9b26b5e44fbcd08f50af2ef59f828cc53000336ce27",
+    "read_ranges": [
+      [
+        1,
+        70
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/replay.py",
+    "lines": 257,
+    "sha256": "9a8b4a8083556acbe9457e5a687e5101231c1af54814948e2f55043a9af13dad",
+    "read_ranges": [
+      [
+        1,
+        257
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/resonance_bootstrap.py",
+    "lines": 161,
+    "sha256": "3d1626b547a9fb2d3bc66c7d11a55ce3e74aa1d0215d1e304b4174287d312239",
+    "read_ranges": [
+      [
+        1,
+        161
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/resonance_metrics.py",
+    "lines": 102,
+    "sha256": "a259f39117e2484d5522a65f98d95dc1b378a051b8353f0c74a1af40e8583611",
+    "read_ranges": [
+      [
+        1,
+        102
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/resonance_studentization.py",
+    "lines": 67,
+    "sha256": "2d7ff04856fd644f5f06f30685f6f5e05feac7ed674191172391e753875abf1e",
+    "read_ranges": [
+      [
+        1,
+        67
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/spectral_difference_test.py",
+    "lines": 143,
+    "sha256": "10cd75df696892d2d3abe4a8746d394e0b5a5ccf7ee6cd4ea446ac3b8204f455",
+    "read_ranges": [
+      [
+        1,
+        143
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/streaming_statistics.py",
+    "lines": 165,
+    "sha256": "ddba301bd29a2df920b48f3d9bc67d39a94538c228ba44d7e449847bedd41fd8",
+    "read_ranges": [
+      [
+        1,
+        165
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/spectrum/sweep_counter_guard.py",
+    "lines": 34,
+    "sha256": "95593fbf78356ec710e19d977734ec4baeaf71bacd9cb550070611f6192eac62",
+    "read_ranges": [
+      [
+        1,
+        34
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/__init__.py",
+    "lines": 68,
+    "sha256": "284316ecf13730f3fa7909fb51f6258f938c368f4d4b2f152ce2e4e24683dfdc",
+    "read_ranges": [
+      [
+        1,
+        68
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/background_profile_store.py",
+    "lines": 76,
+    "sha256": "46c7ca677a43a730b7b24360ffbae60ab12bade00dc8aac35602e125c49bb09a",
+    "read_ranges": [
+      [
+        1,
+        76
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/characterization_csv_reader.py",
+    "lines": 84,
+    "sha256": "5b27c30c8f091c68c268f8decf9d6f1aea5e5dd6daf5b1c9536a34699570277f",
+    "read_ranges": [
+      [
+        1,
+        84
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/finalized_spectrum_codec.py",
+    "lines": 67,
+    "sha256": "263bdbd93eb2c56364c172e8dd5f89218f1b6b04c458e9a14f7b17d2f7c35d92",
+    "read_ranges": [
+      [
+        1,
+        67
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/finalized_spectrum_store.py",
+    "lines": 392,
+    "sha256": "aba901aedef25d336fff897f0d5f562cfc7170895417b2ee034ade4726aaeb44",
+    "read_ranges": [
+      [
+        1,
+        392
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/hdf5_reader.py",
+    "lines": 743,
+    "sha256": "812da0c2021eb3533addc2874a9cd503252881bb5b471714674c6cc1f83a32e2",
+    "read_ranges": [
+      [
+        1,
+        743
+      ]
+    ],
+    "review_note": "Read complete: summary contiguous prefix, direct spectrum only local complete check; eager event/reference materialization; reference commit and finite validation gaps.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/hdf5_series_reader.py",
+    "lines": 273,
+    "sha256": "e15798860268d9bcae7488ee8f3a9a16b06fb5644220e6081edc26caf5693c68",
+    "read_ranges": [
+      [
+        1,
+        273
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/hdf5_writer.py",
+    "lines": 1077,
+    "sha256": "92f1337d9e458941c9a727b10fef0d0befac43564c555aa88e2ec3c27ac75281",
+    "read_ranges": [
+      [
+        1,
+        1077
+      ]
+    ],
+    "review_note": "Read complete: pending checkpoint commit, references, metadata, cleanup, CSV, resume. Missing new role truncation; direct reference writes; close/constructor cleanup gaps.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/interference_training_store.py",
+    "lines": 133,
+    "sha256": "5b6717c2c91b06daeb40d0ae7809ec4538bae69e2e2f69511c0c46ab0e589e77",
+    "read_ranges": [
+      [
+        1,
+        133
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/interference_validation_store.py",
+    "lines": 108,
+    "sha256": "dbe3eff86528f10c091547a4437e3bb4285144b68196b1898b3309439327b7fb",
+    "read_ranges": [
+      [
+        1,
+        108
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/manual_spectrum_writer.py",
+    "lines": 358,
+    "sha256": "c25a8422381c4e306c124c4c95450ccf90a660e07636419c962350f6c0ee2511",
+    "read_ranges": [
+      [
+        1,
+        358
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/moke_calibration_store.py",
+    "lines": 189,
+    "sha256": "9e0219992f084fd10ebf719dfa0630c6c36f2f609f7ee79db916843173e50d6c",
+    "read_ranges": [
+      [
+        1,
+        189
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/naming.py",
+    "lines": 127,
+    "sha256": "da297060f45e1c4f2d89e081f7845be6d5f6cba917d73cda05dd172d51f27e77",
+    "read_ranges": [
+      [
+        1,
+        127
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/pythat_bridge.py",
+    "lines": 113,
+    "sha256": "b80a11afd2301691d9db84ee2d0a50914d46f5dfcd5db805d85e4e4d9f39861f",
+    "read_ranges": [
+      [
+        1,
+        113
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/pythat_reader.py",
+    "lines": 24,
+    "sha256": "8d31904de4f066f0f27256b6a614607f8c590da7696144b0d4b549d77fa8cfbc",
+    "read_ranges": [
+      [
+        1,
+        24
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/recipe_reference.py",
+    "lines": 99,
+    "sha256": "937ce69a611fa30881957717fa2a8c7180c52c3015b5b4dccc9465c3764877f7",
+    "read_ranges": [
+      [
+        1,
+        99
+      ]
+    ],
+    "review_note": "Full source read. Imported background/ref fingerprint + exact settings comparisons; depends on runner proxy identity bug.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/recipe_spectrum_store.py",
+    "lines": 143,
+    "sha256": "68cf616211a51623e5c9518a84a3beefe707bcdec3d21fdc729aea83a96197fb",
+    "read_ranges": [
+      [
+        1,
+        143
+      ]
+    ],
+    "review_note": "Read complete: raw sweeps independent commit with content hash, shared grid hard links; reader history count and selected skip validation.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/reference_diagnostic_store.py",
+    "lines": 120,
+    "sha256": "54657f1e3b01b9022449a308fa95f1998cf349566605c7a887fd7f4c542e0981",
+    "read_ranges": [
+      [
+        1,
+        120
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/reference_store.py",
+    "lines": 170,
+    "sha256": "299348157055273d2898d7e64192da4aa1574f3f1d8fbbf418006fbeb6bdf07a",
+    "read_ranges": [
+      [
+        1,
+        170
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/resonance_bootstrap_store.py",
+    "lines": 196,
+    "sha256": "816a4cfe68dd989e0ffcbb5db40445b99c76050e9833635f04682403cb2d69f4",
+    "read_ranges": [
+      [
+        1,
+        196
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/resource_budget.py",
+    "lines": 80,
+    "sha256": "5f73a688f879a5a78231674ccf4e76df46eee4494ee55e9322a3efc5ffd57668",
+    "read_ranges": [
+      [
+        1,
+        80
+      ]
+    ],
+    "review_note": "Full source read. RAM cap resolves to half available at each check; persisted prior budget and close PyThat dependency may reject completed hardware run.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/spectral_difference_store.py",
+    "lines": 29,
+    "sha256": "2a4fea6a0f37a3a90a8358d9b124c27bf7f1210573c7d03a945227abfa2f7415",
+    "read_ranges": [
+      [
+        1,
+        29
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/spectrum_correction_codec.py",
+    "lines": 167,
+    "sha256": "cbcdafd3d2a19c96645e747721d768e34025ffc4ece13fcf977aa0fb3fd52893",
+    "read_ranges": [
+      [
+        1,
+        167
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/spectrum_decision_store.py",
+    "lines": 136,
+    "sha256": "88f364da63f8c1b4f70616e61813bb151f9ebd7cf674f2a7c18220109750d396",
+    "read_ranges": [
+      [
+        1,
+        136
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/spectrum_finalization_batch_store.py",
+    "lines": 454,
+    "sha256": "fd3ba058ea54357dcb1b7ba976968894c4dc34b86585aa6defd0091c7c42af41",
+    "read_ranges": [
+      [
+        1,
+        454
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/spectrum_interference_codec.py",
+    "lines": 72,
+    "sha256": "d9a3dbf5daed378fccc1097e8330b035c0be0fff2c802c4843c5900d5b066f54",
+    "read_ranges": [
+      [
+        1,
+        72
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/thatec_reader.py",
+    "lines": 510,
+    "sha256": "13f06693dcec181dd0f9628bf03a466447c29531c949ec181e9f7faf1eea7ce5",
+    "read_ranges": [
+      [
+        1,
+        510
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/thatec_schema_mapper.py",
+    "lines": 351,
+    "sha256": "5bc24f9a9f5d3656eff6382f834d9437240c75cd4ea3c513d80c3764c9101a83",
+    "read_ranges": [
+      [
+        1,
+        351
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/thatec_validator.py",
+    "lines": 358,
+    "sha256": "6fa9fe037b95a86a5d28559bac3e763aa1e238bcd247caf7b5254547ee48f104",
+    "read_ranges": [
+      [
+        1,
+        358
+      ]
+    ],
+    "review_note": "Full source read; source findings recorded separately; downstream usage and reproduction review pending.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/thatec_writer.py",
+    "lines": 795,
+    "sha256": "c18fbd884f6fd008afab7400c2844d153303059f9c43d33e66f1ecec2736c159",
+    "read_ranges": [
+      [
+        1,
+        795
+      ]
+    ],
+    "review_note": "Read complete: public rows and rollback journal. Resume omits requested/applied/readback; rollback flags registered after fallible resize/write; grid identity cache unsafe.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/storage/validation_worker.py",
+    "lines": 74,
+    "sha256": "b3d082210def318016a6d1124c403c1b0dce4589964ec23e13ed1949981db921",
+    "read_ranges": [
+      [
+        1,
+        74
+      ]
+    ],
+    "review_note": "Full source read. Isolated subprocess hidden, 120s timeout, failure report; no cancellation during validation.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/execution/__init__.py",
+    "lines": 5,
+    "sha256": "e7257028ed9f667e5fe45137992661b3a957e90df1d17e193a6e85d6b378b894",
+    "read_ranges": [
+      [
+        1,
+        5
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/execution/page.py",
+    "lines": 1981,
+    "sha256": "5fd3242acdc3fa94fb535aa3ec50cff9808f34349176f872c891043ec7ffde40",
+    "read_ranges": [
+      [
+        1,
+        1981
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/execution/plan_timeline.py",
+    "lines": 276,
+    "sha256": "0ef379c05ce5b06cec13c5d00db862eb0801bea7e26d6c9af1a5af5635caf64f",
+    "read_ranges": [
+      [
+        1,
+        276
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/measurement_tree/__init__.py",
+    "lines": 22,
+    "sha256": "8bb3da46ac272f67a3c5f5938587960b1107431fbcd9c0369f595d3d59bf9fb4",
+    "read_ranges": [
+      [
+        1,
+        22
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/measurement_tree/delegate.py",
+    "lines": 48,
+    "sha256": "069ed0bbaf423d6e1ba0ebd084bb984b61f617c2e8e7afd29018a2a8450d522a",
+    "read_ranges": [
+      [
+        1,
+        48
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/measurement_tree/model.py",
+    "lines": 584,
+    "sha256": "18b34ece35d8001ebdc9265af05da09cccafae5c135e8da9594411a45e1bd7be",
+    "read_ranges": [
+      [
+        1,
+        584
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/measurement_tree/view.py",
+    "lines": 754,
+    "sha256": "210458073f526352eeb7175d554b92d3bde5e00a774547006a3acbd957ec16f5",
+    "read_ranges": [
+      [
+        1,
+        754
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/recipes/__init__.py",
+    "lines": 28,
+    "sha256": "758c3ca8ee9b77392881af1a953d0d45f22eaa1da1ad97076bc2e06f45889623",
+    "read_ranges": [
+      [
+        1,
+        28
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/recipes/common_dialogs.py",
+    "lines": 1039,
+    "sha256": "b9800da4333d019a4835a2ddf353e4a103e55b5be5751d738acfb36002cc7042",
+    "read_ranges": [
+      [
+        1,
+        1039
+      ]
+    ],
+    "review_note": "Read complete. Dialog values, mutation visibility, lifecycle and source mapping reviewed; findings in working report.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/recipes/configuration_comparison.py",
+    "lines": 176,
+    "sha256": "a404fc052bad19d24d4605410e5532484a20b3d51f0243ba7bc23f69ddb003f6",
+    "read_ranges": [
+      [
+        1,
+        176
+      ]
+    ],
+    "review_note": "Read complete. Cross-layer findings recorded in working audit; not a production approval.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/recipes/device_extensions.py",
+    "lines": 51,
+    "sha256": "427ea60c6937acb199b375385f729d09af738144120b64b58ba9a5ff082f6737",
+    "read_ranges": [
+      [
+        1,
+        51
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/recipes/device_parameters.py",
+    "lines": 89,
+    "sha256": "0fcebe56e5b668474ecf6dc94f189cb2677789b7722ee9eb7538855fde2a6a1a",
+    "read_ranges": [
+      [
+        1,
+        89
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/recipes/elab_dialog.py",
+    "lines": 395,
+    "sha256": "c868f1d583d864286782690e2405d9f7362ead25dbb85811d1467ba5fc803115",
+    "read_ranges": [
+      [
+        1,
+        395
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/recipes/fluent_dialog.py",
+    "lines": 31,
+    "sha256": "1dd63950ca09ab4aaffed13228af52adf55585a439821fdc616950378e9839a3",
+    "read_ranges": [
+      [
+        1,
+        31
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/recipes/page.py",
+    "lines": 7206,
+    "sha256": "1dcbb9283291713af4dba9f155860a698faa4fbf0cf4ddec1dff8a5388f864b0",
+    "read_ranges": [
+      [
+        1,
+        7206
+      ]
+    ],
+    "review_note": "Read complete 7206 lines. Preflight settings race, execution context-menu bypass, disabled/managed ID loss, legacy full-config generator and parameter mismatch findings recorded.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/recipes/spectrum_options.py",
+    "lines": 125,
+    "sha256": "dd705204f1dc1f9fe59a8823e61aa45d5e0e6afc9e4d2ef52482b07b36e47715",
+    "read_ranges": [
+      [
+        1,
+        125
+      ]
+    ],
+    "review_note": "Read complete. Dialog values, mutation visibility, lifecycle and source mapping reviewed; findings in working report.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/recipes/sweep_editor.py",
+    "lines": 701,
+    "sha256": "20ce72dcff3bb9af4e2df1eb4c70f998558eeb4a3a133445d9cf0edf3636767c",
+    "read_ranges": [
+      [
+        1,
+        701
+      ]
+    ],
+    "review_note": "Read complete. Dialog values, mutation visibility, lifecycle and source mapping reviewed; findings in working report.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/results/sweep_tree_panel.py",
+    "lines": 678,
+    "sha256": "26a886c52ecad1990bf5e24123d1087f921d62c2a737907b29aa225becb40df0",
+    "read_ranges": [
+      [
+        1,
+        678
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/run_worker.py",
+    "lines": 1010,
+    "sha256": "3cc380b941d4aaa887baab52a68ad5e1945753bdb308be02fccaeed7a2d3621d",
+    "read_ranges": [
+      [
+        1,
+        1010
+      ]
+    ],
+    "review_note": "Full source read. Stop before runner construction never sets early-stop event; proxy identity path; cleanup connected access outside exception handling; deadline mismatch and emergency dispatch depend on Qt event processing.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/shell/main_window.py",
+    "lines": 4074,
+    "sha256": "2cf3ed8ab9b6b605fc46be98c1c57363d9d259c701ddc4f423f245c0290e079c",
+    "read_ranges": [
+      [
+        1,
+        4074
+      ]
+    ],
+    "review_note": "Full source read. Confirms GUI start supplies controller proxies. Resume callback lacks emergency-inhibit recheck and station preflight. GUI transport logging still invokes synchronous audit per message. Manual guard checks lease before OFF exemptions; global SAVE SETTINGS remains available while running. Trace device-page and audit dependencies.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/widgets/fluent_ownership.py",
+    "lines": 48,
+    "sha256": "b2798782648a235866260ac8385bd2447092d8361818984108754cca35be0b94",
+    "read_ranges": [
+      [
+        1,
+        48
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/widgets/spectrum_plot.py",
+    "lines": 693,
+    "sha256": "d7f5191544f431af858db3ee0d7c02504a4c3a9887dd153fe15e30dd72f76dda",
+    "read_ranges": [
+      [
+        1,
+        693
+      ]
+    ],
+    "review_note": "Read complete; dependency and consequence review in progress.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/workers.py",
+    "lines": 640,
+    "sha256": "941a5315f8118d19898587b715632855ecd0583c640641636d422b9393014f3d",
+    "read_ranges": [
+      [
+        1,
+        640
+      ]
+    ],
+    "review_note": "Full source read. Follow-ups: proxy type identity, no lease in adapter_for_run, queued operation survives caller timeout, call completion after state publication.",
+    "status": "read_complete",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  },
+  {
+    "path": "app/ui/dialogs.py",
+    "lines": 741,
+    "sha256": "2c73c316dc1a30871e74585b073553d5f2b579d4ee225efa5cebca5b5a2161e9",
+    "read_ranges": [
+      [
+        1,
+        741
+      ]
+    ],
+    "status": "read_complete",
+    "review_note": "Read complete. Dialog values, mutation visibility, lifecycle and source mapping reviewed; findings in working report.",
+    "status_definition": "Full source text read; findings may remain unresolved. Not a production qualification."
+  }
+]

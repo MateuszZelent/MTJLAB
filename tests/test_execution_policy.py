@@ -24,7 +24,7 @@ class _MemoryWriter:
     def append_event(self, name, payload, *, severity="info") -> None:
         self.events.append((name, payload, severity))
 
-    def append(self, point, trace=None) -> None:
+    def append(self, point, trace=None, *, device_states=None) -> None:
         self.points.append((point, trace))
 
     def close(self, status) -> None:
@@ -42,6 +42,9 @@ class _PassiveAdapter:
 
     def emergency_off(self) -> None:
         self.state = DeviceState.OUTPUT_OFF
+
+    def abort_acquisition(self) -> bool:
+        return True
 
 
 class _RetryingAnritsu(_PassiveAdapter):

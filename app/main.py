@@ -7,9 +7,11 @@ import sys
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
 
 from app.settings import repair_settings_file
 from app.ui.shell import MainWindow
+from app.ui.design_system.fluent_theme import configure_widget_style
 from app.version import APP_NAME
 
 
@@ -26,7 +28,9 @@ def main() -> int:
     args = parse_args()
     settings_path = Path(args.settings)
     repair_settings_file(settings_path)
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings)
     app = QApplication(sys.argv)
+    configure_widget_style(app)
     app.setApplicationName(APP_NAME)
     window = MainWindow(settings_path, simulation=args.simulate)
 

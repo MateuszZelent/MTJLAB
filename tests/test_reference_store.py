@@ -31,6 +31,7 @@ class ReferenceStoreTests(unittest.TestCase):
             rbw_auto=False,
             rbw_hz=10e3,
             vbw_mode="manual",
+            vbw_filter_mode="POW",
             vbw_hz=3e3,
             detector="RMS",
             attenuation_auto=False,
@@ -56,6 +57,7 @@ class ReferenceStoreTests(unittest.TestCase):
             self.assertFalse(loaded.rbw_auto)
             self.assertEqual(loaded.rbw_hz, 10e3)
             self.assertEqual(loaded.vbw_mode, "manual")
+            self.assertEqual(loaded.vbw_filter_mode, "POW")
             self.assertEqual(loaded.vbw_hz, 3e3)
             self.assertEqual(loaded.detector, "RMS")
             self.assertFalse(loaded.attenuation_auto)

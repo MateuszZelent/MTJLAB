@@ -1,0 +1,66 @@
+{
+  "max_gui_gap_s": 0.2827347000129521,
+  "ticks": 263,
+  "slowest_events": [
+    [
+      0.01215810002759099,
+      "shutdown_action_started"
+    ],
+    [
+      0.007194700185209513,
+      "run_completed"
+    ],
+    [
+      0.006862500216811895,
+      "shutdown_action_finished"
+    ],
+    [
+      0.006075800396502018,
+      "run_started"
+    ],
+    [
+      0.005165399983525276,
+      "reference_stored"
+    ],
+    [
+      0.0030984999611973763,
+      "shutdown_action_started"
+    ],
+    [
+      0.0020306999795138836,
+      "shutdown_action_started"
+    ],
+    [
+      0.0020133000798523426,
+      "shutdown_action_started"
+    ],
+    [
+      0.001894799992442131,
+      "shutdown_action_finished"
+    ],
+    [
+      0.0016934997402131557,
+      "shutdown_action_finished"
+    ],
+    [
+      0.0016812998801469803,
+      "shutdown_action_finished"
+    ],
+    [
+      0.0016374001279473305,
+      "dry_run_output_action_suppressed"
+    ],
+    [
+      0.00134680001065135,
+      "dry_run_output_action_suppressed"
+    ],
+    [
+      0.0011579003185033798,
+      "dry_run_output_guard_started"
+    ],
+    [
+      0.0009248997084796429,
+      "dry_run_output_guard_confirmed"
+    ]
+  ]
+}

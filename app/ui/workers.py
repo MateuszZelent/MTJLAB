@@ -6,8 +6,9 @@ QObject/QThread pair.  GUI code only emits queued operation requests.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import math
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from threading import Event, RLock
@@ -49,8 +50,12 @@ class _RunAccess:
 
     @staticmethod
     def safe(operation, args, kwargs):
-        if operation in {"emergency_off", "confirm_output_off", "stop_vout", "disarm_voltage_plan"}:
+        if operation in {"emergency_off", "confirm_output_off", "stop_vout", "disarm_voltage_plan",
+                         "abort_acquisition", "disconnect", "ramp_to_zero"}:
             return True
+        if operation == "set_signal_generator_output":
+            enabled = args[0] if args else kwargs.get("enabled")
+            return enabled is False
         if operation in {"set_output", "set_output_group"}:
             enabled = args[1] if len(args) > 1 else kwargs.get("enabled")
             return enabled is False
@@ -109,7 +114,34 @@ class _RunCall:
     result: object = None
     error: BaseException | None = None
     timeout_s: float | None = None
+    deadline_monotonic: float | None = None
     owner: object | None = None
+    _lock: RLock = field(default_factory=RLock, repr=False)
+    _started: bool = False
+    _cancelled: bool = False
+
+    def try_start(self) -> bool:
+        """Atomically arbitrate dispatch against a caller timing out."""
+        with self._lock:
+            if self._cancelled:
+                return False
+            if self.deadline_monotonic is not None and time.monotonic() >= self.deadline_monotonic:
+                self._cancelled = True
+                self.error = TimeoutError(f"Queued call {self.member!r} expired before dispatch.")
+                self.completed.set()
+                return False
+            self._started = True
+            return True
+
+    def cancel_pending(self) -> bool:
+        """Cancel only undispatched work; an in-flight mutation is uncertain."""
+        with self._lock:
+            if self._started:
+                return False
+            self._cancelled = True
+            self.error = TimeoutError(f"Queued call {self.member!r} was cancelled before dispatch.")
+            self.completed.set()
+            return True
 
 
 class RunDeviceAdapter:
@@ -125,6 +157,28 @@ class RunDeviceAdapter:
         self._owner = owner
         self.interruption_event = interruption_event
         self._active_timeout_s: float | None = None
+        self._operation_deadline: float | None = None
+
+    @contextmanager
+    def operation_timeout(self, duration_s: float):
+        """Bound a complete operation independently of individual VISA calls."""
+        if not math.isfinite(duration_s) or duration_s <= 0:
+            raise ValueError("Operation duration must be finite and positive.")
+        previous = self._operation_deadline
+        deadline = time.monotonic() + duration_s
+        self._operation_deadline = deadline if previous is None else min(previous, deadline)
+        try:
+            yield
+        finally:
+            self._operation_deadline = previous
+
+    def _remaining_operation_s(self) -> float | None:
+        if self._operation_deadline is None:
+            return None
+        remaining = self._operation_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Operation deadline expired before dispatch.")
+        return remaining
 
     def release(self) -> None:
         self._controller.release_run_lease(self._owner)
@@ -143,19 +197,23 @@ class RunDeviceAdapter:
 
     @property
     def state(self) -> object:
-        return self._controller.read_for_run("state", owner=self._owner)
+        return self._read("state")
 
     @property
     def identity(self) -> object:
-        return self._controller.read_for_run("identity", owner=self._owner)
+        return self._read("identity")
 
     @property
     def capabilities(self) -> object:
-        return self._controller.read_for_run("capabilities", owner=self._owner)
+        return self._read("capabilities")
 
     @property
     def connected(self) -> bool:
-        return bool(self._controller.read_for_run("connected", owner=self._owner))
+        return bool(self._read("connected"))
+
+    def _read(self, attribute: str) -> object:
+        return self._controller.read_for_run(attribute, owner=self._owner,
+                                             wait_timeout_s=self._remaining_operation_s())
 
     def __getattr__(self, member: str) -> Callable[..., object]:
         if member.startswith("_"):
@@ -163,7 +221,8 @@ class RunDeviceAdapter:
 
         def invoke(*args: object, **kwargs: object) -> object:
             return self._controller.call_for_run(
-                member, *args, timeout_s=self._active_timeout_s, owner=self._owner, **kwargs
+                member, *args, timeout_s=self._active_timeout_s, owner=self._owner,
+                wait_timeout_s=self._remaining_operation_s(), **kwargs
             )
 
         return invoke
@@ -187,7 +246,7 @@ class RecipePreflightWorker(QObject):
         device_registry: DeviceModuleRegistry | None = None,
     ) -> None:
         super().__init__()
-        self._settings = settings
+        self._settings = settings.model_copy(deep=True)
         self._source = source
         self._origin = origin
         self._outputs_forced_off = bool(outputs_forced_off)
@@ -238,7 +297,14 @@ class InstrumentWorker(QObject):
         self._adapter = adapter
         self._dispatcher = dispatcher
         self._run_access: _RunAccess | None = None
+        self._last_published_state: str | None = None
         self._attach_traffic_logger()
+
+    def _publish_state(self, *, force: bool = False) -> None:
+        state = self._adapter.state.value
+        if force or state != self._last_published_state:
+            self._last_published_state = state
+            self.state_changed.emit(state)
 
     def _attach_traffic_logger(self) -> None:
         factory = getattr(self._adapter, "_factory", None)
@@ -255,14 +321,14 @@ class InstrumentWorker(QObject):
                 args = payload if isinstance(payload, tuple) else (payload,)
                 with self._run_access.enter(None, operation, args):
                     result = self._dispatch(operation, payload)
-            self.state_changed.emit(self._adapter.state.value)
+            self._publish_state(force=True)
             if operation == "connect":
                 self.capabilities_changed.emit(self._adapter.capabilities)
             elif operation in {"disconnect", "replace_adapter"}:
                 self.capabilities_changed.emit(None)
             self.completed.emit(operation, result)
         except Exception as exc:
-            self.state_changed.emit(self._adapter.state.value)
+            self._publish_state(force=True)
             self.failed.emit(operation, str(exc))
 
     @Slot()
@@ -283,6 +349,8 @@ class InstrumentWorker(QObject):
     def invoke_for_run(self, request: _RunCall) -> None:
         """Run a lease call in this worker's adapter-owning thread."""
 
+        if not request.try_start():
+            return
         try:
             if self._run_access is not None:
                 with self._run_access.enter(request.owner, request.member, request.args, request.kwargs):
@@ -292,22 +360,33 @@ class InstrumentWorker(QObject):
         except BaseException as exc:
             request.error = exc
         finally:
-            self.state_changed.emit(self._adapter.state.value)
-            request.completed.set()
+            try:
+                self._publish_state(force=request.error is not None)
+            except BaseException as exc:
+                if request.error is None:
+                    request.error = exc
+            finally:
+                request.completed.set()
 
     def _invoke_member(self, request: _RunCall) -> None:
-        member = getattr(self._adapter, request.member)
-        if request.read_attribute:
-            if request.args or request.kwargs:
-                raise ValueError("A run attribute request cannot include arguments.")
-            request.result = member
-        else:
-            if not callable(member):
-                raise TypeError(f"Adapter member {request.member!r} is not callable.")
+        with ExitStack() as stack:
+            if request.deadline_monotonic is not None:
+                remaining = request.deadline_monotonic - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Operation deadline expired before adapter dispatch.")
+                scope = getattr(self._adapter, "operation_timeout", None)
+                if callable(scope):
+                    stack.enter_context(scope(remaining))
             if request.timeout_s is not None and hasattr(self._adapter, "io_timeout"):
-                with self._adapter.io_timeout(request.timeout_s):
-                    request.result = member(*request.args, **request.kwargs)
+                stack.enter_context(self._adapter.io_timeout(request.timeout_s))
+            member = getattr(self._adapter, request.member)
+            if request.read_attribute:
+                if request.args or request.kwargs:
+                    raise ValueError("A run attribute request cannot include arguments.")
+                request.result = member
             else:
+                if not callable(member):
+                    raise TypeError(f"Adapter member {request.member!r} is not callable.")
                 request.result = member(*request.args, **request.kwargs)
 
     def _dispatch(self, operation: str, payload: object) -> object:
@@ -413,6 +492,8 @@ class InstrumentWorker(QObject):
             if operation == "ramp_to_level":
                 return self._adapter.ramp_to_level(payload)  # type: ignore[arg-type]
         if isinstance(self._adapter, AnritsuAdapter):
+            if operation == "read_acquisition_configuration":
+                return self._adapter.read_acquisition_configuration()
             if operation == "read_configuration":
                 return self._adapter.read_current_configuration()
             if operation == "read_advanced_spectrum":
@@ -430,7 +511,7 @@ class InstrumentWorker(QObject):
             if operation == "fetch_current_trace":
                 return self._adapter.fetch_current_trace(str(payload or "TRAC1"))
             if operation == "single_sweep":
-                return self._adapter.acquire_single_sweep(str(payload or "TRAC1"))
+                return self._adapter.acquire_single_sweep(str(payload or "TRAC1"), restore_continuous=False)
             if operation == "read_signal_generator":
                 return self._adapter.read_signal_generator_configuration()
             if operation == "configure_signal_generator":
@@ -516,36 +597,48 @@ class DeviceController(QObject):
         *args: object,
         timeout_s: float | None = None,
         owner: object | None = None,
+        wait_timeout_s: float | None = None,
         **kwargs: object,
     ) -> object:
         """Synchronously invoke one adapter method for an active recipe run."""
 
         self._run_access.assert_open()
         request = _RunCall(method, tuple(args), dict(kwargs), timeout_s=timeout_s, owner=owner)
+        deadline_s = 60.0 if wait_timeout_s is None else wait_timeout_s
+        if not math.isfinite(deadline_s) or deadline_s <= 0:
+            raise ValueError("Run wait timeout must be finite and positive.")
+        request.deadline_monotonic = time.monotonic() + deadline_s
         self.run_request.emit(request)
-        deadline_s = (timeout_s + 15.0) if timeout_s is not None else 60.0
+        return self._wait_for_run_call(request, deadline_s)
+
+    @staticmethod
+    def _wait_for_run_call(request: _RunCall, deadline_s: float) -> object:
         if not request.completed.wait(timeout=deadline_s):
+            cancelled = request.cancel_pending()
+            disposition = (
+                "Cancelled before dispatch; no adapter operation was performed."
+                if cancelled else
+                "Operation was already dispatched; its result is uncertain. Do not retry the mutation."
+            )
             raise TimeoutError(
-                f"Call to {method!r} on instrument worker timed out after {deadline_s:.1f} s."
+                f"Call to {request.member!r} timed out after {deadline_s:.1f} s. {disposition}"
             )
         if request.error is not None:
             raise request.error
         return request.result
 
-    def read_for_run(self, attribute: str, *, owner: object | None = None) -> object:
+    def read_for_run(self, attribute: str, *, owner: object | None = None,
+                     wait_timeout_s: float | None = None) -> object:
         """Read one adapter property through its owning worker thread."""
 
         self._run_access.assert_open()
         request = _RunCall(attribute, read_attribute=True, owner=owner)
+        deadline_s = 10.0 if wait_timeout_s is None else min(10.0, wait_timeout_s)
+        if not math.isfinite(deadline_s) or deadline_s <= 0:
+            raise ValueError("Run read timeout must be finite and positive.")
+        request.deadline_monotonic = time.monotonic() + deadline_s
         self.run_request.emit(request)
-        deadline_s = 10.0
-        if not request.completed.wait(timeout=deadline_s):
-            raise TimeoutError(
-                f"Reading attribute {attribute!r} on instrument worker timed out after {deadline_s:.1f} s."
-            )
-        if request.error is not None:
-            raise request.error
-        return request.result
+        return self._wait_for_run_call(request, deadline_s)
 
     def reconfigure(self, adapter: DeviceAdapter) -> None:
         """Safely discard the session before applying a newly saved profile."""

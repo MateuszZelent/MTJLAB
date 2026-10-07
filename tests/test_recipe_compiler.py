@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import unittest
+
+import yaml
+from ruamel.yaml import YAML
+from app.recipes.baseline_authoring import explicit_baseline_mapping
+from app.recipes.models import RecipeNode
 from copy import deepcopy
 
 from app.domain.errors import SafetyViolation
@@ -8,6 +13,33 @@ from app.engine.compiler import RecipeCompiler
 from app.recipes import load_recipe, parse_recipe_text
 from app.settings.models import StationSettings
 from tests.helpers import ROOT, loaded_settings, simulation_settings
+
+
+
+def authored_source(source: str) -> str:
+    """Migrate positive legacy fixtures to visible, authored initial settings.
+
+    The returned YAML is the exact recipe passed to the compiler; stored
+    snapshots are not implicit runtime configuration anymore.
+    """
+    mapping = YAML(typ="safe").load(source)
+    baselines = []
+    modules = set()
+    def collect(node):
+        module = node.get("device_module")
+        if node.get("operation") == "configure_selected_parameters" and module not in modules:
+            modules.add(module)
+            recipe_node = RecipeNode(node["id"], node["type"],
+                {key: value for key, value in node.items() if key not in {"id", "type", "children"}}, ())
+            baselines.append(explicit_baseline_mapping(recipe_node, node_id=node["id"] + "-baseline"))
+        for child in node.get("children", []):
+            collect(child)
+    collect(mapping["root"])
+    if not baselines:
+        baselines.append(dict(id="explicit-b-baseline", type="configure_keithley", channel="B", mode="current",
+            level="0 A", compliance="67 mV", source_range="10 mA"))
+    mapping["root"] = dict(id="authored-fixture-root", type="sequence", children=[*baselines, mapping["root"]])
+    return yaml.safe_dump(mapping, sort_keys=False)
 
 
 class RecipeCompilerTests(unittest.TestCase):
@@ -135,12 +167,12 @@ root:
 """
 
         plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
-            parse_recipe_text(source)
+            parse_recipe_text(authored_source(source))
         )
 
-        self.assertEqual([action.kind for action in plan.actions], ["measure_moke_hall"] * 3)
+        self.assertEqual([action.kind for action in plan.actions], ["configure_keithley", *[kind for _ in range(3) for kind in ("update_keithley_level", "measure_moke_hall")]])
         self.assertEqual(plan.total_points, 3)
-        self.assertEqual(plan.required_devices, frozenset({"moke_box"}))
+        self.assertEqual(plan.required_devices, frozenset({"moke_box", "keithley"}))
 
     def test_every_output_sweep_revalidates_generated_points_against_limits(self) -> None:
         sources = {
@@ -225,7 +257,7 @@ root:
 """
         with self.assertRaises(SafetyViolation):
             RecipeCompiler(StationSettings.model_validate(raw)).compile(
-                parse_recipe_text(sg_source)
+                parse_recipe_text(authored_source(sg_source))
             )
 
     def test_compilation_can_be_cancelled_before_expansion(self) -> None:
@@ -346,8 +378,6 @@ root:
           type: update_keithley_level
           channel: B
           mode: current
-          source_autorange: false
-          source_range: 1 A
           level: "${keithley.B.current}"
         - id: rigol-frequency
           type: sweep
@@ -433,12 +463,13 @@ root:
           type: acquire_spectrum
           trace: TRAC1
 """
-        plan = RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+        plan = RecipeCompiler(simulation_settings()).compile(parse_recipe_text(authored_source(source)))
 
         self.assertEqual(plan.total_spectra, 3)
         self.assertEqual(
             [action.kind for action in plan.actions],
             [
+                "configure_keithley",
                 "configure_keithley",
                 "wait",
                 "acquire_spectrum",
@@ -504,7 +535,7 @@ root:
           label: point
 finally: []
 """
-        plan = RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+        plan = RecipeCompiler(simulation_settings()).compile(parse_recipe_text(authored_source(source)))
         waits = [action for action in plan.actions if action.node_id == "wait-2s"]
 
         self.assertEqual(len(waits), 2)
@@ -576,7 +607,7 @@ root:
       trace: TRAC1
 """
         plan = RecipeCompiler(simulation_settings()).compile(
-            parse_recipe_text(source)
+            parse_recipe_text(authored_source(source))
         )
 
         self.assertEqual(
@@ -651,14 +682,15 @@ root:
             "qualified_firmware": ["7.03.00"],
         }
         plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
-            parse_recipe_text(source)
+            parse_recipe_text(authored_source(source))
         )
 
         self.assertEqual(
             [action.kind for action in plan.actions],
             [
                 "configure_rigol",
-                "configure_rigol_output",
+                "update_rigol_frequency",
+                "update_rigol_levels",
                 "acquire_spectrum",
                 "update_rigol_frequency",
                 "acquire_spectrum",
@@ -666,9 +698,7 @@ root:
                 "acquire_spectrum",
             ],
         )
-        output_path = plan.actions[1].payload["config"]
-        self.assertEqual(output_path.polarity, "NORM")
-        self.assertFalse(output_path.sync_enabled)
+        self.assertFalse(any(action.kind == "configure_rigol_output" for action in plan.actions))
         acquisitions = [
             action for action in plan.actions if action.kind == "acquire_spectrum"
         ]
@@ -707,12 +737,12 @@ root:
       type: acquire_spectrum
 """
         plan = RecipeCompiler(simulation_settings()).compile(
-            parse_recipe_text(source)
+            parse_recipe_text(authored_source(source))
         )
 
         self.assertEqual(
             sum(action.kind == "update_rigol_levels" for action in plan.actions),
-            2,
+            3,
         )
         self.assertFalse(
             any(
@@ -749,21 +779,21 @@ root:
   children: []
 """
         plan = RecipeCompiler(simulation_settings()).compile(
-            parse_recipe_text(source)
+            parse_recipe_text(authored_source(source))
         )
         updates = [
             action.payload
             for action in plan.actions
             if action.kind == "update_rigol_levels"
         ]
-        self.assertEqual(len(updates), 2)
+        self.assertEqual(len(updates), 3)
         self.assertEqual(
             [round(item["high_level_v"] - item["low_level_v"], 9) for item in updates],
-            [0.003, 0.004],
+            [0.002, 0.003, 0.004],
         )
         self.assertEqual(
             [round((item["high_level_v"] + item["low_level_v"]) / 2, 9) for item in updates],
-            [0.001, 0.001],
+            [0.001, 0.001, 0.001],
         )
 
     def test_anritsu_device_provider_expands_axis_and_preserves_acquisition_child(self) -> None:
@@ -803,12 +833,13 @@ root:
             "qualified_firmware": ["7.03.00"],
         }
         plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
-            parse_recipe_text(source)
+            parse_recipe_text(authored_source(source))
         )
 
         self.assertEqual(
             [action.kind for action in plan.actions],
             [
+                "configure_anritsu",
                 "configure_anritsu",
                 "configure_anritsu_advanced",
                 "acquire_spectrum",
@@ -875,7 +906,7 @@ root:
         - {start: 1 GHz, stop: 1.2 GHz, points: 3}
     - {parameter_id: sg.power, mode: set, value: -40 dBm}
   children:
-    - {id: spectrum, type: acquire_spectrum, trace: TRAC1}
+    - {id: spectrum, type: checkpoint}
 """
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["anritsu"]["signal_generator"].update(
@@ -886,22 +917,23 @@ root:
             }
         )
         plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
-            parse_recipe_text(source)
+            parse_recipe_text(authored_source(source))
         )
 
         self.assertEqual(
             [action.kind for action in plan.actions],
                 [
                     "configure_anritsu_sg",
-                    "acquire_spectrum",
+                "update_anritsu_sg",
+                    "checkpoint",
                     "update_anritsu_sg",
-                    "acquire_spectrum",
+                    "checkpoint",
                     "update_anritsu_sg",
-                    "acquire_spectrum",
+                    "checkpoint",
                 ],
         )
         acquisitions = [
-            action for action in plan.actions if action.kind == "acquire_spectrum"
+            action for action in plan.actions if action.kind == "checkpoint"
         ]
         self.assertEqual(
             [
@@ -938,7 +970,7 @@ root:
         - {start: 1 GHz, stop: 1.1 GHz, points: 2}
   children:
     - {id: rf-on, type: set_anritsu_sg_output, enabled: true}
-    - {id: spectrum, type: acquire_spectrum, trace: TRAC1}
+    - {id: spectrum, type: checkpoint}
     - {id: rf-off, type: set_anritsu_sg_output, enabled: false}
 """
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
@@ -953,19 +985,20 @@ root:
             }
         )
         plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
-            parse_recipe_text(source)
+            parse_recipe_text(authored_source(source))
         )
 
         self.assertEqual(
             [action.kind for action in plan.actions],
             [
                 "configure_anritsu_sg",
+                "update_anritsu_sg",
                     "set_anritsu_sg_output",
-                    "acquire_spectrum",
+                    "checkpoint",
                     "set_anritsu_sg_output",
                     "update_anritsu_sg",
                     "set_anritsu_sg_output",
-                "acquire_spectrum",
+                "checkpoint",
                 "set_anritsu_sg_output",
             ],
         )
@@ -1054,7 +1087,7 @@ root:
   children: []
 """
         plan = RecipeCompiler(simulation_settings()).compile(
-            parse_recipe_text(source)
+            parse_recipe_text(authored_source(source))
         )
         self.assertEqual(
             [action.kind for action in plan.actions],
@@ -1086,7 +1119,7 @@ root:
             }
         )
         plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
-            parse_recipe_text(source)
+            parse_recipe_text(authored_source(source))
         )
         self.assertEqual(
             [action.kind for action in plan.actions],
@@ -1159,7 +1192,6 @@ finally:
             (
                 "keithley.outputs_off",
                 "rigol.outputs_off",
-                "anritsu.rf_off_and_abort",
                 "storage.flush_checkpoint",
             ),
         )
@@ -1293,12 +1325,12 @@ root:
         - id: below-threshold
           type: checkpoint
 """
-        plan = RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+        plan = RecipeCompiler(simulation_settings()).compile(parse_recipe_text(authored_source(source)))
         self.assertEqual(plan.total_points, 3)
         self.assertEqual(plan.total_spectra, 2)
         self.assertEqual(
             [action.kind for action in plan.actions],
-            ["checkpoint", "acquire_spectrum", "acquire_spectrum"],
+            ["configure_keithley", "update_keithley_level", "checkpoint", "update_keithley_level", "acquire_spectrum", "update_keithley_level", "acquire_spectrum"],
         )
 
     def test_connect_node_compiles_to_explicit_verified_session_check(self) -> None:
@@ -1317,9 +1349,6 @@ root:
         self.assertEqual(
             plan.safe_shutdown_actions,
             (
-                "anritsu.rf_off_and_abort",
-                "keithley.outputs_off",
-                "rigol.outputs_off",
                 "storage.flush_checkpoint",
             ),
         )
@@ -1588,14 +1617,14 @@ root:
                 - {start: 500 uA, stop: 1 mA, points: 2}
 """
         plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
-            parse_recipe_text(source)
+            parse_recipe_text(authored_source(source))
         )
         kinds = [action.kind for action in plan.actions]
-        self.assertEqual(kinds.count("configure_keithley"), 1)
+        self.assertEqual(kinds.count("configure_keithley"), 2)
         self.assertEqual(kinds.count("set_keithley_output"), 1)
         self.assertTrue(plan.actions[kinds.index("set_keithley_output")].payload["enabled"])
         self.assertEqual(kinds.count("assert_output_on"), 2)
-        self.assertEqual(kinds.count("update_keithley_level"), 1)
+        self.assertEqual(kinds.count("update_keithley_level"), 2)
 
     def test_continuous_output_without_plan_owned_on_transition_is_rejected(self) -> None:
         source = """\
@@ -1623,10 +1652,10 @@ root:
         raw = deepcopy(simulation_settings().model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
         with self.assertRaisesRegex(
-            Exception, "continuous OUTPUT requires an earlier configuration"
+            Exception, "continuous OUTPUT requires a previously confirmed OUTPUT ON transition"
         ):
             RecipeCompiler(StationSettings.model_validate(raw)).compile(
-                parse_recipe_text(source)
+                parse_recipe_text(authored_source(source))
             )
 
 

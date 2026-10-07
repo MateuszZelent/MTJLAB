@@ -167,7 +167,7 @@ class LakeShore475Adapter(DeviceAdapter):
     def connect(self) -> DeviceIdentity:
         if self._session is not None:
             return self._identity_or_raise()
-        session = self._factory.open(self._config.resource, self._config.visa_backend, self._config.timeout_ms)
+        session = self._open_session(self._factory, self._config.resource, self._config.visa_backend, self._config.timeout_ms)
         try:
             self._configure_session(session)
             connection = _ReadOnlyConnection(session)

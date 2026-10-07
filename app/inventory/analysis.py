@@ -7,6 +7,10 @@ import math
 import re
 from typing import Sequence
 
+from app.domain.quantities import (
+    DIMENSION_CURRENT, DIMENSION_RESISTANCE, DIMENSION_VOLTAGE, parse_quantity,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class MtjFiguresOfMerit:
@@ -25,6 +29,7 @@ class MtjFiguresOfMerit:
     v_switching_pos: float | None = None
     v_switching_neg: float | None = None
     details: str = ""
+    field_unit: str = ""  # h_coercive/h_offset retain the input field-axis unit
 
     @property
     def rp(self) -> float | None:
@@ -56,14 +61,19 @@ class MtjFiguresOfMerit:
         if self.ra_product is not None:
             items.append(("RA Product", f"{self.ra_product:.2f} Ω·µm²"))
         if self.h_coercive is not None:
-            items.append(("Coercivity (Hc)", f"{self.h_coercive:.2f} Oe"))
+            items.append(("Coercivity (Hc)", self.format_field(self.h_coercive)))
         if self.h_offset is not None:
-            items.append(("Offset (H_dipolar)", f"{self.h_offset:.2f} Oe"))
+            items.append(("Offset (H_dipolar)", self.format_field(self.h_offset)))
         if self.r_min is not None and self.r_p is None:
             items.append(("R_min", _format_resistance(self.r_min)))
         if self.r_max is not None and self.r_ap is None:
             items.append(("R_max", _format_resistance(self.r_max)))
         return items
+
+    def format_field(self, value: float | None) -> str:
+        if value is None or not math.isfinite(value):
+            return "—"
+        return f"{value:.6g} {self.field_unit or '(unit unknown)'}"
 
 
 def _format_resistance(val: float) -> str:
@@ -134,6 +144,8 @@ def calculate_mtj_metrics(
     y_name: str = "",
     *,
     dimension_label: str = "",
+    x_unit: str = "",
+    y_unit: str = "",
 ) -> MtjFiguresOfMerit:
     """Calculate spintronic MTJ parameters from measured X-Y points."""
     if len(x_values) == 0 or len(y_values) == 0 or len(x_values) != len(y_values):
@@ -148,26 +160,23 @@ def calculate_mtj_metrics(
     if len(clean_pairs) < 3:
         return MtjFiguresOfMerit(curve_type="unknown")
 
-    xs = [p[0] for p in clean_pairs]
     ys = [p[1] for p in clean_pairs]
-
-    x_lower = x_name.lower()
-    y_lower = y_name.lower()
 
     area_um2 = parse_dimension_area(dimension_label)
 
-    # Detect Curve Type
-    is_mr = any(k in x_lower for k in ("field", "b_field", "h_field", "magnet", "oe", "tesla", "flux")) or any(
-        k in y_lower for k in ("resistance", "r_dut", "r_mtj", "ohm", "tmr", "mr")
-    )
-    is_iv = any(k in x_lower for k in ("voltage", "v_dut", "v_source", "bias")) and any(
-        k in y_lower for k in ("current", "i_dut", "i_meas", "amperes", "amp")
-    )
+    # Labels and point counts cannot establish a physical dimension. Units
+    # from the series reader are authoritative; unknown dimensions stay unknown.
+    resistance_scale = _unit_scale(y_unit, DIMENSION_RESISTANCE)
+    voltage_scale = _unit_scale(x_unit, DIMENSION_VOLTAGE)
+    current_scale = _unit_scale(y_unit, DIMENSION_CURRENT)
+    field_unit = x_unit.strip()
+    is_field = field_unit in {"T", "mT", "uT", "µT", "μT", "Oe", "A/m", "kA/m"}
+    is_mr = is_field and resistance_scale is not None
+    is_iv = voltage_scale is not None and current_scale is not None
+    r_min = min(ys) * resistance_scale if resistance_scale is not None else None
+    r_max = max(ys) * resistance_scale if resistance_scale is not None else None
 
-    r_min = min(ys)
-    r_max = max(ys)
-
-    if is_mr or (len(ys) >= 10 and not is_iv):
+    if is_mr:
         # Interpret as Magnetoresistance loop (R vs H)
         r_p = r_min
         r_ap = r_max
@@ -180,7 +189,9 @@ def calculate_mtj_metrics(
         if area_um2 is not None and r_p > 0:
             ra_prod = r_p * area_um2
 
-        h_c, h_off = _estimate_switching_fields(xs, ys)
+        # Preserve gaps when locating crossings: missing samples must never
+        # create an artificial switching edge across the gap.
+        h_c, h_off = _estimate_switching_fields(x_values, y_values)
 
         return MtjFiguresOfMerit(
             curve_type="mr_loop",
@@ -194,11 +205,15 @@ def calculate_mtj_metrics(
             h_coercive=h_c,
             h_offset=h_off,
             details=f"MR loop with {len(clean_pairs)} points",
+            field_unit=field_unit,
         )
 
     if is_iv:
         # IV Curve: estimate zero-bias resistance
-        zero_pairs = sorted(clean_pairs, key=lambda p: abs(p[0]))
+        zero_pairs = sorted(
+            ((x * voltage_scale, y * current_scale) for x, y in clean_pairs),
+            key=lambda p: abs(p[0]),
+        )
         r_zero = None
         if len(zero_pairs) >= 2 and abs(zero_pairs[1][0] - zero_pairs[0][0]) > 1e-9:
             dv = zero_pairs[1][0] - zero_pairs[0][0]
@@ -210,8 +225,6 @@ def calculate_mtj_metrics(
 
         return MtjFiguresOfMerit(
             curve_type="iv_curve",
-            r_min=r_min,
-            r_max=r_max,
             r_p=r_zero,
             area_um2=area_um2,
             ra_product=ra_prod,
@@ -219,12 +232,21 @@ def calculate_mtj_metrics(
         )
 
     return MtjFiguresOfMerit(
-        curve_type="scalar_series",
+        curve_type="resistance_series" if resistance_scale is not None else "scalar_series",
         r_min=r_min,
         r_max=r_max,
         area_um2=area_um2,
         details=f"Series with {len(clean_pairs)} points",
     )
+
+
+def _unit_scale(unit: str, dimension: str) -> float | None:
+    if not unit:
+        return None
+    try:
+        return parse_quantity(f"1 {unit}", dimension).si_value
+    except ValueError:
+        return None
 
 
 def _estimate_switching_fields(
@@ -234,7 +256,10 @@ def _estimate_switching_fields(
     if len(xs) < 10:
         return None, None
 
-    y_min, y_max = min(ys), max(ys)
+    finite_values = [y for x, y in zip(xs, ys, strict=True) if math.isfinite(x) and math.isfinite(y)]
+    if len(finite_values) < 10:
+        return None, None
+    y_min, y_max = min(finite_values), max(finite_values)
     span = y_max - y_min
     if span <= 0:
         return None, None
@@ -247,6 +272,8 @@ def _estimate_switching_fields(
     for i in range(len(ys) - 1):
         y1, y2 = ys[i], ys[i + 1]
         x1, x2 = xs[i], xs[i + 1]
+        if not all(math.isfinite(value) for value in (x1, x2, y1, y2)):
+            continue
         if (y1 <= y_mid <= y2) or (y2 <= y_mid <= y1):
             denom = y2 - y1
             if abs(denom) > 1e-12:

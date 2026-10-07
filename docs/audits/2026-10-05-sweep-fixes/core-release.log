@@ -1,0 +1,12 @@
+........................................................................ [ 15%]
+.......................................................................................................................................... [ 44%]
+.................................................................... [ 59%]
+...............................................s.sss................. [ 73%]
+..................................................................... [ 88%]
+......................................................                 [100%]
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_thatec_validator.py:45: The laboratory golden HDF5 file is not present in this checkout.
+SKIPPED [1] tests\test_thatec_reader.py:22: The licensed golden THATEC HDF5 fixture is not present in this checkout.
+SKIPPED [1] tests\test_thatec_reader.py:32: The licensed golden THATEC HDF5 fixture is not present in this checkout.
+SKIPPED [1] tests\test_thatec_reader.py:45: The licensed golden THATEC HDF5 fixture is not present in this checkout.
+466 passed, 4 skipped, 18 subtests passed in 195.04s (0:03:15)

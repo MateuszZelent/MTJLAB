@@ -45,6 +45,7 @@ from app.recipes.semantic_tree import AxisPointContext, SemanticMeasurementTree,
 from app.domain.quantities import DIMENSION_TIME, format_quantity_auto
 from app.domain.execution_state import SemanticOperationState
 from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeView, TreeInteractionMode
+from app.ui.execution.plan_timeline import ExecutionPlanTimeline
 
 
 @dataclass(slots=True)
@@ -313,7 +314,8 @@ class RunMonitorPage(QWidget):
         self.current_setpoints = BodyLabel("Setpoints (SI): —")
         self.current_setpoints.setWordWrap(True)
         self.current_measurements = BodyLabel("Measurements (SI): —")
-        self.current_measurements.setWordWrap(True)
+        self.current_measurements.setWordWrap(False)
+        self.current_measurements.setToolTip("Full latest measurements appear here on hover.")
         self.storage_rate = BodyLabel("Storage: —")
         self.storage_rate.setWordWrap(True)
         for label in (
@@ -369,6 +371,9 @@ class RunMonitorPage(QWidget):
         self.measurement_tree.set_interaction_mode(TreeInteractionMode.READ_ONLY)
         self.measurement_tree.setMinimumHeight(260)
         self._semantic_tree: SemanticMeasurementTree | None = None
+        self._shutdown_failed = False
+        self._shutdown_completed: set[str] = set()
+        self._shutdown_expected: set[str] = set()
         self.ui_metrics = ExecutionUiMetrics()
         # The buffer owns the cadence, while the page exposes one shared
         # metrics object for diagnostics and qualification tests.  Keeping a
@@ -388,6 +393,8 @@ class RunMonitorPage(QWidget):
         self.spectrum_preview = SpectrumPlotWidget(
             legend=False, compact_toolbar=True
         )
+        from app.ui.widgets.plot_ownership import coalesce_plot_refresh
+        coalesce_plot_refresh(self.spectrum_preview.plot)
         self.spectrum_preview.setMinimumWidth(0)
         self.spectrum_preview.setMinimumHeight(240)
         self.spectrum_preview.setSizePolicy(
@@ -520,6 +527,9 @@ class RunMonitorPage(QWidget):
         self.live_state_card.setMaximumHeight(180)
         layout.addWidget(self.monitor_card)
         layout.addWidget(self.workspace_card, 1)
+        self.plan_timeline = ExecutionPlanTimeline(self)
+        self._timeline_action_offset = 0
+        layout.addWidget(self.plan_timeline)
         layout.addWidget(self.live_state_card)
         layout.addWidget(self.warnings)
         self.pause_button.clicked.connect(self._request_pause)
@@ -561,6 +571,7 @@ class RunMonitorPage(QWidget):
         self._semantic_flush_timer.setInterval(100)
         self._semantic_flush_timer.timeout.connect(self._flush_semantic_states)
         self._pending_semantic_states: dict[str, SemanticOperationState] = {}
+        self._pending_completed_actions = 0
         self._activity_pulse_on = False
         self._activity_pulse_timer = QTimer(self)
         self._activity_pulse_timer.setInterval(550)
@@ -580,6 +591,18 @@ class RunMonitorPage(QWidget):
         if orientation_changed:
             self._last_layout_orientation = orientation
             self.monitor_splitter.setOrientation(orientation)
+            activity_minimum = (
+                self.measurement_tree.minimumHeight() + self.events.minimumHeight()
+                + self.activity_splitter.handleWidth()
+            )
+            workspace_minimum = (
+                max(activity_minimum, self.spectrum_preview.minimumHeight())
+                if orientation == Qt.Orientation.Horizontal else
+                activity_minimum + self.spectrum_preview.minimumHeight()
+                + self.monitor_splitter.handleWidth()
+            )
+            self.activity_splitter.setMinimumHeight(activity_minimum)
+            self.monitor_splitter.setMinimumHeight(workspace_minimum)
             if orientation == Qt.Orientation.Horizontal:
                 # The plot and tree sit side by side at desktop widths.  Keep
                 # the workspace card bounded so the current-operation card and
@@ -764,15 +787,19 @@ class RunMonitorPage(QWidget):
             else None
         )
         operation_label = node.label if node is not None else state.kind or "operation"
+        self.plan_timeline.set_current_step(state.action_index + 1 - self._timeline_action_offset)
         self.current_path.setText(
             f"Current node: {operation_label} · action "
             f"{state.action_index + 1}/{max(1, state.total_actions)}"
         )
         context = state.axis_context
         if context is not None:
+            self._set_requested_parameters(dict(context.active_setpoints_si))
             self.current_setpoints.setText(
                 "Setpoints (SI): " + self._format_scalars(context.active_setpoints_si)
             )
+        if state.phase == "applied":
+            self._apply_live_snapshot(data)
         target = self._semantic_target(state.semantic_id)
         is_setpoint = node is not None and node.kind is SemanticNodeKind.SET_ROI_VALUE
         if is_setpoint and target:
@@ -821,7 +848,7 @@ class RunMonitorPage(QWidget):
         elif node is not None:
             self.current_operation_detail.setText(str(data.get("kind", node.kind.value)))
         self.current_operation_phase.setText(
-            self._operation_phase(str(data.get("kind", "set point")))
+            self._operation_phase(str(data.get("kind", "set point")), str(data.get("transition_policy", "")))
         )
         operation_kind = str(data.get("kind", "")).lower()
         if operation_kind == "wait" and phase == "running":
@@ -899,12 +926,17 @@ class RunMonitorPage(QWidget):
         recipe_source: str | None = None,
         execution_mode: str = "measurement",
         semantic_tree: SemanticMeasurementTree | None = None,
+        safe_shutdown_actions: tuple[str, ...] = (),
+        timeline_action_offset: int = 0,
     ) -> None:
+        self.plan_timeline.set_plan(plan_actions, shutdown_actions=safe_shutdown_actions, execution_mode=execution_mode)
+        self._timeline_action_offset = timeline_action_offset
         self._preview_timer.stop()
         self._pending_spectrum_preview = None
         self._semantic_flush_timer.stop()
         self._pending_semantic_states.clear()
         self._activity_pulse_timer.stop()
+        self._pending_completed_actions = 0
         self._activity_pulse_on = False
         self._set_activity_indicator("○", "off")
         self._semantic_state_by_id.clear()
@@ -916,6 +948,12 @@ class RunMonitorPage(QWidget):
         self._semantic_tree = semantic_tree or SemanticMeasurementTree(
             (), {}, source_text=recipe_source or ""
         )
+        self._shutdown_failed = False
+        self._shutdown_completed.clear()
+        finally_node = self._semantic_tree.by_id.get("__finally__")
+        self._shutdown_expected = set(safe_shutdown_actions or (
+            finally_node.data.get("generated_actions", ()) if finally_node is not None else ()
+        ))
         self.tree_model.replace_tree(self._semantic_tree)
         self.tree_model.set_read_only(True)
         self._run_active = True
@@ -1171,9 +1209,11 @@ class RunMonitorPage(QWidget):
         for target, item in self._parameter_items.items():
             applied = self._applied_parameter_value(target, device_states)
             if applied is not None:
-                item.setText(2, self._format_parameter(target, applied))
-                item.setText(3, "APPLIED")
-                item.setForeground(3, self._state_brush("done"))
+                rendered = self._format_parameter(target, applied)
+                item.setText(2, rendered)
+                pending = item.text(1) not in {"—", rendered}
+                item.setText(3, "PENDING" if pending else "APPLIED")
+                item.setForeground(3, self._state_brush("running" if pending else "done"))
 
     def _set_requested_parameters(self, values: object) -> None:
         if not isinstance(values, dict):
@@ -1196,8 +1236,10 @@ class RunMonitorPage(QWidget):
                 item.setForeground(3, self._state_brush("running"))
 
     @staticmethod
-    def _operation_phase(kind: str) -> str:
+    def _operation_phase(kind: str, transition_policy: str = "") -> str:
         normalized = kind.lower().replace("_", " ")
+        if "ramp" in normalized or transition_policy == "qualified_ramp":
+            return "RAMPING"
         if "wait" in normalized:
             return "WAITING"
         if any(word in normalized for word in ("acquire", "measure", "spectrum")):
@@ -1287,7 +1329,7 @@ class RunMonitorPage(QWidget):
             self.current_operation_value.setText("—")
             self.current_operation_si.setText("SI —")
         kind = str(data.get("kind", "operation"))
-        self.current_operation_phase.setText(self._operation_phase(kind))
+        self.current_operation_phase.setText(self._operation_phase(kind, str(data.get("transition_policy", ""))))
         if state is not None:
             self._set_current_operation_state(state)
 
@@ -1451,6 +1493,8 @@ class RunMonitorPage(QWidget):
         state = self._semantic_state_from_event(data, phase=phase)
         if state is None:
             return
+        if phase == "applied" and isinstance(data.get("state_snapshot"), dict):
+            self.presentation_buffer.latest_device_snapshot = data
         raw_count = data.get("_coalesced_count", 1)
         try:
             coalesced_count = max(1, int(raw_count))
@@ -1459,6 +1503,7 @@ class RunMonitorPage(QWidget):
         if phase == "failed":
             # Fault feedback is a safety boundary and must not wait behind a
             # visual cadence timer.
+            self.discard_pending_semantic()
             self._apply_semantic_event(name, data)
             if coalesced_count > 1:
                 self.ui_metrics.semantic_events_received += coalesced_count - 1
@@ -1470,6 +1515,8 @@ class RunMonitorPage(QWidget):
             self.ui_metrics.semantic_events_coalesced += coalesced_count - 1
 
     def _queue_semantic_state(self, name: str, state: SemanticOperationState) -> None:
+        if state.phase == "applied":
+            self._pending_completed_actions = max(self._pending_completed_actions, state.action_index + 1)
         self.presentation_buffer.submit(name, state)
         self._pending_semantic_states[state.semantic_id] = state
         self.ui_metrics.max_pending_semantic = max(
@@ -1491,6 +1538,8 @@ class RunMonitorPage(QWidget):
         self._semantic_flush_timer.stop()
         self._pending_semantic_states.clear()
         self.presentation_buffer.latest_semantic.clear()
+        self.presentation_buffer.latest_device_snapshot = None
+        self._pending_completed_actions = 0
 
     def _flush_semantic_states(self) -> None:
         # The typed buffer is the source of truth.  The secondary dictionary
@@ -1520,6 +1569,9 @@ class RunMonitorPage(QWidget):
             )
             for state in pending:
                 self._semantic_state_by_id[state.semantic_id] = state
+            if self._pending_completed_actions:
+                self.progress.setValue(min(self.progress.maximum(), max(self.progress.value(), self._pending_completed_actions)))
+                self._pending_completed_actions = 0
             focused = max(
                 pending,
                 key=lambda state: (state.action_index, state.phase == "failed"),
@@ -1573,6 +1625,11 @@ class RunMonitorPage(QWidget):
                 update_focus=True,
                 apply_model=False,
             )
+            snapshot = self.presentation_buffer.latest_device_snapshot
+            self.presentation_buffer.latest_device_snapshot = None
+            if snapshot is not None:
+                self._apply_live_snapshot(snapshot)
+            self._update_eta()
         finally:
             self.measurement_tree.setUpdatesEnabled(True)
             self.measurement_tree.viewport().update()
@@ -1620,6 +1677,7 @@ class RunMonitorPage(QWidget):
             "recovery_prelude_started",
             "recovery_prelude_finished",
             "safe_resume_boundary",
+            "moke_ramp_progress",
         }:
             # These high-rate boundaries are already losslessly persisted by
             # the runner.  Rebuilding a QTextDocument line for every point can
@@ -1631,6 +1689,8 @@ class RunMonitorPage(QWidget):
         return True
 
     def append_event(self, name: str, data: dict[str, object]) -> None:
+        if name == "semantic_operation_failed":
+            self.discard_pending_semantic()
         if name in {
             "semantic_operation_started",
             "semantic_operation_applied",
@@ -1672,6 +1732,7 @@ class RunMonitorPage(QWidget):
                 self.progress.value() + 1,
                 self.progress.maximum(),
             )
+            self.plan_timeline.set_current_step(action_number)
             self.current_path.setText(
                 f"Current node: {data.get('node_id', '—')} • {data.get('kind', '—')} • "
                 f"action {action_number}/{self.progress.maximum()}"
@@ -1685,16 +1746,20 @@ class RunMonitorPage(QWidget):
             raw_stored = data.get("stored_points")
             if isinstance(raw_stored, int) and not isinstance(raw_stored, bool):
                 self._stored_points = max(self._stored_points, raw_stored)
-            self.current_measurements.setText(
-                "Measurements (SI): " + self._format_scalars(data.get("measurements_si"))
-            )
+            measurements = self._format_scalars(data.get("measurements_si"))
+            self.current_measurements.setToolTip(measurements.replace(" • ", "\n"))
+            values = data.get("measurements_si")
+            count = len(values) if isinstance(values, dict) else 0
+            self.current_measurements.setText(f"Measurements: {count} values · hover for details")
             self.storage_rate.setText(
                 f"Storage: point {data.get('stored_points', '—')} • "
                 f"write {float(data.get('write_elapsed_s', 0.0)) * 1000:.1f} ms • "
                 f"average {float(data.get('average_write_rate_points_per_s', 0.0)):.2f} point/s • "
                 f"spectrum {data.get('spectrum_points', 0)} values"
             )
-            self._set_current_operation_state("CHECKPOINT SAVED")
+            # Storage telemetry is independently coalesced and may arrive
+            # after the next operation starts. It must not overwrite WAITING,
+            # MEASURING or a fault in the current-operation card.
         if name == "action_failed":
             self._set_current_operation_state("FAILED")
         elif name == "safe_finally_started":
@@ -1708,7 +1773,7 @@ class RunMonitorPage(QWidget):
             action_id = str(data.get("action", ""))
             semantic_id = f"__finally__.{action_id.replace('.', '_')}"
             self.tree_model.apply_state({"semantic_id": semantic_id, "phase": "running"})
-            self.tree_model.apply_state({"semantic_id": "__finally__", "phase": "running"})
+            self.tree_model.apply_state({"semantic_id": "__finally__", "phase": "failed" if self._shutdown_failed else "running"})
             self.measurement_tree.follow_semantic_id(semantic_id)
             self._update_current_operation(
                 {"kind": str(data.get("action", "shutdown")), "node_id": "shutdown"},
@@ -1717,12 +1782,19 @@ class RunMonitorPage(QWidget):
         elif name == "shutdown_action_finished":
             action_id = str(data.get("action", ""))
             semantic_id = f"__finally__.{action_id.replace('.', '_')}"
-            self.tree_model.apply_state({"semantic_id": semantic_id, "phase": "applied"})
+            self.tree_model.apply_state({"semantic_id": semantic_id, "phase": "skipped" if data.get("mutation_suppressed") else "applied"})
+            self._shutdown_completed.add(action_id)
+            phase = "failed" if self._shutdown_failed else (
+                "applied" if self._shutdown_expected and self._shutdown_expected <= self._shutdown_completed else "running"
+            )
+            self.tree_model.apply_state({"semantic_id": "__finally__", "phase": phase})
             self._set_current_operation_state("CONFIRMED")
         elif name == "shutdown_error":
+            self._shutdown_failed = True
             action_id = str(data.get("action", ""))
             semantic_id = f"__finally__.{action_id.replace('.', '_')}"
             self.tree_model.apply_state({"semantic_id": semantic_id, "phase": "failed"})
+            self.tree_model.apply_state({"semantic_id": "__finally__", "phase": "failed"})
             self._set_current_operation_state("FAILED")
         if name == "pause_pending":
             self._begin_pause()
@@ -1742,6 +1814,7 @@ class RunMonitorPage(QWidget):
             self.state.setText("FAULT • WATCHDOG TIMEOUT")
             self._set_current_operation_state("WATCHDOG TIMEOUT")
         elif name == "run_completed":
+            self.plan_timeline.set_current_step(len(self.plan_timeline.actions))
             self.tree_model.apply_state({"semantic_id": "__finally__", "phase": "applied"})
             self.progress.setValue(self.progress.maximum())
             self._set_current_operation_state("COMPLETE")
@@ -1871,18 +1944,25 @@ class RunMonitorPage(QWidget):
         if run_result.error and state == "SAFE":
             state = "STOPPED SAFELY"
         path = str(result["path"])
-        completed = state == "SAFE" and not run_result.error
+        completed = state in {"SAFE", "HOLDING"} and not run_result.error
+        holding = completed and state == "HOLDING"
+        stopped_safely = state == "STOPPED SAFELY"
+        safe_state_unconfirmed = self._shutdown_failed or state == "UNKNOWN"
         self.completion_title.setText(
-            "Measurement completed — data saved"
+            "Measurement completed — final outputs held" if holding else "Measurement completed — data saved"
             if completed
-            else "Run stopped safely — confirmed data saved"
+            else "Run stopped safely — confirmed data saved" if stopped_safely
+            else "Run stopped — safe state not confirmed" if safe_state_unconfirmed
+            else "Run stopped — check shutdown status"
         )
         self.completion_summary.setText(
             f"{run_result.stored_points} committed point(s). "
-            "The measurement file was closed and is ready to open."
+            "The measurement file was closed and is ready to open. "
+            + ("Requested final outputs remain active." if holding else "")
             if completed
             else f"{run_result.stored_points} committed point(s) were retained; "
-            "the run ended before normal completion."
+            "the run ended before normal completion. "
+            + ("" if stopped_safely else "Check shutdown results before operating the instruments.")
         )
         self.completion_path.setText(path)
         self.open_result_folder_button.setEnabled(Path(path).parent.exists())

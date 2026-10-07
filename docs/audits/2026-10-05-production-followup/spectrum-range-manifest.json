@@ -1,0 +1,13 @@
+{
+  "tests": "26 passed in 123.47s",
+  "changed_files_ruff": "passed",
+  "repository_ruff": "10 existing F401 unused imports in unrelated tests",
+  "hardware_commands_sent": false,
+  "source_sha256": {
+    "app/ui/widgets/spectrum_plot.py": "d7f5191544f431af858db3ee0d7c02504a4c3a9887dd153fe15e30dd72f76dda",
+    "app/devices/anritsu_ms2830a/ui/page.py": "abb908acb210a41e57ab8b0e5f95e3aa4d9c4291966d31b94d51e1d8ab23c9f5",
+    "app/devices/anritsu_ms2830a/ui/spectrum_workbench.py": "c7490769e7180d84530d6ee4e1f1bcf101a6b6fbfc31b838a3d8b913e5b85eda",
+    "tests/test_anritsu_spectrum_workbench.py": "308c6aa5b0abc6404c099f3fbb90f8564b761d7bebb0f19bb9ef222fa4fa72d9",
+    "tests/test_anritsu_spectrum_focus_layout.py": "f217cdd0e67ec7f73d2e9553e333b0732bf9eacf50f30647814a18f274372bee"
+  }
+}

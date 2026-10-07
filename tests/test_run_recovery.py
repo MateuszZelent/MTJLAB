@@ -40,6 +40,7 @@ root:
       stop_frequency: "2 MHz"
       reference_level: "0 dBm"
       points: 101
+    - {id: initial-b-off, type: set_keithley_output, channel: B, enabled: false}
     - id: first-spectrum
       type: acquire_spectrum
       trace: TRAC1
@@ -49,6 +50,7 @@ root:
       mode: current
       level: "1 mA"
       compliance: "67 mV"
+      source_range: "10 mA"
     - id: keithley-on
       type: set_keithley_output
       channel: B
@@ -69,6 +71,8 @@ root:
   id: root
   type: sequence
   children:
+    - {id: b-baseline, type: configure_keithley, channel: B, mode: current, level: 0 A, compliance: 10 mV, source_range: 10 mA}
+    - {id: r-baseline, type: configure_rigol, channel: 1, waveform: SIN, frequency: 1 kHz, high_level: 1 mV, low_level: -1 mV}
     - id: current-axis
       type: sweep
       target: keithley.B.current
@@ -127,6 +131,7 @@ class RunRecoveryTests(unittest.TestCase):
             simulated_station_settings(loaded_settings()).model_dump(mode="python")
         )
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["anritsu"]["advanced_spectrum"] = {"control_protocol": "standard_scpi", "qualified_firmware": ["sim-1.0"]}
         return StationSettings.model_validate(raw)
 
     @staticmethod
@@ -144,6 +149,7 @@ class RunRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "recoverable.h5"
             rigol, keithley, anritsu = self._adapters(settings)
+            rigol.connect()
             keithley.connect()
             anritsu.connect()
             writer = Hdf5RunWriter(
@@ -169,7 +175,7 @@ class RunRecoveryTests(unittest.TestCase):
             self.assertEqual(checkpoint.committed_points_found, 2)
             self.assertEqual(
                 tuple(action.kind for action in checkpoint.prelude_actions),
-                ("configure_anritsu",),
+                ("configure_anritsu", "configure_anritsu_advanced"),
             )
 
             writer = Hdf5RunWriter.resume(
@@ -181,6 +187,7 @@ class RunRecoveryTests(unittest.TestCase):
                 expected_points=plan.total_points,
             )
             rigol, keithley, anritsu = self._adapters(settings)
+            rigol.connect()
             keithley.connect()
             anritsu.connect()
             resumed = RecipeRunner(

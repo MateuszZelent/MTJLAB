@@ -1,0 +1,20 @@
+{
+  "stored_points": 1000,
+  "gui_timer_ticks": 7481,
+  "maximum_gui_gap_s": 0.40302659990265965,
+  "maximum_gap_context": {
+    "points": 0,
+    "worker_running": true
+  },
+  "max_tree_update_duration_s": 0.09892649995163083,
+  "max_preview_update_duration_s": 0.028915000148117542,
+  "result_import_pending": true,
+  "result_reader_active": false,
+  "result_path": "C:\\Users\\Shark\\AppData\\Local\\Temp\\pytest-of-Shark\\pytest-491\\test_execution_tree_keeps_qt_e0\\responsiveness\\20261005T221435.061953Z_responsiveness.h5",
+  "archive_validation": {
+    "status": "completed",
+    "spectra": 1000,
+    "reference_bins": 10001,
+    "all_spectra_have_10001_bins": true
+  }
+}

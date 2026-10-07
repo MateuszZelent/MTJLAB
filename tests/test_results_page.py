@@ -6,6 +6,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from tests.test_spectrum_correction_controller import wait_until
+from tests.shell_test_isolation import isolated_shell_persistence, shell_qt_application  # noqa: F401
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtTest import QTest
@@ -62,6 +65,7 @@ class ResultsPageTests(unittest.TestCase):
             try:
                 self.assertEqual(page.runs.topLevelItemCount(), 1)
                 page.runs.setCurrentItem(page.runs.topLevelItem(0))
+                wait_until(self.application, lambda: page._result_task is None)
                 self.application.processEvents()
                 self.assertIn("State: completed", page.metadata.toPlainText())
                 self.assertIn("Execution provenance:", page.metadata.toPlainText())
@@ -71,9 +75,10 @@ class ResultsPageTests(unittest.TestCase):
                 self.assertEqual(page.details_tabs.tabText(3), "PyThat data")
                 self.assertEqual(page.details_tabs.tabText(4), "Device state")
                 self.assertIn("Checkpoint", page.pythat_data.toPlainText())
-                self.assertEqual(page.points.topLevelItemCount(), 1)
-                page.points.setCurrentItem(page.points.topLevelItem(0))
+                self.assertEqual(page.points.model().rowCount(), 1)
+                page.points.setCurrentIndex(page.points.model().index(0, 0))
                 self.application.processEvents()
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks)
                 self.assertIn("frequency_hz", page.device_state.toPlainText())
                 self.assertEqual(page.spectrum_plot.trace_point_count("Stored spectrum"), 3)
                 self.assertIn("3 points", page.spectrum_info.text())
@@ -98,6 +103,7 @@ class ResultsPageTests(unittest.TestCase):
             page.resume_requested.connect(requested.append)
             try:
                 page.runs.setCurrentItem(page.runs.topLevelItem(0))
+                wait_until(self.application, lambda: page._result_task is None)
                 self.application.processEvents()
                 self.assertTrue(page.resume_button.isEnabled())
                 page.resume_button.click()
@@ -119,9 +125,9 @@ class ResultsPageTests(unittest.TestCase):
             writer.close("completed")
 
             page = ResultsPage(temporary)
-            page._ASYNC_LOAD_BYTES = 0
             try:
                 page.runs.setCurrentItem(page.runs.topLevelItem(0))
+                wait_until(self.application, lambda: page._result_task is None)
                 deadline = QTest.qWait
                 for _ in range(200):
                     self.application.processEvents()
@@ -147,6 +153,7 @@ class ResultsPageTests(unittest.TestCase):
                 if page.runs.topLevelItem(index).text(0) == reference.name
             )
             page.runs.setCurrentItem(run_item)
+            wait_until(self.application, lambda: page._result_task is None)
             self.application.processEvents()
 
             self.assertEqual(run_item.text(1), "THATEC")
@@ -178,6 +185,7 @@ class ResultsPageTests(unittest.TestCase):
                 if results.runs.topLevelItem(index).text(0) == reference.name
             )
             results.runs.setCurrentItem(result_item)
+            wait_until(self.application, lambda: results._result_task is None)
             self.application.processEvents()
             results.open_sweep_button.click()
             self.application.processEvents()
@@ -277,6 +285,7 @@ class ResultsPageTests(unittest.TestCase):
             try:
                 self.assertEqual(page.runs.topLevelItemCount(), 0)
                 page.open_result_file(path)
+                wait_until(self.application, lambda: page._result_task is None)
                 self.application.processEvents()
                 self.assertEqual(page.runs.topLevelItemCount(), 1)
                 self.assertEqual(page.runs.currentItem().text(0), "external.h5")
@@ -379,7 +388,7 @@ class ResultsPageTests(unittest.TestCase):
             self.application.processEvents()
 
             self.assertEqual(viewer.toPlainText(), sample_yaml)
-            self.assertIn("8 lines", viewer.stats_label.text())
+            self.assertIn("9 lines", viewer.stats_label.text())
 
             # Verify line number area width is non-zero
             self.assertGreater(viewer.editor.line_number_area_width(), 0)

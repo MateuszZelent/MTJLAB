@@ -1057,7 +1057,7 @@ class SettingsPage(QWidget):
         if isinstance(value, bool):
             return (("Yes", "true"), ("No", "false"))
         if cls._is_keithley_sense_mode_path(path):
-            return (("2-wire (Local)", "2wire"), ("4-wire (Kelvin)", "4wire"))
+            return (("2-wire (Local; required)", "2wire"),)
         annotation = cls._annotation_for_path(path)
         if annotation is not None and get_origin(annotation) is Literal:
             return tuple((str(option), str(option)) for option in get_args(annotation))
@@ -1127,28 +1127,10 @@ class SettingsPage(QWidget):
     ) -> None:
         if self._changing:
             return
-        selected = str(editor.currentData() or editor.itemData(index) or "")
-        if "4" in selected:
-            reply = QMessageBox.warning(
-                self.window(),
-                "Warning: 4-Wire (Remote Kelvin) Sense Mode",
-                "4-wire remote sensing requires dedicated Sense HI and Sense LO probes physically wired to the DUT.\n\n"
-                "⚠️ DANGER: If you are using a standard 2-probe fixture or if Sense lines are open/floating, "
-                "the Keithley SMU cannot read voltage across the device. Voltage compliance is bypassed and the "
-                "SMU will drive the Force terminals to maximum rail voltage (up to 20 V – 40 V).\n\n"
-                "This will instantaneously destroy delicate MTJ tunnel barriers!\n\n"
-                "Do you confirm that separate Sense leads are physically connected to the DUT?",
-                buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                defaultButton=QMessageBox.StandardButton.Cancel,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                self._changing = True
-                try:
-                    idx = editor.findData("2wire")
-                    editor.setCurrentIndex(max(0, idx))
-                finally:
-                    self._changing = False
-                return
+        if editor.currentData() != "2wire":
+            QMessageBox.warning(self.window(), "Prohibited sense mode",
+                                "Only 2-wire local sense is allowed. 4-wire remote sense is prohibited.")
+            return
         self._form_changed(path)
 
     def _on_sense_mode_tree_changed(
@@ -1156,29 +1138,11 @@ class SettingsPage(QWidget):
     ) -> None:
         if self._changing:
             return
-        selected = str(editor.currentData() or editor.itemData(index) or "")
-        if "4" in selected:
-            reply = QMessageBox.warning(
-                self.window(),
-                "Warning: 4-Wire (Remote Kelvin) Sense Mode",
-                "4-wire remote sensing requires dedicated Sense HI and Sense LO probes physically wired to the DUT.\n\n"
-                "⚠️ DANGER: If you are using a standard 2-probe fixture or if Sense lines are open/floating, "
-                "the Keithley SMU cannot read voltage across the device. Voltage compliance is bypassed and the "
-                "SMU will drive the Force terminals to maximum rail voltage (up to 20 V – 40 V).\n\n"
-                "This will instantaneously destroy delicate MTJ tunnel barriers!\n\n"
-                "Do you confirm that separate Sense leads are physically connected to the DUT?",
-                buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                defaultButton=QMessageBox.StandardButton.Cancel,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                self._changing = True
-                try:
-                    idx = editor.findData("2wire")
-                    editor.setCurrentIndex(max(0, idx))
-                finally:
-                    self._changing = False
-                return
-        item.setText(1, str(editor.currentData()))
+        if editor.currentData() != "2wire":
+            QMessageBox.warning(self.window(), "Prohibited sense mode",
+                                "Only 2-wire local sense is allowed. 4-wire remote sense is prohibited.")
+            return
+        item.setText(1, "2wire")
 
     def _install_choice_editor(
         self,

@@ -14,6 +14,7 @@ class ApplicationState(StrEnum):
     VERIFIED = "verified"
     RUNNING = "running"
     PAUSED = "paused"
+    HOLDING = "holding"
     STOPPING = "stopping"
     SAFE = "safe"
     FAULT = "fault"

@@ -42,6 +42,7 @@ class RigolChannelConfig:
     pulse_width_s: float | None = None
     pulse_leading_s: float | None = None
     pulse_trailing_s: float | None = None
+    changed_fields: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,7 +166,7 @@ class RigolAdapter(DeviceAdapter):
         if not resource:
             raise ConnectionError("No Rigol VISA resource is configured in settings.yml.")
         timeout = int(parse_quantity(self._settings.connection.timeout, DIMENSION_TIME).si_value * 1000)
-        session = self._factory.open(resource, self._settings.connection.visa_backend, timeout)
+        session = self._open_session(self._factory, resource, self._settings.connection.visa_backend, timeout)
         try:
             if self._settings.connection.read_termination is not None:
                 session.read_termination = self._settings.connection.read_termination
@@ -221,8 +222,9 @@ class RigolAdapter(DeviceAdapter):
         """Probe optional DG1000Z controls with read-only queries at connect.
 
         Feature visibility is conservative.  An optional control is exposed
-        only if this firmware answers its query; a timeout/error merely hides
-        that control and never prevents basic waveform use.
+        only if this firmware answers its query. An answered but unsupported
+        response hides the control. A transport failure aborts connection:
+        subsequent queries cannot safely consume a possibly delayed response.
         """
 
         features = {"basic_waveform"}
@@ -246,8 +248,11 @@ class RigolAdapter(DeviceAdapter):
             ):
                 try:
                     response = session.query(query)
-                except Exception:
-                    unsupported.add(feature)
+                except Exception as exc:
+                    raise DeviceError(
+                        f"Rigol capability query {query!r} failed; response synchronization "
+                        "is unconfirmed. Reconnect before issuing further commands."
+                    ) from exc
                 else:
                     if self._capability_response_valid(feature, response):
                         features.add(feature)
@@ -517,6 +522,15 @@ class RigolAdapter(DeviceAdapter):
     def configure_channel(self, config: RigolChannelConfig) -> RigolCurrentEstimate:
         """Safely configure a channel while its output is forced OFF."""
 
+        selected = config.changed_fields
+        if selected is not None and not {"waveform", "frequency_hz", "high_level_v", "low_level_v"} <= set(selected):
+            baseline = self._last_config.get(config.channel)
+            if baseline is None:
+                raise SafetyViolation("A Rigol field patch requires a confirmed basic carrier baseline.")
+            names = set(RigolChannelConfig.__dataclass_fields__) - {"channel", "changed_fields"}
+            if set(selected) - names:
+                raise SafetyViolation("Unsupported Rigol selected field.")
+            config = replace(baseline, **{name: getattr(config, name) for name in selected}, changed_fields=selected)
         if config.channel not in (1, 2):
             raise SafetyViolation("Rigol channel number must be 1 or 2.")
         channel = self._channel_settings(config.channel)
@@ -539,6 +553,38 @@ class RigolAdapter(DeviceAdapter):
         self._assert_independent_channels()
         session = self._require_session()
         prefix = f":SOUR{config.channel}"
+        selected = config.changed_fields
+        if selected is not None:
+            allowed = {"waveform", "frequency_hz", "high_level_v", "low_level_v", "output_load", "phase_deg",
+                       "square_duty_percent", "ramp_symmetry_percent", "pulse_width_s", "pulse_leading_s", "pulse_trailing_s"}
+            if not selected or len(selected) != len(set(selected)) or set(selected) - allowed:
+                raise SafetyViolation("Rigol changes require explicit distinct supported fields.")
+            # A basic recipe never silently disables a front-panel advanced
+            # mode. Its envelope must first be explicitly disabled/qualified.
+            self._synchronize_advanced_states(config.channel)
+            if any(config.channel in active for active in (self._modulation_enabled, self._sweep_enabled, self._burst_enabled)):
+                raise SafetyViolation("Disable the Rigol advanced mode explicitly before basic recipe configuration.")
+            if session.query(f"{prefix}:VOLT:UNIT?").strip().upper() != "VPP":
+                raise SafetyViolation("Basic Rigol recipes require confirmed VPP units; select VPP explicitly on the instrument.")
+            preserved = {}
+            if "output_load" not in selected:
+                load_response = session.query(f":OUTP{config.channel}:LOAD?").strip().upper()
+                # The DG1000Z represents HIGHZ numerically (9.9E37). Keep
+                # that readback sentinel distinct from a requested resistor.
+                preserved["output_load"] = "HIGHZ" if self._load_response_matches(load_response, "HIGHZ") else self._format_load(load_response)
+            if "phase_deg" not in selected and config.waveform.upper() not in {"DC", "NOIS"}:
+                preserved["phase_deg"] = float(session.query(f"{prefix}:PHAS?"))
+            shape_fields = {
+                "SQU": {"square_duty_percent": "FUNC:SQU:DCYC"},
+                "RAMP": {"ramp_symmetry_percent": "FUNC:RAMP:SYMM"},
+                "PULS": {"pulse_width_s": "FUNC:PULS:WIDT", "pulse_leading_s": "FUNC:PULS:TRAN:LEAD", "pulse_trailing_s": "FUNC:PULS:TRAN:TRA"},
+            }
+            for name, suffix in shape_fields.get(config.waveform.upper(), {}).items():
+                if name not in selected:
+                    preserved[name] = float(session.query(f"{prefix}:{suffix}?"))
+            config = replace(config, **preserved)
+            estimate = self._validate_waveform_config(config)
+            self._validate_shape_parameters(config)
         waveform = config.waveform.upper()
         # A previous readback is no longer evidence as soon as this
         # transaction starts.  If any following write/query fails, OUTPUT ON
@@ -552,39 +598,46 @@ class RigolAdapter(DeviceAdapter):
         # APPL/FUNC changes and advanced modes interact on the instrument.
         # Start every carrier transaction from one explicit, reproducible
         # state instead of relying on whatever the front panel last selected.
-        session.write(f"{prefix}:MOD OFF")
-        session.write(f"{prefix}:SWE:STAT OFF")
-        session.write(f"{prefix}:BURS OFF")
+        if selected is None:
+            session.write(f"{prefix}:MOD OFF")
+            session.write(f"{prefix}:SWE:STAT OFF")
+            session.write(f"{prefix}:BURS OFF")
         # Harmonic generation and waveform summing alter the physical output
         # envelope but are not part of a basic carrier configuration.  Reset
         # them explicitly instead of inheriting a front-panel state.
-        session.write(f"{prefix}:HARM OFF")
-        session.write(f"{prefix}:SUM OFF")
+        if selected is None:
+            session.write(f"{prefix}:HARM OFF")
+            session.write(f"{prefix}:SUM OFF")
         self._modulation_enabled.discard(config.channel)
         self._last_modulation_config.pop(config.channel, None)
         self._sweep_enabled.discard(config.channel)
         self._last_sweep_config.pop(config.channel, None)
         self._burst_enabled.discard(config.channel)
         self._last_burst_config.pop(config.channel, None)
-        session.write(f":OUTP{config.channel}:LOAD {self._format_load(config.output_load)}")
+        if selected is None or "output_load" in selected:
+            session.write(f":OUTP{config.channel}:LOAD {self._format_load(config.output_load)}")
         # VOLT without a suffix is interpreted in the persistent channel
         # amplitude unit. Establish Vpp explicitly even for DC so every later
         # live update starts from a verified, deterministic unit state.
-        session.write(f"{prefix}:VOLT:UNIT VPP")
+        if selected is None:
+            session.write(f"{prefix}:VOLT:UNIT VPP")
         if waveform == "DC":
-            session.write(
-                f"{prefix}:APPL:DC DEF,DEF,{self._format_wire_voltage(config.high_level_v)}"
-            )
-            session.write(f"{prefix}:VOLT:OFFS {self._format_wire_voltage(config.high_level_v)}")
+            if selected is None or "waveform" in selected:
+                session.write(
+                    f"{prefix}:APPL:DC DEF,DEF,{self._format_wire_voltage(config.high_level_v)}"
+                )
+            if selected is None or {"waveform", "high_level_v", "low_level_v"}.intersection(selected):
+                session.write(f"{prefix}:VOLT:OFFS {self._format_wire_voltage(config.high_level_v)}")
         else:
-            session.write(f"{prefix}:FUNC {waveform}")
-            if waveform == "USER":
+            if selected is None or "waveform" in selected:
+                session.write(f"{prefix}:FUNC {waveform}")
+            if waveform == "USER" and selected is None:
                 # USER memory also supports sample-rate playback. This model
                 # expresses a repetition frequency, so force FREQ mode instead
                 # of inheriting SRATE and changing the physical meaning of
                 # frequency_hz.
                 session.write(f"{prefix}:FUNC:ARB:MODE FREQ")
-            if waveform != "NOIS":
+            if waveform != "NOIS" and (selected is None or "frequency_hz" in selected):
                 session.write(f"{prefix}:FREQ {self._format_wire_number(config.frequency_hz)}")
             # HighL and LowL are coupled representations of amplitude and
             # offset on the DG1000Z.  Program the canonical pair while OUTPUT
@@ -592,14 +645,15 @@ class RigolAdapter(DeviceAdapter):
             # states that the instrument may clamp.
             amplitude_vpp = quantize_rigol_voltage(config.high_level_v - config.low_level_v)
             offset_v = quantize_rigol_voltage((config.high_level_v + config.low_level_v) / 2.0)
-            session.write(f"{prefix}:VOLT {self._format_wire_voltage(amplitude_vpp)}")
-            session.write(f"{prefix}:VOLT:OFFS {self._format_wire_voltage(offset_v)}")
-            if waveform != "NOIS":
+            if selected is None or {"high_level_v", "low_level_v"}.intersection(selected):
+                session.write(f"{prefix}:VOLT {self._format_wire_voltage(amplitude_vpp)}")
+                session.write(f"{prefix}:VOLT:OFFS {self._format_wire_voltage(offset_v)}")
+            if waveform != "NOIS" and (selected is None or "phase_deg" in selected):
                 session.write(f"{prefix}:PHAS {config.phase_deg:.12g}")
             self._write_shape_parameters(prefix, waveform, config)
         self._check_errors()
         applied = self._verify_applied_configuration(config)
-        self._last_config[config.channel] = applied
+        self._last_config[config.channel] = replace(applied, changed_fields=None)
         self._update_aggregate_output_state()
         return estimate
 
@@ -673,6 +727,7 @@ class RigolAdapter(DeviceAdapter):
                     f"Rigol frequency readback {actual:.9g} Hz does not match "
                     f"{updated.frequency_hz:.9g} Hz."
                 )
+            self._verify_applied_configuration(updated, expected_output=output_after)
         except Exception as exc:
             self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
         self._last_config[channel] = replace(updated, frequency_hz=actual)
@@ -695,9 +750,10 @@ class RigolAdapter(DeviceAdapter):
                 "Configure and validate the Rigol channel before updating levels."
             )
         if config.waveform.upper() == "DC":
-            raise SafetyViolation(
-                "DC has one voltage level. Change Offset / DC level instead of HighL/LowL."
-            )
+            if high_level_v != low_level_v:
+                raise SafetyViolation("DC requires identical high and low levels; select Offset / DC level.")
+            actual = self.update_offset(channel, high_level_v)
+            return actual, actual
         raw_updated = replace(
             config,
             high_level_v=float(high_level_v),
@@ -808,6 +864,7 @@ class RigolAdapter(DeviceAdapter):
                 raise DeviceError(
                     "Rigol level readback does not match requested HighL/LowL."
                 )
+            self._verify_applied_configuration(updated, expected_output=output_after)
         except Exception as exc:
             self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
         self._last_config[channel] = replace(
@@ -896,6 +953,7 @@ class RigolAdapter(DeviceAdapter):
                     raise DeviceError(
                         "Rigol DC-level readback does not match the requested offset."
                     )
+                self._verify_applied_configuration(updated, expected_output=output_after)
             except Exception as exc:
                 self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
             self._last_config[channel] = replace(
@@ -1027,6 +1085,7 @@ class RigolAdapter(DeviceAdapter):
                     "Rigol voltage readback was clamped or its amplitude/offset and "
                     "HighL/LowL representations disagree."
                 )
+            self._verify_applied_configuration(updated, expected_output=output_after)
         except Exception as exc:
             self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
         self._last_config[channel] = replace(
@@ -1403,12 +1462,13 @@ class RigolAdapter(DeviceAdapter):
 
     def _write_shape_parameters(self, prefix: str, waveform: str, config: RigolChannelConfig) -> None:
         session = self._require_session()
-        if waveform == "SQU" and config.square_duty_percent is not None:
+        selected = config.changed_fields
+        if waveform == "SQU" and config.square_duty_percent is not None and (selected is None or "square_duty_percent" in selected):
             self._assert_finite("duty cycle", config.square_duty_percent)
             if not 0 < config.square_duty_percent < 100:
                 raise SafetyViolation("Duty cycle must be in the range (0, 100)%.")
             session.write(f"{prefix}:FUNC:SQU:DCYC {config.square_duty_percent:.12g}")
-        elif waveform == "RAMP" and config.ramp_symmetry_percent is not None:
+        elif waveform == "RAMP" and config.ramp_symmetry_percent is not None and (selected is None or "ramp_symmetry_percent" in selected):
             self._assert_finite("ramp symmetry", config.ramp_symmetry_percent)
             if not 0 <= config.ramp_symmetry_percent <= 100:
                 raise SafetyViolation("Ramp symmetry must be in the range 0–100%.")
@@ -1419,7 +1479,8 @@ class RigolAdapter(DeviceAdapter):
                 ("TRAN:LEAD", config.pulse_leading_s),
                 ("TRAN:TRA", config.pulse_trailing_s),
             ):
-                if value is not None:
+                name = {"WIDT": "pulse_width_s", "TRAN:LEAD": "pulse_leading_s", "TRAN:TRA": "pulse_trailing_s"}[suffix]
+                if value is not None and (selected is None or name in selected):
                     self._assert_finite("pulse parameter", value)
                     if value <= 0:
                         raise SafetyViolation("Pulse width and edge times must be positive.")
@@ -1472,13 +1533,18 @@ class RigolAdapter(DeviceAdapter):
     def set_output(self, channel: int, enabled: bool) -> bool:
         channel_settings = self._channel_settings(channel)
         session = self._require_session()
+        preserve_enabled = enabled and self._output_states[channel]
         try:
             if enabled:
-                # Put the channel in a known de-energised state before any
-                # preflight query.  Every later failure enters the common
-                # two-channel shutdown fallback below.
-                session.write(f":OUTP{channel} OFF")
-                self._verify_output_off(channel)
+                if preserve_enabled:
+                    observed = self._parse_output_state(session.query(f":OUTP{channel}?"), channel=channel)
+                    if not observed:
+                        raise DeviceError("Rigol OUTPUT changed outside the confirmed control path.")
+                else:
+                    # An initial enable establishes OFF before qualification.
+                    # Repeated ON only revalidates the already active channel.
+                    session.write(f":OUTP{channel} OFF")
+                    self._verify_output_off(channel)
                 self._assert_independent_channels()
                 self._synchronize_advanced_states(channel)
                 self._interlock().assert_can_enable(
@@ -1495,16 +1561,11 @@ class RigolAdapter(DeviceAdapter):
                     )
                 output_config = self._last_output_config.get(channel)
                 if output_config is None:
-                    # Direct API/recipe callers may omit the optional output
-                    # path action.  Establish deterministic, conservative
-                    # defaults rather than inheriting unknown front-panel
-                    # polarity/gating/SYNC state.
-                    output_config = RigolOutputConfig(
-                        channel=channel,
-                        output_load=config.output_load,
-                    )
-                    self.configure_output(output_config)
-                self._verify_output_configuration(output_config)
+                    # Enabling an output never authorizes rewriting its load,
+                    # polarity, gating or SYNC settings. Read and qualify them.
+                    output_config = self._preserved_output_configuration(channel, config.output_load)
+                self._verify_output_configuration(output_config, expected_output=preserve_enabled)
+                self._last_output_config[channel] = output_config
                 self._validate_waveform_config(config)
                 if channel in self._modulation_enabled:
                     modulation = self._last_modulation_config.get(channel)
@@ -1545,8 +1606,9 @@ class RigolAdapter(DeviceAdapter):
                 # Re-read the complete carrier immediately before the one
                 # energising transition; front-panel changes cannot reuse a
                 # stale cache entry.
-                self._verify_applied_configuration(config)
-            session.write(f":OUTP{channel} {'ON' if enabled else 'OFF'}")
+                self._verify_applied_configuration(config, expected_output=preserve_enabled)
+            if not preserve_enabled:
+                session.write(f":OUTP{channel} {'ON' if enabled else 'OFF'}")
             self._check_errors()
             active = self._parse_output_state(
                 session.query(f":OUTP{channel}?"), channel=channel
@@ -2478,6 +2540,21 @@ class RigolAdapter(DeviceAdapter):
                 f"Rigol {operation} readback failed (output remains OFF): "
                 + "; ".join(mismatches)
             )
+
+    def _preserved_output_configuration(self, channel: int, output_load: str | float) -> RigolOutputConfig:
+        session = self._require_session()
+        prefix = f":OUTP{channel}"
+        polarity = session.query(f"{prefix}:POL?").strip().upper()
+        mode = session.query(f"{prefix}:MODE?").strip().upper()
+        if polarity != "NORM" or mode != "NORM":
+            raise SafetyViolation("Inverted or gated Rigol output requires an explicit validated output-path configuration.")
+        gate = session.query(f"{prefix}:GAT:POL?").strip().upper()
+        sync = self._parse_on_off(session.query(f"{prefix}:SYNC?"), field="SYNC state")
+        sync_polarity = session.query(f"{prefix}:SYNC:POL?").strip().upper()
+        delay = float(session.query(f"{prefix}:SYNC:DEL?"))
+        if gate not in {"NORM", "INV"} or sync_polarity not in {"NORM", "INV"} or not math.isfinite(delay) or not 0 <= delay <= 10:
+            raise DeviceError("Invalid Rigol output-path readback.")
+        return RigolOutputConfig(channel, output_load, polarity, mode, gate, sync, sync_polarity, delay)
 
     def _verify_output_configuration(
         self, expected: RigolOutputConfig, *, expected_output: bool = False

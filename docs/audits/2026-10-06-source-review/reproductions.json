@@ -1,0 +1,18 @@
+{
+  "stop_before_runner": {
+    "stop_flag_after_request": false
+  },
+  "gui_proxy_anritsu_identity": {
+    "identity": null
+  },
+  "units": {
+    "1 MV": 0.001,
+    "1 MA": 0.001,
+    "1 mHz": 1000000.0
+  },
+  "keithley_snapshot_replay": {
+    "identical_snapshots": 10,
+    "measurement_update_calls": 10,
+    "unique_measurement_values": 1
+  }
+}

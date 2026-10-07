@@ -1,0 +1,16 @@
+{
+  "simulation_only": true,
+  "production_sources_match_previous_qualification": true,
+  "previous_source_count": 60,
+  "settings_sha256": "34d400d719c5ce05edf7a58c38ed0091a32a6459e65a8d405eaa26e9ffac86cb",
+  "report_sha256": "1e0c3af499720009d34599fbe4e99c9a73d1afe74e30dc16708dd84ab1b65233",
+  "artifact_sha256": {
+    "current-config-capacity.json": "2c13c3d808afa0f400324266b7a9208ab67ffa3bf4969ec71a02fdabb1b91d0b",
+    "current-values-result.json": "8c027a9a34f6aaf04cbfad27d6ef763f1e4814d948de3e76633d8eef3bd4a777",
+    "current-values.log": "12792211bfa683633b1a9862358df68cb4d6b1f4b357d07653be77af110a6295",
+    "probes.log": "0193c267038683cbfcf4cbb7e9da0082a23695fe46b4ba25bf807921f31c86e5",
+    "regressions.log": "ef4e34bf323299aefac3af6ce8f0daeb95ee380d6e69122f925d0b57f784374e",
+    "reproduce_gaps.py": "152020cdc40c312f67b6054de8a1ac79ceee3daa596231db2d959d613bbefd22",
+    "verify_current_values.py": "8a2b1c2f7b7e3f17d589f62274c3aa8e8f5cf785db13d0cee7ba6e894ece7727"
+  }
+}

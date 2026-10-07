@@ -245,6 +245,7 @@ class LakeShore475Page(QWidget):
         self._controller, self._settings = controller, settings
         self._in_flight = False
         self._history: deque[GaussmeterReading] = deque()
+        self._metadata_reading: GaussmeterReading | None = None
         self._plot_dirty = False
         self._window_filter_installed = False
         self._timer = QTimer(self)
@@ -618,6 +619,7 @@ class LakeShore475Page(QWidget):
 
     def _show_reading(self, result: GaussmeterReading) -> None:
         """Render one confirmed reading without changing command availability."""
+        self._metadata_reading = result
         self.field.setText("— T" if result.field_t is None else f"{result.field_t:+.8g} T")
         self.frequency.setText("— Hz" if result.frequency_hz is None else f"{result.frequency_hz:.8g} Hz")
         self.peaks.setText("— / — T" if result.negative_peak_t is None else f"{result.negative_peak_t:+.8g} / {result.positive_peak_t:+.8g} T")
@@ -636,9 +638,9 @@ class LakeShore475Page(QWidget):
     def manual_metadata_values(self) -> tuple[ManualMetadataValue, ...]:
         """Return the latest confirmed Lake Shore field reading."""
 
-        if not self._history:
+        if self._metadata_reading is None:
             return ()
-        reading = self._history[-1]
+        reading = self._metadata_reading
         values: list[ManualMetadataValue] = []
 
         def add(
@@ -659,6 +661,7 @@ class LakeShore475Page(QWidget):
                     unit=unit,
                     value_si=float(value),
                     source="last confirmed Lake Shore readback",
+                    recorded_at_utc=reading.timestamp_utc,
                 )
             )
 
@@ -795,7 +798,11 @@ class LakeShore475Page(QWidget):
             self.status.emit(f"Lake Shore read failed: {message}")
 
     def _state(self, state: str) -> None:
-        if state == "disconnected":
+        if state.lower() in {"disconnected", "fault", "unknown"}:
+            self._metadata_reading = None
+            self.field.setText("— T")
+            self.frequency.setText("— Hz")
+            self.peaks.setText("— / — T")
             self._in_flight = False
             self.stop_live("Live readout stopped: reconnect Lake Shore 475 before reading again.")
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QPainter,
@@ -102,6 +102,11 @@ class StationDialog(FramelessDialog):
         modal_shell_backdrop_margins: tuple[int, int, int, int] | None = None,
         modal_shell_surface_margins: tuple[int, int, int, int] | None = None,
     ) -> None:
+        # FramelessDialog creates an HWND eagerly. Without this Qt promotes
+        # sibling controls to native child windows, which corrupts Windows
+        # backing-store scrolling/grabs with a shifted copy of the full modal.
+        # Must precede the base constructor (also for standalone dialog hosts).
+        QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings)
         super().__init__(parent)
         self.setProperty("stationDialog", True)
         self._is_resizable = False

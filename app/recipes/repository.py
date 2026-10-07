@@ -27,6 +27,8 @@ class RecipeRepository:
         return parse_recipe_text(target.read_text(encoding="utf-8"), origin=str(target))
 
     def save(self, path: str | Path, source: str) -> SavedRecipe:
+        from app.recipes.editing import canonical_recipe_source
+        source = canonical_recipe_source(source)
         target = Path(path)
         parse_recipe_text(source, origin=str(target))
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -42,6 +44,12 @@ class RecipeRepository:
         return SavedRecipe(target, self._sha256(source), backup)
 
     def autosave(self, path: str | Path, source: str) -> Path:
+        from app.recipes.editing import canonical_recipe_source
+        from app.domain.errors import ConfigurationError
+        try:
+            source = canonical_recipe_source(source)
+        except ConfigurationError:
+            pass  # Preserve incomplete YAML drafts; execution still requires strict parsing.
         target = self.recovery_path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         self._atomic_write(target, source)

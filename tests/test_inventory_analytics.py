@@ -57,7 +57,7 @@ class InventoryAnalyticsTests(unittest.TestCase):
         r = np.concatenate([r_up, r_down])
 
         metrics = calculate_mtj_metrics(
-            h, r, x_name="B_Field", y_name="Resistance", dimension_label="200 nm"
+            h, r, x_name="B_Field", y_name="Resistance", dimension_label="200 nm", x_unit="Oe", y_unit="ohm"
         )
 
         self.assertIsNotNone(metrics.rp)
@@ -93,9 +93,9 @@ class InventoryAnalyticsTests(unittest.TestCase):
         # Flat line
         flat_x = np.linspace(0, 10, 20)
         flat_y = np.ones(20) * 50.0
-        metrics_flat = calculate_mtj_metrics(flat_x, flat_y, y_name="R")
-        self.assertIsNotNone(metrics_flat.rp)
-        self.assertAlmostEqual(metrics_flat.rp or 0.0, 50.0)
+        metrics_flat = calculate_mtj_metrics(flat_x, flat_y, y_name="R", y_unit="ohm")
+        self.assertIsNone(metrics_flat.rp)
+        self.assertAlmostEqual(metrics_flat.r_min or 0.0, 50.0)
         self.assertIsNone(metrics_flat.tmr_percent)  # No significant difference between min and max
 
 

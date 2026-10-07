@@ -164,19 +164,22 @@ class KeithleyTwinAxisPlotWidget(QWidget):
         v_vals = np.asarray(voltages, dtype=float)
         i_vals = np.asarray(currents, dtype=float)
 
+        if any(values.ndim != 1 for values in (x_vals, v_vals, i_vals)) or not (x_vals.size == v_vals.size == i_vals.size):
+            raise ValueError("Time, voltage and current must be aligned one-dimensional series.")
+
         if x_vals.size == 0 or v_vals.size == 0 or i_vals.size == 0:
             self.clear()
             return
 
-        finite = np.isfinite(x_vals) & np.isfinite(v_vals) & np.isfinite(i_vals)
-        x_clean = x_vals[finite]
-        v_clean = v_vals[finite]
-        i_clean = i_vals[finite]
-
-        self._voltage_curve.setData(x_clean, v_clean)
-        self._current_curve.setData(x_clean, i_clean)
+        finite_x = np.isfinite(x_vals)
+        finite_v = finite_x & np.isfinite(v_vals)
+        finite_i = finite_x & np.isfinite(i_vals)
+        x_display = np.where(finite_x, x_vals, np.nan)
+        self._voltage_curve.setData(x_display, np.where(finite_v, v_vals, np.nan), connect="finite")
+        self._current_curve.setData(x_display, np.where(finite_i, i_vals, np.nan), connect="finite")
 
         # Scale the secondary ViewBox Y range with padding
+        i_clean = i_vals[finite_i]
         if i_clean.size > 0:
             i_min = float(np.min(i_clean))
             i_max = float(np.max(i_clean))
@@ -190,16 +193,16 @@ class KeithleyTwinAxisPlotWidget(QWidget):
         # Update compliance markers
         has_compliance = False
         if compliance_mask is not None and len(compliance_mask) == len(x_vals):
-            mask_arr = np.asarray(compliance_mask, dtype=bool)[finite]
+            mask_arr = np.asarray(compliance_mask, dtype=bool) & finite_x
             if np.any(mask_arr):
                 has_compliance = True
                 self._voltage_compliance_scatter.setData(
-                    x=x_clean[mask_arr],
-                    y=v_clean[mask_arr],
+                    x=x_vals[mask_arr & finite_v],
+                    y=v_vals[mask_arr & finite_v],
                 )
                 self._current_compliance_scatter.setData(
-                    x=x_clean[mask_arr],
-                    y=i_clean[mask_arr],
+                    x=x_vals[mask_arr & finite_i],
+                    y=i_vals[mask_arr & finite_i],
                 )
             else:
                 self._voltage_compliance_scatter.clear()
@@ -209,14 +212,9 @@ class KeithleyTwinAxisPlotWidget(QWidget):
             self._current_compliance_scatter.clear()
 
         # Update readout and compliance badge
-        if x_clean.size > 0:
-            latest_v = v_clean[-1]
-            latest_i = i_clean[-1]
-            v_text = format_quantity_auto(latest_v, DIMENSION_VOLTAGE, precision=4)
-            i_text = format_quantity_auto(latest_i, DIMENSION_CURRENT, precision=4)
-            self.readout_label.setText(f"V: {v_text}   I: {i_text}")
-        else:
-            self.readout_label.setText("V: —   I: —")
+        v_text = format_quantity_auto(v_vals[-1], DIMENSION_VOLTAGE, precision=4) if finite_v[-1] else "—"
+        i_text = format_quantity_auto(i_vals[-1], DIMENSION_CURRENT, precision=4) if finite_i[-1] else "—"
+        self.readout_label.setText(f"V: {v_text}   I: {i_text}")
 
         if has_compliance:
             self.compliance_badge.setText("⚠ COMPLIANCE")

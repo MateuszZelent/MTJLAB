@@ -156,6 +156,8 @@ class MeasurementBrowserView(QWidget):
                     series.y_data,
                     x_name=series.x_name,
                     y_name=series.y_name,
+                    x_unit=series.x_unit,
+                    y_unit=series.y_unit,
                     dimension_label=self._get_dimension_label(run),
                 )
                 if series and series.point_count > 0
@@ -176,6 +178,8 @@ class MeasurementBrowserView(QWidget):
             series.y_data,
             x_name=series.x_name,
             y_name=series.y_name,
+            x_unit=series.x_unit,
+            y_unit=series.y_unit,
             dimension_label=self._get_dimension_label(run),
         )
         self.plot_widget.set_series(series)
@@ -211,6 +215,8 @@ class MeasurementBrowserView(QWidget):
                     latest_series.y_data,
                     x_name=latest_series.x_name,
                     y_name=latest_series.y_name,
+                    x_unit=latest_series.x_unit,
+                    y_unit=latest_series.y_unit,
                     dimension_label=self._get_dimension_label(latest),
                 )
                 if latest_series and latest_series.point_count > 0

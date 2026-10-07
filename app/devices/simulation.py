@@ -54,6 +54,7 @@ class SimulationContext:
             "enabled": True,
             "seed": self.seed,
             "model_version": self.model_version,
+            "moke_hall_model_version": "2",
             "time_scale": self.time_scale,
             "devices": sorted(set(devices)),
         }

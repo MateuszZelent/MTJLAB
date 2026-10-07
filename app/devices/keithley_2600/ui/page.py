@@ -8,11 +8,12 @@ import time
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
 import pyqtgraph as pg
-from PySide6.QtCore import QMimeData, QObject, QSettings, QSize, QTimer, Qt, Signal
+from PySide6.QtCore import QMimeData, QObject, QSettings, QSignalBlocker, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QCloseEvent, QDrag, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QResizeEvent, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
@@ -62,6 +63,7 @@ from app.ui.widgets.fluent_tab_view import FluentTabView
 from app.devices.keithley_2600.ui.characterization_card import KeithleyCharacterizationCard
 from app.devices.keithley_2600.ui.twin_axis_plot import KeithleyTwinAxisPlotWidget
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
+from app.ui.recipes.configuration_comparison import ConfigurationComparison, ConfigurationComparisonRow, equivalent_setting
 from app.ui.workers import DeviceController
 
 
@@ -311,7 +313,16 @@ class KeithleyConfigurationPanel(CardWidget):
         self.level = _line("1 mA")
         self.compliance = _line("67 mV")
         self.nplc = _line("1")
+        self.confirmed_sense = BodyLabel("Unknown", self)
+        self.sense_mode = ComboBox(self)
+        self.sense_mode.addItem("2wire")
+        self.sense_mode.setVisible(plan_mode)
+        self.sense_mode.setToolTip("Only 2-wire local sense is allowed. Remote / 4-wire sense is prohibited.")
         self.settle = _line("100 ms")
+        self.settle.setToolTip(
+            "Software settling time used for generated recipe point waits and ramp dwell. "
+            "It does not program Keithley source.delay or measure.delay. "
+            "An explicit Wait block is a separate delay; an omitted recipe field is preserved.")
         self.source_autorange = CheckBox("Source autorange (Settings)", self)
         self.source_autorange.setChecked(False)
         self.source_autorange.setEnabled(False)
@@ -395,6 +406,9 @@ class KeithleyConfigurationPanel(CardWidget):
         self.advanced_ranges_form.addRow(
             "Measure I range", self.measure_current_range_field
         )
+        self.coupled_range_note = BodyLabel(advanced_surface)
+        self.coupled_range_note.setWordWrap(True)
+        self.advanced_ranges_form.addRow(self.coupled_range_note)
         advanced_layout.addWidget(advanced_form_host)
         advanced_layout.addStretch(1)
         advanced_done = PrimaryPushButton("Done", advanced_surface)
@@ -427,6 +441,15 @@ class KeithleyConfigurationPanel(CardWidget):
         ):
             self.form.addRow(label, widget)
         layout.addLayout(self.form)
+        if plan_mode:
+            self.form.addRow("Sense mode", self.sense_mode)
+            # Keep every programmed field in the main scrollable form.
+            advanced_layout.removeWidget(advanced_form_host)
+            layout.addWidget(advanced_form_host)
+            self.form.setRowVisible(self.advanced_ranges_button, False)
+            self.form.setRowVisible(self.advanced_ranges_summary, False)
+        self.form.addRow("Sense (confirmed)", self.confirmed_sense)
+        self.form.setRowVisible(self.confirmed_sense, False)
         self.safety_boundary_summary = CaptionLabel(self)
         self.safety_boundary_summary.setObjectName("keithleySafetyBoundarySummary")
         self.safety_boundary_summary.setWordWrap(True)
@@ -597,6 +620,10 @@ class KeithleyConfigurationPanel(CardWidget):
         self.safety_boundary_summary.style().polish(self.safety_boundary_summary)
 
     def _apply_source_autorange_policy(self, *_args: object) -> None:
+        if self.plan_mode:
+            self.source_autorange.setEnabled(False)
+            self.source_range.setEnabled(not self.source_autorange.isChecked())
+            return
         enabled = self._settings.keithley.safety.channels[self.channel.currentText()].defaults.get("source_autorange", False) is True
         previous = self.source_autorange.blockSignals(True)
         self.source_autorange.setChecked(enabled)
@@ -616,6 +643,16 @@ class KeithleyConfigurationPanel(CardWidget):
         self.update_advanced_ranges_visibility()
 
     def update_advanced_ranges_visibility(self) -> None:
+        if self.plan_mode:
+            for widget in self._advanced_range_widgets:
+                self.advanced_ranges_form.setRowVisible(widget, True)
+            self.coupled_range_note.setText(
+                "The measurement range in the source dimension follows the source range. "
+                "AUTO ignores the stored manual range. Source autorange follows station safety policy. "
+                "Only 2-wire local sense is allowed."
+            )
+            self._update_ranges_summary()
+            return
         mode = self.mode.currentText()
         source_visible = mode != "measure_only"
         self.advanced_ranges_form.setRowVisible(self.source_autorange, source_visible)
@@ -624,9 +661,15 @@ class KeithleyConfigurationPanel(CardWidget):
             source_visible and not self.source_autorange.isChecked(),
         )
         self.advanced_ranges_form.setRowVisible(self.measure_voltage_autorange, True)
-        self.advanced_ranges_form.setRowVisible(self.measure_voltage_range_field, True)
+        self.advanced_ranges_form.setRowVisible(self.measure_voltage_range_field, self.mode.currentText() != "voltage")
         self.advanced_ranges_form.setRowVisible(self.measure_current_autorange, True)
-        self.advanced_ranges_form.setRowVisible(self.measure_current_range_field, True)
+        self.advanced_ranges_form.setRowVisible(self.measure_current_range_field, self.mode.currentText() != "current")
+        mode = self.mode.currentText()
+        self.coupled_range_note.setVisible(mode != "measure_only")
+        self.coupled_range_note.setText(
+            f"Measure {'I' if mode == 'current' else 'V'} range comes from source range. "
+            "The independent range preference is retained for the other source mode."
+        )
         self._update_ranges_summary()
 
     def add_advanced_power_field(self, field: LimitField) -> None:
@@ -692,6 +735,8 @@ class KeithleyConfigurationPanel(CardWidget):
         sense_mode = "2wire"
         if self._settings and ch in self._settings.keithley.safety.channels:
             sense_mode = self._settings.keithley.safety.channels[ch].sense_mode
+        if self.plan_mode:
+            sense_mode = self.sense_mode.currentText()
         return KeithleyConfigurationSnapshot(
             channel=ch,
             source_mode=self.mode.currentText(),
@@ -719,8 +764,19 @@ class KeithleyConfigurationPanel(CardWidget):
         self.compliance.setText(snapshot.compliance)
         self.nplc.setText(snapshot.nplc)
         self.settle.setText(snapshot.settling_time)
+        if self.sense_mode.findText(snapshot.sense_mode) < 0:
+            # Preserve invalid authored input visibly so validation can reject
+            # it; never silently turn a forbidden recipe into a different one.
+            self.sense_mode.addItem(snapshot.sense_mode)
+            self.sense_mode.setItemEnabled(self.sense_mode.count() - 1, False)
+        self.sense_mode.setCurrentText(snapshot.sense_mode)
+        if self.plan_mode:
+            self.source_autorange.setChecked(snapshot.source_autorange)
         self._apply_source_autorange_policy()
-        self.source_range.setText("Select range" if snapshot.source_range == "AUTO" else snapshot.source_range)
+        self.source_range.setText(
+            snapshot.source_range if self.plan_mode else
+            ("Select range" if snapshot.source_range == "AUTO" else snapshot.source_range)
+        )
         self.measure_voltage_autorange.setChecked(snapshot.measure_voltage_autorange)
         self.measure_voltage_range.setText(snapshot.measure_voltage_range)
         self.measure_current_autorange.setChecked(snapshot.measure_current_autorange)
@@ -753,11 +809,15 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         *,
         snapshot: KeithleyConfigurationSnapshot | None = None,
         snapshot_resolver: object | None = None,
+        full_configuration: bool = False,
+        programmed_fields: set[str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setProperty("stationSurface", "page")
         self._settings = settings
         self._snapshot_resolver = snapshot_resolver
+        self._full_configuration = full_configuration
+        self._programmed_fields = programmed_fields
         self._selection_snapshots: dict[
             tuple[str, str], KeithleyConfigurationSnapshot
         ] = {}
@@ -771,10 +831,25 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         heading = BodyLabel("Keithley 2600")
         heading.setObjectName("recipePageTitle")
         layout.addWidget(heading)
+        self.change_summary = StrongBodyLabel("Reviewing configuration…", surface)
+        self.change_summary.setObjectName("configurationChangeSummary")
+        self.change_summary.setWordWrap(True)
+        layout.addWidget(self.change_summary)
+        self.comparison_note = CaptionLabel(
+            "Comparison with device-page settings at opening (not a fresh hardware readback). "
+            "Green: same; orange: changes; grey: not programmed or unknown."
+        )
+        self.comparison_note.setWordWrap(True)
+        layout.addWidget(self.comparison_note)
+        self.comparison = ConfigurationComparison(surface)
+        self.comparison.summary_changed.connect(self.change_summary.setText)
+        layout.addWidget(self.comparison)
         self.configuration_panel = KeithleyConfigurationPanel(
             settings, self, plan_mode=True
         )
-        workspace = QSplitter(Qt.Orientation.Horizontal)
+        workspace = QSplitter(Qt.Orientation.Horizontal, surface)
+        self.workspace = workspace
+        workspace.setChildrenCollapsible(False)
         configuration_scroll = ScrollArea()
         configuration_scroll.setWidgetResizable(True)
         configuration_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -790,6 +865,8 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         parameter_card.setObjectName("recipeEditorParameters")
         parameter_layout = QGridLayout(parameter_card)
         parameter_layout.setContentsMargins(10, 10, 10, 10)
+        parameter_layout.setColumnStretch(0, 1)
+        parameter_layout.setColumnStretch(1, 1)
         selection_title = BodyLabel("Select what this node controls")
         selection_title.setObjectName("sectionTitle")
         parameter_layout.addWidget(selection_title, 0, 0, 1, 2)
@@ -799,7 +876,10 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         mode_label = BodyLabel("Source mode")
         parameter_layout.addWidget(mode_label, 2, 0)
         self.source_mode_action = ComboBox(parameter_card)
-        self.source_mode_action.addItem("Set", userData="set")
+        self.source_mode_action.addItem(
+            "Set" if full_configuration else "Require same mode",
+            userData="set" if full_configuration else "unchanged",
+        )
         self.source_mode_action.setEnabled(False)
         parameter_layout.addWidget(self.source_mode_action, 2, 1)
         definitions = (
@@ -815,6 +895,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         self.parameter_labels: dict[str, BodyLabel] = {}
         for row, (label, parameter_id, sweepable) in enumerate(definitions, start=3):
             parameter_label = BodyLabel(label)
+            parameter_label.setWordWrap(True)
             parameter_layout.addWidget(parameter_label, row, 0)
             self.parameter_labels[parameter_id] = parameter_label
             selector = ComboBox(parameter_card)
@@ -829,7 +910,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         parameter_layout.addWidget(BodyLabel("Output state"), output_row, 0)
         self.output_policy = ComboBox(parameter_card)
         self.output_policy.addItem(
-            "Keep OUTPUT OFF (safe default)", userData="unchanged"
+            "Do not enable OUTPUT", userData="unchanged"
         )
         self.output_policy.addItem(
             "OUTPUT ON for this block · OFF on exit", userData="on"
@@ -855,12 +936,12 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         self.roi_status.setWordWrap(True)
         parameter_layout.addWidget(self.roi_status, output_row + 2, 0, 1, 2)
         parameter_note = BodyLabel(
-            "The complete visible Keithley snapshot is stored and applied with OUTPUT OFF. "
-            "Set marks a value as an explicit plan row; Sweep turns one value into the ROI "
-            "axis. The safe default configures with OUTPUT OFF. Continuous mode is accepted "
-            "only after this recipe has already configured and confirmed the same channel ON, "
-            "and it permits live sweep updates without a full reconfiguration. This window "
-            "never energizes the instrument."
+            "Full configuration: every listed field is programmed with OUTPUT OFF."
+            if full_configuration else
+            "Only Set / Sweep fields are programmed. Unchanged preserves the execution-time "
+            "value, including changes from earlier recipe nodes. Range actions also program "
+            "their autorange switch. Configuration requires OUTPUT OFF unless continuing "
+            "a previously confirmed live sweep. Editing is offline."
         )
         parameter_note.setObjectName("muted")
         parameter_note.setWordWrap(True)
@@ -869,10 +950,22 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         parameter_scroll.setWidgetResizable(True)
         parameter_scroll.setFrameShape(QFrame.Shape.NoFrame)
         parameter_scroll.setWidget(parameter_card)
+        for selector in (*self.parameter_selectors.values(), self.source_mode_action, self.output_policy):
+            selector.setMinimumWidth(0)
+            selector.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            selector.currentTextChanged.connect(selector.setToolTip)
+            selector.setToolTip(selector.currentText())
         workspace.addWidget(parameter_scroll)
+        if full_configuration:
+            parameter_scroll.hide()
+            self.comparison_note.setText(
+                "Configuration node: authored fields are programmed with OUTPUT OFF. "
+                "Editing an omitted field adds it explicitly. Compared with device-page settings "
+                "at opening, not fresh hardware readback. Green: same; orange: changes; grey: preserved / unknown."
+            )
         workspace.setStretchFactor(0, 3)
         workspace.setStretchFactor(1, 2)
-        workspace.setSizes([660, 430])
+        workspace.setSizes([550, 500])
         layout.addWidget(workspace, 1)
         footer = QHBoxLayout()
         footer.addStretch(1)
@@ -897,6 +990,115 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         self._active_selection = (self.channel.currentText(), self.mode.currentText())
         self._source_mode_changed()
         self._update_roi_button()
+        self._comparison_baselines: dict[str, KeithleyConfigurationSnapshot | None] = {}
+        self._initial_snapshot = self.configuration_snapshot()
+        if full_configuration:
+            for selector in self.parameter_selectors.values():
+                selector.setCurrentIndex(selector.findData("set"))
+                selector.setEnabled(False)
+            self.output_policy.setEnabled(False)
+            self.output_policy.setToolTip("Configuration runs with OUTPUT OFF; enabling is a separate node.")
+        panel = self.configuration_panel
+        for editor in (self.level, self.compliance, self.nplc, self.settle,
+                       panel.source_range, panel.measure_voltage_range, panel.measure_current_range):
+            editor.textChanged.connect(self._refresh_comparison)
+        for editor in (self.channel, self.mode, panel.sense_mode, self.output_policy,
+                       *self.parameter_selectors.values()):
+            editor.currentIndexChanged.connect(self._refresh_comparison)
+        for editor in (panel.source_autorange, panel.measure_voltage_autorange, panel.measure_current_autorange):
+            editor.toggled.connect(self._refresh_comparison)
+        self._refresh_comparison()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "comparison"):
+            narrow = self.width() < 900
+            self.comparison.setMinimumHeight(140 if narrow else 180)
+            self.comparison.setMaximumHeight(160 if narrow else 250)
+
+    def _refresh_comparison(self, *_args: object) -> None:
+        if not hasattr(self, "_comparison_baselines"):
+            return
+        planned = self.configuration_snapshot()
+        self.apply_button.setEnabled(planned.sense_mode == "2wire")
+        self.apply_button.setToolTip(
+            "" if planned.sense_mode == "2wire" else
+            "Blocked: 4-wire / remote sense is prohibited. Select 2wire explicitly."
+        )
+        channel = planned.channel
+        if channel not in self._comparison_baselines:
+            baseline = None
+            if callable(self._snapshot_resolver):
+                try:
+                    try:
+                        baseline = self._snapshot_resolver(channel)
+                    except TypeError:
+                        baseline = self._snapshot_resolver(channel, planned.source_mode)
+                except Exception:
+                    baseline = None
+            if not isinstance(baseline, KeithleyConfigurationSnapshot):
+                baseline = None
+            self._comparison_baselines[channel] = baseline
+        baseline = self._comparison_baselines[channel]
+        fields = (
+            ("source_mode", "Source mode", None),
+            ("source_level", "Source level", "source.level"),
+            ("compliance", "Compliance", "source.compliance"),
+            ("nplc", "NPLC", "measurement.nplc"),
+            ("settling_time", "Settling time", "measurement.settling_time"),
+            ("sense_mode", "Sense mode", "measurement.sense_mode"),
+            ("source_autorange", "Source autorange", "source.range"),
+            ("source_range", "Source range", "source.range"),
+            ("measure_voltage_autorange", "Measure V autorange", "measurement.voltage_range"),
+            ("measure_voltage_range", "Measure V range", "measurement.voltage_range"),
+            ("measure_current_autorange", "Measure I autorange", "measurement.current_range"),
+            ("measure_current_range", "Measure I range", "measurement.current_range"),
+        )
+        rows = []
+        for field, label, parameter in fields:
+            action = "Preserve"
+            if self._full_configuration:
+                if field in self.programmed_configuration_fields():
+                    action = "Set"
+            elif field == "source_mode":
+                action = "Require"
+            if not self._full_configuration and parameter:
+                action = {"set": "Set", "sweep": "Sweep", "unchanged": "Preserve"}[
+                    str(self.parameter_selectors[parameter].currentData())
+                ]
+            value = getattr(planned, field)
+            if field.endswith("_range") and getattr(planned, field.replace("_range", "_autorange")):
+                value = "AUTO"
+            current = getattr(baseline, field) if baseline is not None else None
+            if baseline is not None and field.endswith("_range") and getattr(baseline, field.replace("_range", "_autorange")):
+                current = "AUTO"
+            rows.append(ConfigurationComparisonRow(field, label, current, value, action))
+        policy = self.output_policy.currentData()
+        selected = any(selector.currentData() != "unchanged" for selector in self.parameter_selectors.values())
+        output = self.output_policy.currentText()
+        if self._full_configuration or (policy == "unchanged" and selected):
+            output = "OFF for configuration"
+        elif policy == "unchanged":
+            output = "Preserve OUTPUT (no selected writes)"
+        rows.append(ConfigurationComparisonRow(
+            "output", "OUTPUT", None,
+            output,
+            "Output policy",
+        ))
+        self.comparison.set_rows(rows)
+
+    def programmed_configuration_fields(self) -> set[str]:
+        """Do not turn omitted recipe values into writes merely by opening Apply."""
+        planned = self.configuration_snapshot()
+        if self._programmed_fields is None:
+            return set(planned.__dataclass_fields__)
+        fields = set(self._programmed_fields)
+        for field in planned.__dataclass_fields__:
+            if not equivalent_setting(getattr(planned, field), getattr(self._initial_snapshot, field)):
+                fields.add(field)
+        if "source_range" in fields:
+            fields.add("source_autorange")
+        return fields
 
     def configuration_snapshot(self) -> KeithleyConfigurationSnapshot:
         return self.configuration_panel.snapshot()
@@ -1001,6 +1203,35 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         actions: list[dict[str, object]],
         output_policy: str,
     ) -> None:
+        fields = {
+            "source.level": "source_level",
+            "source.compliance": "compliance",
+            "measurement.nplc": "nplc",
+            "measurement.settling_time": "settling_time",
+            "measurement.sense_mode": "sense_mode",
+            "source.range": "source_range",
+            "measurement.voltage_range": "measure_voltage_range",
+            "measurement.current_range": "measure_current_range",
+        }
+        updates = {}
+        for action in actions:
+            parameter_id = str(action.get("parameter_id", ""))
+            if action.get("mode") not in {"set", "sweep"} or "value" not in action:
+                continue
+            field = fields.get(parameter_id)
+            if field is not None:
+                updates[field] = str(action["value"])
+                if field in {"source_range", "measure_voltage_range", "measure_current_range"}:
+                    updates[field.replace("_range", "_autorange")] = (
+                        str(action["value"]).strip().upper() == "AUTO"
+                    )
+        if updates:
+            self.configuration_panel.load_snapshot(
+                replace(self.configuration_snapshot(), **updates)
+            )
+        self._loaded_segments_by_parameter.clear()
+        for selector in self.parameter_selectors.values():
+            selector.setCurrentIndex(selector.findData("unchanged"))
         for action in actions:
             selector = self.parameter_selectors.get(str(action.get("parameter_id", "")))
             if selector is None:
@@ -1584,6 +1815,9 @@ class _KeithleyReadbackDialog(StationDialog):
         device: dict[str, str],
         configured: dict[str, str],
     ) -> bool:
+        coupled = {"CURRENT": "Active measure I range", "VOLTAGE": "Active measure V range"}.get(device.get("Source mode", ""))
+        if parameter == coupled:
+            return device.get(parameter) == device.get("Active source range")
         range_to_autorange = {
             "Active source range": "Source autorange",
             "Active measure V range": "Measure V autorange",
@@ -1827,14 +2061,23 @@ class KeithleyPage(QWidget):
     def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._controller = controller
+        self._controller_reserved = False
+        self._reserved_live_selection: tuple[bool, bool] = (False, False)
+        self._reservation_form_enabled = True
         self._station_settings = settings
         self._limit_fields: dict[str, LimitField] = {}
         self._output_states = {"A": False, "B": False}
         self._output_state_known = {"A": False, "B": False}
         self._execution_readbacks: dict[str, dict[str, object]] = {}
+        self._execution_measurement_records: dict[str, dict[str, object]] = {}
+        self._last_execution_render = None
         self._pending_channels: dict[str, str] = {}
+        self._deferred_compliance: dict[str, tuple[str, float]] = {}
+        self._pending_compliance_mode: str | None = None
         self._pending_output_enabled: dict[str, bool] = {}
+        self._deferred_channel_off: set[str] = set()
         self._pending_output_group: tuple[tuple[str, ...], bool] | None = None
+        self._deferred_group_off: set[str] = set()
         self._pending_config_modes: dict[str, str] = {}
         self._configured_channels: set[str] = set()
         self._auto_enable_channel: str | None = None
@@ -1875,6 +2118,7 @@ class KeithleyPage(QWidget):
         self._device_state_value = "DISCONNECTED"
         self._live_next_channel = "A"
         self._history_started_at = time.monotonic()
+        self._history_started_at_utc = time.time()
         history_settings = QSettings("LabControl", "LabControl")
         saved_window = history_settings.value(
             "keithley/plot_history_window_s",
@@ -1922,8 +2166,12 @@ class KeithleyPage(QWidget):
         self.hero_card = CardWidget()
         hero = self.hero_card
         hero.setObjectName("keithleyHero")
-        hero_layout = QHBoxLayout(hero)
-        title = TitleLabel("Keithley 2600 — Dual-channel SMU")
+        hero_container = QVBoxLayout(hero)
+        hero_layout = QHBoxLayout()
+        live_layout = QHBoxLayout()
+        hero_container.addLayout(hero_layout)
+        hero_container.addLayout(live_layout)
+        title = TitleLabel("Keithley 2600")
         title.setObjectName("keithleyPageTitle")
         hero_layout.addWidget(title)
         hero_layout.addStretch(1)
@@ -1941,10 +2189,10 @@ class KeithleyPage(QWidget):
             "When enabled, parameter changes in the form are immediately sent to the connected Keithley."
         )
         self.live_control_switch.checkedChanged.connect(self._live_control_toggled)
-        hero_layout.addWidget(self.live_control_switch)
+        live_layout.addWidget(self.live_control_switch)
         self.quick_controls_button = PushButton("Quick controls...", self.hero_card)
         self.quick_controls_button.clicked.connect(self.quick_controls_requested)
-        hero_layout.addWidget(self.quick_controls_button)
+        live_layout.addWidget(self.quick_controls_button)
         live_title = StrongBodyLabel("Live", hero)
         live_title.setObjectName("sectionTitle")
         self.live_channel_a = CheckBox("A", hero)
@@ -1971,12 +2219,13 @@ class KeithleyPage(QWidget):
         self.live_timing = CaptionLabel(hero)
         self.live_timing.setObjectName("keithleyLiveTiming")
         self.live_timing.setMinimumWidth(118)
-        hero_layout.addWidget(live_title)
-        hero_layout.addWidget(self.live_channel_a)
-        hero_layout.addWidget(self.live_channel_b)
-        hero_layout.addWidget(interval_label)
-        hero_layout.addWidget(self.live_interval)
-        hero_layout.addWidget(self.live_timing)
+        live_layout.addWidget(live_title)
+        live_layout.addWidget(self.live_channel_a)
+        live_layout.addWidget(self.live_channel_b)
+        live_layout.addWidget(interval_label)
+        live_layout.addWidget(self.live_interval)
+        live_layout.addWidget(self.live_timing)
+        live_layout.addStretch(1)
         self.plot_settings_button = PushButton("Plot settings…", self.hero_card)
         self.plot_settings_button.setIcon(FluentIcon.SETTING)
         self.plot_settings_button.setObjectName("keithleyPlotSettingsButton")
@@ -1994,7 +2243,7 @@ class KeithleyPage(QWidget):
         self.characterization_button.clicked.connect(self.characterization_requested)
         hero_layout.addWidget(self.characterization_button)
         self.open_characterization_button = self.characterization_button
-        hero.setMaximumHeight(60)
+        hero.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         layout.addWidget(hero)
         channel_grid = QGridLayout()
         channel_grid.setSpacing(12)
@@ -2221,6 +2470,8 @@ class KeithleyPage(QWidget):
         controller.result.connect(self._result)
         controller.error.connect(self._error)
         controller.state_changed.connect(self._device_state_changed)
+        controller.reservation_changed.connect(self._field_reservation_changed)
+        self.characterization_card.field_policies_changed.connect(self._project_field_policies)
         self._active_channel = self.channel.currentText()
         self._active_mode = self.mode.currentText()
         self._source_value_cache: dict[tuple[str, str], tuple[str, str, str]] = {
@@ -2455,16 +2706,29 @@ class KeithleyPage(QWidget):
                 )
             return
         if self._output_states[channel]:
-            self._pending_channels["update_source_compliance"] = channel
-            self.status.emit(
-                f"Keithley CH {channel}: updating compliance to {self.compliance.text().strip()}"
-            )
-            self._controller.call(
-                "update_source_compliance",
-                (channel, mode, parsed.si_value),
-            )
+            self._queue_compliance_update(channel, mode, parsed.si_value)
         else:
             self._submit_active_source_level()
+
+    def _queue_compliance_update(self, channel: str, mode: str, value_si: float) -> None:
+        if "update_source_compliance" in self._pending_channels:
+            self._deferred_compliance[channel] = (mode, value_si)
+            return
+        self._pending_channels["update_source_compliance"] = channel
+        self._pending_compliance_mode = mode
+        self.status.emit(f"Keithley CH {channel}: updating compliance")
+        self._controller.call("update_source_compliance", (channel, mode, value_si))
+
+    def _dispatch_deferred_compliance(self) -> None:
+        if not self.live_control_switch.isChecked() or not self._is_device_connected():
+            self._deferred_compliance.clear()
+            return
+        while self._deferred_compliance:
+            channel = next(iter(self._deferred_compliance))
+            mode, value_si = self._deferred_compliance.pop(channel)
+            if self._output_state_known[channel] and self._output_states[channel]:
+                self._queue_compliance_update(channel, mode, value_si)
+                return
 
     def quick_setpoint_state_changed(self, target: str, state: str, detail: str) -> None:
         if not target.startswith("keithley."):
@@ -2781,11 +3045,11 @@ class KeithleyPage(QWidget):
             if isinstance(actual, Mapping):
                 self._execution_readbacks[channel] = dict(actual)
             state = output_status.get(f"keithley.{channel}")
-            if state == "on":
+            if state == "on" and (not self._output_state_known[channel] or not self._output_states[channel]):
                 self._set_channel_output(channel, True)
-            elif state == "off":
+            elif state == "off" and (not self._output_state_known[channel] or self._output_states[channel]):
                 self._set_channel_output(channel, False)
-            elif state == "unknown":
+            elif state == "unknown" and self._output_state_known[channel]:
                 self._set_channel_output_unknown(channel)
 
         if event_name in {"action_started", "manual_stage_waiting"}:
@@ -2801,18 +3065,24 @@ class KeithleyPage(QWidget):
                         break
         self._render_execution_channel(self.channel.currentText())
 
-        if event_name == "action_finished" and event.get("kind") == "measure_keithley":
-            for channel in ("A", "B"):
-                record = device_state.get(f"measurement_{channel}")
-                actual = record.get("actual") if isinstance(record, Mapping) else None
-                if not isinstance(actual, Mapping):
-                    continue
-                measurement = self._execution_measurement(channel, actual)
-                if measurement is not None:
-                    self._update_channel_measurement(measurement)
+        for channel in ("A", "B"):
+            record = device_state.get(f"measurement_{channel}")
+            actual = record.get("actual") if isinstance(record, Mapping) else None
+            if not isinstance(actual, Mapping):
+                continue
+            if self._execution_measurement_records.get(channel) == record:
+                continue
+            measurement = self._execution_measurement(channel, actual)
+            if measurement is not None:
+                self._execution_measurement_records[channel] = deepcopy(dict(record))
+                self._update_channel_measurement(measurement, recorded_at_utc=record.get("recorded_at_utc"))
 
     def _render_execution_channel(self, channel: str) -> None:
         actual = self._execution_readbacks.get(channel, {})
+        render = (channel, actual)
+        if self._last_execution_render == render:
+            return
+        self._last_execution_render = deepcopy(render)
         mode = actual.get("mode")
         self.apply_execution_readback(
             channel,
@@ -2825,6 +3095,34 @@ class KeithleyPage(QWidget):
             source_level_si=self._execution_number(actual.get("source_level_si")),
             compliance_si=self._execution_number(actual.get("compliance_si")),
         )
+        if channel != self.channel.currentText():
+            return
+        source_dimension = DIMENSION_VOLTAGE if mode == "voltage" else DIMENSION_CURRENT
+        controls = (self.nplc, self.settle, self.source_range, self.source_autorange,
+                    self.measure_voltage_autorange, self.measure_voltage_range,
+                    self.measure_current_autorange, self.measure_current_range)
+        blockers = [QSignalBlocker(control) for control in controls]
+        try:
+            nplc = self._execution_number(actual.get("nplc"))
+            if nplc is not None:
+                self.nplc.setText(f"{nplc:.9g}")
+            settling = self._execution_number(actual.get("settle_time_s"))
+            if settling is not None:
+                self.settle.setText(format_quantity_auto(settling, DIMENSION_TIME))
+            sense = actual.get("sense_mode")
+            self.configuration_panel.confirmed_sense.setText(str(sense) if sense is not None else "Unknown")
+            ranges = {**actual, **actual.get("range_readback", {})}
+            for name, dimension in (("source", source_dimension), ("measure_voltage", DIMENSION_VOLTAGE), ("measure_current", DIMENSION_CURRENT)):
+                autorange = ranges.get(f"{name}_autorange")
+                range_value = self._execution_number(ranges.get(f"{name}_range_si"))
+                if isinstance(autorange, bool):
+                    getattr(self, f"{name}_autorange").setChecked(autorange)
+                if autorange is True:
+                    getattr(self, f"{name}_range").setText("AUTO")
+                elif range_value is not None:
+                    getattr(self, f"{name}_range").setText(format_quantity_auto(range_value, dimension))
+        finally:
+            del blockers
 
     @staticmethod
     def _execution_number(value: object) -> float | None:
@@ -2858,7 +3156,46 @@ class KeithleyPage(QWidget):
         )
 
     def set_execution_controlled(self, controlled: bool) -> None:
+        if controlled and not getattr(self, "_execution_controlled", False):
+            self._remember_source_values()
+            self._execution_readbacks.clear()
+            self._execution_measurement_records.clear()
+            self._last_execution_render = None
+        self._execution_controlled = controlled
+        self.channel.setProperty("executionReadOnlyNavigation", True)
         self.execution_badge.setVisible(controlled)
+        self.configuration_panel.form.setRowVisible(self.configuration_panel.nplc_field, controlled)
+        self.configuration_panel.form.setRowVisible(self.configuration_panel.confirmed_sense, controlled)
+
+    def _field_reservation_changed(self, reserved: bool) -> None:
+        if reserved == self._controller_reserved:
+            return
+        self._controller_reserved = reserved
+        checkboxes = (self.live_channel_a, self.live_channel_b)
+        if reserved:
+            self._reserved_live_selection = tuple(box.isChecked() for box in checkboxes)
+            self._reservation_form_enabled = self.configuration_panel.isEnabled()
+            self._live_timer.stop()
+            self._auto_enable_channel = None
+            self._deferred_compliance.clear()
+        for box, checked in zip(checkboxes, self._reserved_live_selection):
+            with QSignalBlocker(box):
+                box.setChecked(False if reserved else checked)
+        self.configuration_panel.setEnabled(False if reserved else self._reservation_form_enabled)
+        self._update_output_readiness()
+        self._update_live_controls()
+        if not reserved:
+            self._live_selection_changed(False)
+
+    def _project_field_policies(self, policies: object) -> None:
+        if not isinstance(policies, Mapping):
+            return
+        for channel, policy in policies.items():
+            if channel not in self.channel_cards or policy not in {"stop", "warn_clamp", "skip"}:
+                continue
+            self._compliance_policy[channel] = policy
+            self._stop_on_compliance[channel] = policy == "stop"
+        self._update_output_readiness()
 
     @staticmethod
     def _scroll_widget(content: QWidget) -> ScrollArea:
@@ -3156,7 +3493,7 @@ class KeithleyPage(QWidget):
         )
         led = BodyLabel("●")
         led.setObjectName("keithleyOutputLed")
-        output = BodyLabel("OUTPUT OFF")
+        output = BodyLabel("OUTPUT UNKNOWN")
         output.setObjectName("keithleyOutputState")
         header.addWidget(name)
         header.addWidget(disabled_badge)
@@ -3320,7 +3657,7 @@ class KeithleyPage(QWidget):
             self.level: ("Source value", "The quantity Keithley actively tries to force. In Current mode this is current; in Voltage mode this is voltage. MIN/MAX are the configured laboratory range for this programmed value."),
             self.compliance: ("Opposite-quantity safety limit", "The protection limit shown directly below the source setpoint. Current mode exposes Voltage limit (compliance); Voltage mode exposes Current limit (compliance). Reaching it means the requested source value cannot be maintained."),
             self.nplc: ("NPLC", "Number of power-line cycles integrated for one measurement. Higher values reduce noise but make readings slower. For 50 Hz mains, NPLC 1 integrates for approximately 20 ms."),
-            self.settle: ("Settling time", "Delay allowed after changing a source point before a measurement is taken. Longer settling can improve stability but increases sweep duration."),
+            self.settle: ("Software settling time", "Application wait used for generated recipe points and ramp dwell. It does not program source.delay or measure.delay. Explicit Wait blocks have their own duration."),
             self.advanced_ranges_button: ("Advanced range settings", "Expands or collapses manual source and measurement range settings. By default, Keithley manages all ranges automatically (recommended)."),
             self.source_autorange: ("Source autorange", "Controlled only in Settings, separately for A and B. OFF requires a fixed source range. Actual instrument state is shown by readback."),
             self.source_range: ("Manual source range", "Maximum magnitude supported by the selected fixed source range. A fixed range is mandatory when source autorange is OFF. A manual value does not set the output; it selects instrument resolution/headroom."),
@@ -3401,6 +3738,7 @@ class KeithleyPage(QWidget):
         channel = channel or self.channel.currentText()
         safety = self._station_settings.keithley.safety
         checks = [
+            (not self._controller_reserved, "instrument available for manual control"),
             (safety.allow_output_enable, "Keithley output permission enabled"),
             (safety.channels[channel].enabled, f"channel {channel} enabled"),
             (self._device_is_output_ready(), "device connected and verified"),
@@ -3464,12 +3802,12 @@ class KeithleyPage(QWidget):
             )
         )
         self.output_toggle.setEnabled(
-            not recovery_blocked
+            not self._controller_reserved and not recovery_blocked
             and (ready or self._output_states[self.channel.currentText()])
         )
         configure_pending = "configure" in self._pending_channels
         configuration_mutation_pending = (
-            self._auto_enable_channel is not None
+            self._controller_reserved or self._auto_enable_channel is not None
             or any(
                 operation in self._pending_channels
                 for operation in (
@@ -3517,7 +3855,7 @@ class KeithleyPage(QWidget):
             channel_recovery_pending = self._compliance_recovery_pending[channel]
             combo = card.get("compliance_policy_combo")
             if combo is not None:
-                combo.setEnabled(channel not in self._pending_compliance_policy)
+                combo.setEnabled(not self._controller_reserved and channel not in self._pending_compliance_policy)
                 combo.blockSignals(True)
                 target_policy = self._compliance_policy.get(
                     channel,
@@ -3529,13 +3867,8 @@ class KeithleyPage(QWidget):
                         break
                 combo.blockSignals(False)
             card["stop_compliance_toggle"].setEnabled(
-                channel not in self._pending_compliance_policy
+                not self._controller_reserved and channel not in self._pending_compliance_policy
             )
-            card["stop_compliance_toggle"].blockSignals(True)
-            card["stop_compliance_toggle"].setChecked(
-                self._stop_on_compliance[channel]
-            )
-            card["stop_compliance_toggle"].blockSignals(False)
             if channel_warning and not channel_compliance:
                 card["compliance"].setText(
                     "COMPLIANCE ACTIVE — OUTPUT CONTINUES (LIMIT REACHED)"
@@ -3559,6 +3892,7 @@ class KeithleyPage(QWidget):
             # exact unmet condition promised by the tooltip/readiness panel.
             card["output_on_action"].setEnabled(
                 self._device_is_output_ready()
+                and not self._controller_reserved
                 and not channel_compliance
                 and not pending_enable
                 and not dut_isolation_busy
@@ -3594,8 +3928,7 @@ class KeithleyPage(QWidget):
             )
             disconnected = self._device_state_value == "DISCONNECTED"
             card["output_off_action"].setEnabled(
-                not pending_enable
-                and not confirmed_off
+                (not confirmed_off or pending_enable or self._controller_reserved)
                 and not disconnected
                 and not dut_isolation_busy
             )
@@ -3648,6 +3981,11 @@ class KeithleyPage(QWidget):
         normalized = state.upper()
         self._device_state_value = normalized.replace("_", " ")
         if normalized == "DISCONNECTED":
+            self._execution_readbacks.clear()
+            self._execution_measurement_records.clear()
+            self._last_execution_render = None
+            self._latest_measurements.clear()
+            self._last_configuration_readback = None
             self._live_timer.stop()
             self._compliance_channels.clear()
             self._compliance_warning_channels.clear()
@@ -3677,27 +4015,6 @@ class KeithleyPage(QWidget):
             self._style_output_toggle(False)
             for channel in ("A", "B"):
                 self._set_channel_output_unknown(channel)
-        elif normalized == "VERIFIED":
-            # Connection qualification explicitly forces and verifies both outputs OFF.
-            self._compliance_channels.clear()
-            self._compliance_warning_channels.clear()
-            self._compliance_block_levels.clear()
-            self._compliance_block_modes.clear()
-            self._compliance_recovery_available.clear()
-            self._pending_recovery_choice.clear()
-            self._pending_compliance_policy.clear()
-            self._previous_compliance_policy.clear()
-            default_policy = (
-                getattr(self._station_settings.keithley.safety, "compliance_policy", None)
-                or ("stop" if bool(self._station_settings.keithley.safety.stop_on_compliance) else "warn_clamp")
-            )
-            default_stop = (default_policy == "stop")
-            self._stop_on_compliance.update({"A": default_stop, "B": default_stop})
-            self._compliance_policy.update({"A": default_policy, "B": default_policy})
-            for channel in ("A", "B"):
-                self._compliance_recovery_pending[channel] = False
-            self._set_channel_output("A", False)
-            self._set_channel_output("B", False)
         elif normalized == "COMPLIANCE":
             # The following measurement/result or operation error identifies
             # which channel tripped. Do not mutate either card here: the other
@@ -3743,7 +4060,7 @@ class KeithleyPage(QWidget):
                 return f"{value / scale:.7g} {prefix}{unit}"
         return f"{value:.7g} {unit}"
 
-    def _update_channel_measurement(self, measurement: object) -> None:
+    def _update_channel_measurement(self, measurement: object, *, recorded_at_utc: object = None) -> None:
         channel = str(getattr(measurement, "channel"))
         if isinstance(measurement, KeithleyMeasurement) or hasattr(
             measurement, "measurement_path_connected"
@@ -3796,10 +4113,20 @@ class KeithleyPage(QWidget):
             widgets["compliance"].style().unpolish(widgets["compliance"])
             widgets["compliance"].style().polish(widgets["compliance"])
         elapsed = time.monotonic() - self._history_started_at
+        timestamp = None
+        if isinstance(recorded_at_utc, str):
+            try:
+                recorded = datetime.fromisoformat(recorded_at_utc)
+                if recorded.tzinfo is not None:
+                    timestamp = recorded.timestamp()
+                    elapsed = timestamp - self._history_started_at_utc
+            except ValueError:
+                pass
         history = self._measurement_history[channel]
         history.append(
             {
                 "elapsed_s": elapsed,
+                "recorded_at_s": timestamp if timestamp is not None else time.time(),
                 "voltage": voltage,
                 "current": current,
                 "resistance": resistance,
@@ -3814,7 +4141,7 @@ class KeithleyPage(QWidget):
             del history[: len(history) - 2000]
         self._refresh_keithley_history_plot(channel)
         self.last_update_labels[channel].setText(
-            f"{channel}: updated {time.strftime('%H:%M:%S')} • "
+            f"{channel}: updated {time.strftime('%H:%M:%S', time.localtime(timestamp))} • "
             f"t={elapsed:.1f} s • {len(history)} pts"
             + (" • HIGH-Z / floating" if not path_connected else "")
         )
@@ -3892,7 +4219,8 @@ class KeithleyPage(QWidget):
         compliance_label.style().unpolish(compliance_label)
         compliance_label.style().polish(compliance_label)
         self.channel_cards[channel]["output"].setText(
-            "OUTPUT ON" if self._output_states[channel] else "OUTPUT OFF"
+            "OUTPUT UNKNOWN" if not self._output_state_known[channel]
+            else "OUTPUT ON" if self._output_states[channel] else "OUTPUT OFF"
         )
         self._update_output_readiness()
 
@@ -3963,7 +4291,7 @@ class KeithleyPage(QWidget):
     def request_measurement(self, channel: str | None = None) -> None:
         selected = channel or self.channel.currentText()
         if (
-            self._measure_pending
+            self._controller_reserved or self._measure_pending
             or self._dut_isolation_phase != "idle"
             or self._compliance_recovery_pending.get(selected, False)
         ):
@@ -4033,6 +4361,14 @@ class KeithleyPage(QWidget):
 
     def request_output_off(self, channel: str | None = None) -> None:
         channel = channel or self.channel.currentText()
+        if channel not in self.channel_cards:
+            raise ValueError(f"Unknown Keithley channel {channel!r}.")
+        self._deferred_compliance.pop(channel, None)
+        if self._auto_enable_channel == channel:
+            self._auto_enable_channel = None
+        if "set_output" in self._pending_channels:
+            self._deferred_channel_off.add(channel)
+            return
         self.channel.setCurrentText(channel)
         self._pending_channels["set_output"] = channel
         self._pending_output_enabled[channel] = False
@@ -4040,6 +4376,12 @@ class KeithleyPage(QWidget):
         self.output_toggle.setEnabled(False)
         self._update_output_readiness()
         self._controller.call("set_output", (channel, False))
+
+    def _dispatch_deferred_channel_off(self) -> None:
+        if self._deferred_channel_off:
+            channel = sorted(self._deferred_channel_off)[0]
+            self._deferred_channel_off.remove(channel)
+            self.request_output_off(channel)
 
     def request_channel_output(self, channel: str, enabled: bool) -> None:
         """Route a floating-control request through the normal safety workflow."""
@@ -4059,10 +4401,30 @@ class KeithleyPage(QWidget):
             raise ValueError(f"Unknown Keithley output group {normalized!r}.")
         if len(set(normalized)) != len(normalized):
             raise ValueError("Keithley output group cannot contain duplicate channels.")
+        if not enabled and self._auto_enable_channel in normalized:
+            self._auto_enable_channel = None
+        if not enabled:
+            for channel in normalized:
+                self._deferred_compliance.pop(channel, None)
         if self._pending_output_group is not None:
+            if not enabled:
+                self._deferred_group_off.update(normalized)
+            return
+        if enabled and (self._controller_reserved or any(
+            operation in self._pending_channels
+            for operation in ("configure", "set_output", "ramp_to_zero", "ramp_to_level")
+        )):
+            self.status.emit("Keithley OUTPUT ON blocked: wait for the pending operation and request ON again")
             return
         self._pending_output_group = (normalized, bool(enabled))
         self._controller.call("set_output_group", (normalized, bool(enabled)))
+
+    def _dispatch_deferred_group_off(self) -> None:
+        if not self._deferred_group_off:
+            return
+        channels = tuple(sorted(self._deferred_group_off))
+        self._deferred_group_off.clear()
+        self.request_output_group(channels, False)
 
     def _selected_live_channels(self) -> list[str]:
         return [
@@ -4101,7 +4463,7 @@ class KeithleyPage(QWidget):
             self._live_timer.start()
 
     def _update_live_controls(self) -> None:
-        connected = self._device_is_output_ready()
+        connected = self._device_is_output_ready() and not self._controller_reserved
         dut_isolation_busy = self._dut_isolation_phase != "idle"
         high_impedance_off = (
             self._station_settings.keithley.safety.output_off_mode
@@ -4213,7 +4575,7 @@ class KeithleyPage(QWidget):
         )
 
     def _request_live_measurement(self) -> None:
-        if self._measure_pending or self._ramp_pending:
+        if self._controller_reserved or self._measure_pending or self._ramp_pending:
             return
         selected = self._selected_live_channels()
         if not selected:
@@ -4270,10 +4632,10 @@ class KeithleyPage(QWidget):
 
         self._remember_source_values()
         channel = channel or self._active_channel
-        mode = mode or self._active_mode
+        base = self._channel_form_snapshots.get(channel, self._default_form_snapshot(channel))
+        mode = mode or (self._active_mode if channel == self._active_channel else base.source_mode)
         if channel == self._active_channel and mode == self._active_mode:
             return self._capture_form_snapshot(channel=channel, mode=mode)
-        base = self._channel_form_snapshots.get(channel, self._default_form_snapshot(channel))
         level, compliance, source_range = self._source_value_cache.get(
             (channel, mode), self._default_source_values(channel, mode)
         )
@@ -4511,6 +4873,10 @@ class KeithleyPage(QWidget):
             self.compliance_field.validate_and_clamp()
 
     def _channel_changed(self, channel: str) -> None:
+        if getattr(self, "_execution_controlled", False):
+            self._active_channel = channel
+            self._render_execution_channel(channel)
+            return
         self._remember_source_values()
         self._active_channel = channel
         self.max_abs_power.setText(
@@ -4835,10 +5201,6 @@ class KeithleyPage(QWidget):
                 self._stop_on_compliance[channel] = (target_policy == "stop")
                 self._compliance_policy[channel] = target_policy
                 if channel in self.channel_cards:
-                    toggle = self.channel_cards[channel]["stop_compliance_toggle"]
-                    toggle.blockSignals(True)
-                    toggle.setChecked(target_policy == "stop")
-                    toggle.blockSignals(False)
                     combo = self.channel_cards[channel].get("compliance_policy_combo")
                     if combo is not None:
                         combo.blockSignals(True)
@@ -4853,7 +5215,7 @@ class KeithleyPage(QWidget):
         self.characterization_card.refresh_shared_source_configuration()
 
     def configure(self) -> None:
-        if self._readback_pending or self._auto_enable_channel is not None or any(
+        if self._controller_reserved or self._readback_pending or self._auto_enable_channel is not None or any(
             operation in self._pending_channels
             for operation in (
                 "configure",
@@ -5028,6 +5390,9 @@ class KeithleyPage(QWidget):
             else:
                 selected = {}
             for field_name, value in selected.values():
+                coupled_range_field = "measure_current_range" if hardware.source_mode == "current" else "measure_voltage_range"
+                if field_name == coupled_range_field:
+                    continue
                 changes[field_name] = value
             self._channel_form_snapshots[target] = replace(snapshot, **changes)
 
@@ -5052,7 +5417,7 @@ class KeithleyPage(QWidget):
         level_override_si: float | None = None,
     ) -> KeithleySourceRequest:
         mode = snapshot.source_mode
-        source_auto = mode != "measure_only" and self._station_settings.keithley.safety.channels[snapshot.channel].defaults.get("source_autorange", False) is True
+        source_auto = mode != "measure_only" and snapshot.source_autorange
         level_dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
         compliance_dimension = DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
         request = KeithleySourceRequest(
@@ -5137,8 +5502,13 @@ class KeithleyPage(QWidget):
         channel = self.channel.currentText()
         if not enabled:
             self._style_output_toggle(False)
-            if self._output_states[channel]:
-                self.request_output_off()
+            self.request_output_off(channel)
+            return
+        if self._pending_output_group is not None or any(
+            operation in self._pending_channels
+            for operation in ("configure", "set_output", "ramp_to_zero", "ramp_to_level")
+        ):
+            self.status.emit("Keithley OUTPUT ON blocked: wait for the pending operation and request ON again")
             return
         ready, checks = self._output_prerequisites()
         if not ready:
@@ -5194,7 +5564,10 @@ class KeithleyPage(QWidget):
         self._style_output_toggle(False)
         channel = self.channel.currentText()
         if channel in self.channel_cards:
-            self._set_channel_output(channel, self._output_states[channel])
+            if self._output_state_known[channel]:
+                self._set_channel_output(channel, self._output_states[channel])
+            else:
+                self._set_channel_output_unknown(channel)
             self._update_output_readiness()
 
     def _set_compliance_policy(self, channel: str, policy: str | bool) -> bool:
@@ -5554,9 +5927,6 @@ class KeithleyPage(QWidget):
                 toggle = self.channel_cards[channel].get("stop_compliance_toggle")
                 if toggle is not None:
                     toggle.setEnabled(not keep_locked)
-                    toggle.blockSignals(True)
-                    toggle.setChecked(policy_str == "stop")
-                    toggle.blockSignals(False)
                 if policy_str == "stop" and channel in self._compliance_warning_channels:
                     # The operator changed the policy after a continue-mode
                     # warning was already visible. The adapter has now
@@ -5603,13 +5973,19 @@ class KeithleyPage(QWidget):
                 self._configured_channels.add(channel)
             self._set_channel_output(channel, False)
             self._update_output_readiness()
-            if self._auto_enable_channel == channel:
+            if (
+                self._auto_enable_channel == channel
+                and "set_output" not in self._pending_channels
+                and self._pending_output_group is None
+            ):
                 self._pending_channels["set_output"] = channel
                 self._pending_output_enabled[channel] = True
                 self.status.emit(f"Keithley CH {channel}: configuration verified; enabling OUTPUT")
                 self._update_output_readiness()
                 self._controller.call("set_output", (channel, True))
             else:
+                if self._auto_enable_channel == channel:
+                    self._auto_enable_channel = None
                 self.banner.show_message(
                     f"Keithley CH {channel}: all instrument settings applied and "
                     "verified by readback; software settling time validated locally. "
@@ -5620,30 +5996,46 @@ class KeithleyPage(QWidget):
                 self.status.emit(f"Keithley CH {channel} configured while OUTPUT is OFF")
         elif operation == "set_output":
             channel = self._pending_channels.pop("set_output", self.channel.currentText())
-            requested_enabled = self._pending_output_enabled.pop(channel, bool(result))
-            actual_enabled = result if isinstance(result, bool) else requested_enabled
+            self._pending_output_enabled.pop(channel, None)
             self._auto_enable_channel = None
-            self._set_channel_output(channel, actual_enabled)
-            self.status.emit(
-                f"Keithley CH {channel} OUTPUT {'ON' if actual_enabled else 'OFF'}"
-            )
+            if isinstance(result, bool):
+                self._set_channel_output(channel, result)
+                self.status.emit(f"Keithley CH {channel} OUTPUT {'ON' if result else 'OFF'}")
+            else:
+                self._set_channel_output_unknown(channel)
+                self.status.emit(f"Keithley CH {channel} OUTPUT UNKNOWN: missing readback")
+            self._dispatch_deferred_channel_off()
         elif operation == "set_output_group":
             pending = self._pending_output_group
             self._pending_output_group = None
             if isinstance(result, Mapping):
-                for channel, actual_enabled in result.items():
-                    if channel in self.channel_cards and isinstance(actual_enabled, bool):
+                channels = pending[0] if pending is not None else tuple(result)
+                for channel in channels:
+                    actual_enabled = result.get(channel)
+                    if channel not in self.channel_cards:
+                        continue
+                    if isinstance(actual_enabled, bool):
                         self._set_channel_output(channel, actual_enabled)
+                    else:
+                        self._set_channel_output_unknown(channel)
                 if pending is not None:
+                    values = [result.get(ch) for ch in pending[0]]
+                    state = (
+                        "UNKNOWN" if any(not isinstance(value, bool) for value in values)
+                        else "ON" if all(values)
+                        else "OFF" if not any(values)
+                        else "MIXED"
+                    )
                     self.status.emit(
                         "Keithley CH "
                         + "+".join(pending[0])
                         + " OUTPUT "
-                        + ("ON" if all(bool(result.get(ch)) for ch in pending[0]) else "OFF")
+                        + state
                     )
             elif pending is not None:
                 for channel in pending[0]:
                     self._set_channel_output_unknown(channel)
+            self._dispatch_deferred_group_off()
         elif operation == "ramp_to_zero":
             channel = self._pending_channels.pop("ramp_to_zero", self.channel.currentText())
             self._set_channel_output(channel, False)
@@ -5676,9 +6068,14 @@ class KeithleyPage(QWidget):
             self.status.emit(f"Keithley CH {channel}: manual ramp completed")
         elif operation == "update_source_compliance":
             channel = self._pending_channels.pop("update_source_compliance", self.channel.currentText())
-            self.status.emit(
-                f"Keithley CH {channel}: compliance verified: {self.compliance.text().strip()}"
-            )
+            mode, self._pending_compliance_mode = self._pending_compliance_mode, None
+            if isinstance(result, (int, float)) and not isinstance(result, bool) and math.isfinite(result) and mode in {"current", "voltage"}:
+                unit = DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
+                self.status.emit(f"Keithley CH {channel}: compliance verified: {format_quantity_auto(result, unit)}")
+                self._dispatch_deferred_compliance()
+            else:
+                self._deferred_compliance.clear()
+                self.status.emit(f"Keithley CH {channel}: compliance readback missing")
 
     def _error(self, operation: str, error: str) -> None:
         if operation == "recover_from_compliance":
@@ -5735,9 +6132,6 @@ class KeithleyPage(QWidget):
                 toggle = self.channel_cards[channel].get("stop_compliance_toggle")
                 if toggle is not None:
                     toggle.setEnabled(not keep_locked)
-                    toggle.blockSignals(True)
-                    toggle.setChecked(prev_policy == "stop")
-                    toggle.blockSignals(False)
             self._update_output_readiness()
             self.banner.show_message(
                 f"Keithley CH {channel}: compliance policy was not applied; "
@@ -5792,6 +6186,8 @@ class KeithleyPage(QWidget):
             self._measure_pending = False
         if operation == "update_source_compliance":
             channel = self._pending_channels.pop("update_source_compliance", self.channel.currentText())
+            self._pending_compliance_mode = None
+            self._deferred_compliance.clear()
             self.banner.show_message(
                 f"Keithley CH {channel}: failed to update compliance: {error}",
                 severity="error",
@@ -5801,14 +6197,17 @@ class KeithleyPage(QWidget):
             channel = self._pending_channels.pop("configure", self.channel.currentText())
             self._pending_config_modes.pop(channel, None)
         if operation == "set_output":
-            channel = self._pending_channels.get("set_output", self.channel.currentText())
+            channel = self._pending_channels.pop("set_output", self.channel.currentText())
             self._pending_output_enabled.pop(channel, None)
+            self._set_channel_output_unknown(channel)
+            self._dispatch_deferred_channel_off()
         if operation == "set_output_group":
             pending = self._pending_output_group
             self._pending_output_group = None
             if pending is not None:
                 for channel in pending[0]:
                     self._set_channel_output_unknown(channel)
+            self._dispatch_deferred_group_off()
         if operation == "ramp_to_level":
             channel = self._pending_channels.pop("ramp_to_level", self.channel.currentText())
             self._ramp_pending = False

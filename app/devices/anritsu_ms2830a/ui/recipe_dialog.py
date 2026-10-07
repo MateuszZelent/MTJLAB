@@ -31,6 +31,7 @@ from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
+from app.ui.recipes.configuration_comparison import ConfigurationReview, ConfigurationComparisonRow
 
 
 class AnritsuNodeEditorDialog(FluentRecipeDialog):
@@ -45,6 +46,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         ("advanced.rbw", "Resolution bandwidth", False),
         ("advanced.vbw_mode", "VBW mode", False),
         ("advanced.vbw", "Video bandwidth", False),
+        ("advanced.vbw_filter_mode", "VBW Video / Power", False),
         ("advanced.detector", "Detector", False),
         ("advanced.attenuation_mode", "RF attenuation mode", False),
         ("advanced.attenuation", "RF attenuation", False),
@@ -59,6 +61,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         parent: QWidget | None = None,
         *,
         snapshot: AnritsuConfigurationSnapshot | None = None,
+        current_values: dict[str, object] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setProperty("stationSurface", "page")
@@ -73,6 +76,9 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         heading = BodyLabel("Anritsu MS2830A · Spectrum analyser")
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
+        self.review = ConfigurationReview(surface)
+        layout.addWidget(self.review)
+        self._current_values = dict(current_values or {})
         self.content_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.content_splitter.setChildrenCollapsible(False)
         left = CardWidget(surface)
@@ -90,6 +96,17 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         if snapshot is not None:
             self.configuration_panel.load_snapshot(snapshot)
         self.advanced_panel = AnritsuAdvancedSpectrumPanel(parameter_tabs)
+        # One physical control per bandwidth parameter. The advanced panel
+        # reuses the basic panel's editors; its duplicate form rows are hidden.
+        self.configuration_panel.vbw_auto.addItem("Off", userData="off")
+        for name, shared in (
+            ("rbw_mode", self.configuration_panel.rbw_mode),
+            ("rbw", self.configuration_panel.rbw),
+            ("vbw_mode", self.configuration_panel.vbw_auto),
+            ("vbw", self.configuration_panel.vbw),
+        ):
+            self.advanced_panel.layout().setRowVisible(getattr(self.advanced_panel, name), False)
+            setattr(self.advanced_panel, name, shared)
         self.advanced_panel.preamplifier.setEnabled(True)
         self.advanced_panel.preamplifier.setToolTip(
             "The selected state is validated against detected Anritsu hardware "
@@ -105,7 +122,11 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         )
         left_layout.addWidget(parameter_routes)
         left_layout.addWidget(parameter_tabs)
-        self.content_splitter.addWidget(left)
+        left_scroll = ScrollArea(surface)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        left_scroll.setWidget(left)
+        self.content_splitter.addWidget(left_scroll)
         right = CardWidget(surface)
         right.setObjectName("recipeEditorParameters")
         right_layout = QGridLayout(right)
@@ -167,10 +188,9 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
             self.open_roi_button, operation_row + 2, 0, 1, 2
         )
         note = BodyLabel(
-            "The complete visible core spectrum snapshot is stored and applied. Set and "
-            "Sweep expose explicit plan rows; advanced settings are applied only when "
-            "selected. Spectrum acquisition is a separate Acquire spectrum once block "
-            "placed inside the loop."
+            "Only parameters selected as Set or Sweep are applied. Add and review an "
+            "explicit baseline before changing core spectrum fields. RBW and VBW are "
+            "edited in Spectrum setup. Acquisition is a separate child step."
         )
         note.setObjectName("recipeHint")
         note.setWordWrap(True)
@@ -198,6 +218,14 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         self.node_role.currentIndexChanged.connect(self._role_changed)
         layout.addLayout(footer)
         self._role_changed()
+        self.review.bind(self, self._comparison_rows)
+
+    def _comparison_rows(self):
+        return [ConfigurationComparisonRow(
+            key, label, self._current_values.get(key), self._parameter_value(key),
+            {"unchanged": "Preserve", "set": "Set", "sweep": "Sweep"}[
+                str(self.parameter_selectors[key].currentData())],
+        ) for key, label, _ in self.parameter_specs]
 
     @staticmethod
     def _set_validation_error(widget: QWidget) -> None:
@@ -261,11 +289,11 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         return str(self.node_role.currentData() or "configure")
 
     def load_acquisition_options(self, fields):
-        self._acquisition_options = {key: fields[key] for key in ("processing", "source_file", "file_kind") if key in fields}
+        self._acquisition_options = {key: fields[key] for key in ("processing", "source_file", "file_kind", "minimum_duration", "purpose", "inter_sweep_delay") if key in fields}
         self._role_changed()
 
     def acquisition_options(self):
-        keys = ("source_file", "file_kind") if self.selected_node_role() == "acquire_reference" else ("processing",)
+        keys = ("source_file", "file_kind", "minimum_duration", "purpose", "inter_sweep_delay") if self.selected_node_role() == "acquire_reference" else ("processing", "inter_sweep_delay")
         return {key: self._acquisition_options[key] for key in keys if key in self._acquisition_options}
 
     def _edit_acquisition_options(self):
@@ -308,6 +336,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
             "advanced.rbw": advanced.rbw.text().strip(),
             "advanced.vbw_mode": str(advanced.vbw_mode.currentData()),
             "advanced.vbw": advanced.vbw.text().strip(),
+            "advanced.vbw_filter_mode": str(panel.vbw_mode.currentData()),
             "advanced.detector": str(advanced.detector.currentData()),
             "advanced.attenuation_mode": str(
                 advanced.attenuation_mode.currentData()
@@ -437,6 +466,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
             line_edits[parameter_id].setText(value)
             return
         combos = {
+            "advanced.vbw_filter_mode": panel.vbw_mode,
             "advanced.rbw_mode": advanced.rbw_mode,
             "advanced.vbw_mode": advanced.vbw_mode,
             "advanced.detector": advanced.detector,
@@ -540,11 +570,12 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         power: str = "-30 dBm",
         parameter_actions: list[dict[str, object]] | None = None,
         output_policy: str = "unchanged",
+        current_snapshot: SignalGeneratorSnapshot | None = None,
     ) -> None:
         super().__init__(parent)
         self.setProperty("stationSurface", "page")
         self.setWindowTitle("Anritsu MS2830A — signal generator sweep node")
-        self.resize(620, 420)
+        self.resize(700, 640)
         self.setMinimumSize(520, 360)
         self._working_segments: dict[str, list[dict[str, object]]] = {}
         surface = self.use_modal_shell_content().surface
@@ -552,6 +583,9 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         heading = BodyLabel("Anritsu MS2830A · Signal generator")
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
+        self.review = ConfigurationReview(surface)
+        layout.addWidget(self.review)
+        self._current_snapshot = current_snapshot
         form = QGridLayout()
         self.frequency = LineEdit(surface)
         self.frequency.setText(frequency)
@@ -589,11 +623,19 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         self.output_policy.setCurrentIndex(output_index if output_index >= 0 else 0)
         form.addWidget(BodyLabel("RF output"), 2, 0)
         form.addWidget(self.output_policy, 2, 1, 1, 2)
-        layout.addLayout(form)
+        scroll = ScrollArea(surface)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body_host = QWidget(scroll)
+        body = QVBoxLayout(body_host)
+        body.setContentsMargins(0, 0, 0, 0)
+        scroll.setWidget(body_host)
+        layout.addWidget(scroll, 1)
+        body.addLayout(form)
         self.open_roi_button = PrimaryPushButton("Edit ROI…", surface)
         self.open_roi_button.setEnabled(False)
         self.open_roi_button.clicked.connect(self._open_roi)
-        layout.addWidget(self.open_roi_button)
+        body.addWidget(self.open_roi_button)
         note = BodyLabel(
             "The complete visible SG snapshot is stored and applied with RF OFF; "
             "Unchanged still uses the visible value, Set exposes an explicit row, and "
@@ -603,8 +645,8 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         )
         note.setObjectName("recipeHint")
         note.setWordWrap(True)
-        layout.addWidget(note)
-        layout.addStretch(1)
+        body.addWidget(note)
+        body.addStretch(1)
         footer = QHBoxLayout()
         footer.addStretch(1)
         self.cancel_button = PushButton("Cancel", surface)
@@ -617,6 +659,19 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         self.cancel_button.clicked.connect(self.reject)
         layout.addLayout(footer)
         self.load_plan_actions(parameter_actions or [])
+        self.review.bind(self, self._comparison_rows)
+
+    def _comparison_rows(self):
+        current = self._current_snapshot
+        values = {
+            "sg.frequency": None if current is None else f"{current.frequency_hz:.12g} Hz",
+            "sg.power": None if current is None else f"{current.power_dbm:.12g} dBm",
+        }
+        return [ConfigurationComparisonRow(
+            key, label, values[key],
+            (self.frequency if key == "sg.frequency" else self.power).text(),
+            "Sweep" if self.parameter_selectors[key].currentData() == "sweep" else "Set",
+        ) for key, label, _ in self.parameter_specs]
 
     def _selected_sweep_parameter(self) -> str | None:
         selected = [

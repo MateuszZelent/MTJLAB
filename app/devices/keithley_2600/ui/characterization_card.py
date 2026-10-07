@@ -2,7 +2,6 @@
 
 from datetime import datetime, timezone
 from dataclasses import replace
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -45,8 +44,7 @@ from qfluentwidgets import (
 )
 
 from app.devices.keithley_2600.characterization.analyzer import KeithleyCharacterizationAnalyzer
-from app.devices.keithley_2600.characterization.report_paths import report_path, create_run_directory
-from app.devices.keithley_2600.characterization.export import KeithleyDataExporter
+from app.devices.keithley_2600.characterization.report_paths import report_path
 from app.devices.keithley_2600.characterization.models import (
     CharacterizationDataset,
     CharacterizationPoint,
@@ -144,6 +142,10 @@ class KeithleyCharacterizationCard(QWidget):
         self._current_csv_path: Path | None = None
         self._current_pdf_path: Path | None = None
         self._pending_single_report = None
+        self._single_report_worker = None
+        self._single_artifacts_worker = None
+        self._output_proof_worker = None
+        self._single_report_record = None
         self._run_inventory_target: tuple[str, str, str, str] | None = None
         self._source_request_provider: Callable[
             [str, str, float | None], KeithleySourceRequest
@@ -283,9 +285,8 @@ class KeithleyCharacterizationCard(QWidget):
         config_layout.addWidget(self.shared_configuration_label)
 
         self.sense_warning_label = CaptionLabel(
-            "⚠️ 4-wire (Kelvin) mode is enabled in Settings for this channel. "
-            "Ensure physical Sense HI and Sense LO leads are connected to the DUT. "
-            "Floating sense leads will cause the SMU to output full rail voltage (~20–40 V) and destroy delicate MTJ tunnel junctions!"
+            "4-wire / remote sense is prohibited. Select 2-wire local sense "
+            "in Station Settings before configuring or enabling this channel."
         )
         self.sense_warning_label.setWordWrap(True)
         self.sense_warning_label.setStyleSheet("color: #dc2626; font-weight: 500;")
@@ -872,7 +873,7 @@ class KeithleyCharacterizationCard(QWidget):
             current_range = f"from source ({source_range})"
         else:
             voltage_range = f"from source ({source_range})"
-        sense = "2-wire local" if request.sense_mode == "2wire" else "4-wire Kelvin"
+        sense = "2-wire local" if request.sense_mode == "2wire" else "4-wire (prohibited)"
         self.shared_configuration_label.setText(
             "Inherited from Keithley card · "
             f"NPLC {request.nplc:g} · settling {self.dwell_edit.text()} · "
@@ -1464,9 +1465,8 @@ class KeithleyCharacterizationCard(QWidget):
             channel_settings = self._settings.keithley.safety.channels[ch]
             is_4wire = channel_settings.sense_mode == "4wire"
             self.sense_warning_label.setText(
-                f"⚠️ Channel {ch} is configured for 4-wire (Kelvin) mode in Station Settings. "
-                "Ensure physical Sense HI and Sense LO leads are connected to the DUT. "
-                "Floating sense leads will bypass compliance and output full rail voltage (~20–40 V), destroying delicate MTJ barriers!"
+                f"Channel {ch}: 4-wire / remote sense is prohibited. Select 2-wire "
+                "local sense in Station Settings before configuring or enabling this channel."
             )
             self.sense_warning_label.setVisible(is_4wire)
             limits = channel_settings.lab_limits
@@ -1605,11 +1605,16 @@ class KeithleyCharacterizationCard(QWidget):
             metadata=metadata,
         )
 
-    def _start_field_series(self) -> None:
-        from app.devices.keithley_2600.characterization.field_scenario import build_field_scenario
-        from app.devices.keithley_2600.characterization.field_worker import FieldSeriesWorker
-        from app.devices.keithley_2600.ui.field_scenario_dialog import FieldScenarioDialog
+    def _build_field_start_config(self):
+        sweep = self._build_config(compliance_policy_override="stop", channel="A")
+        source = self._source_request_provider("B", "current", 0.0)
+        return self.field_panel.build_config(sweep, source)
 
+    def _start_field_series(self) -> None:
+        from app.devices.keithley_2600.characterization.field_series import FieldSeriesRunner
+
+        if self._output_proof_worker is not None or self._field_lease is not None:
+            return
         if (self._worker is not None and self._worker.isRunning()) or self._temporary_policy_phase != "idle":
             return
         if self._selected_channel() != "A":
@@ -1619,11 +1624,20 @@ class KeithleyCharacterizationCard(QWidget):
             )
             return
         try:
-            sweep = self._build_config(compliance_policy_override="stop", channel="A")
-            source = self._source_request_provider("B", "current", 0.0)
-            config = self.field_panel.build_config(sweep, source)
+            config = self._build_field_start_config()
+            FieldSeriesRunner.validate(config, self._settings)
             proxy = self._controller.adapter_for_run()
-            initial = {ch: str(proxy.compliance_policy(ch)) for ch in ("A", "B")}
+            self._request_output_proof(proxy, "A", config, field_series=True)
+        except Exception as exc:
+            self.banner.show_message(f"Field series preflight blocked: {exc}", severity="error")
+
+    def _continue_field_start(self, config, initial) -> None:
+        from app.devices.keithley_2600.characterization.field_scenario import build_field_scenario
+        from app.devices.keithley_2600.characterization.field_worker import FieldSeriesWorker
+        from app.devices.keithley_2600.ui.field_scenario_dialog import FieldScenarioDialog
+
+        sweep = config.sweep
+        try:
             originals = {ch: str(self._compliance_policy_provider(ch)) for ch in ("A", "B")}
             scenario = build_field_scenario(config, self._settings, initial, originals)
             row, col, label = self.selected_device_coord()
@@ -1634,8 +1648,6 @@ class KeithleyCharacterizationCard(QWidget):
                 "sample_id": sample.sample_id, "sample_name": sample.name,
                 "row": str(row), "col": str(col), "device_label": str(label),
             } if sample is not None else None)
-            for ch in ("A", "B"):
-                proxy.confirm_output_off(ch)
         except Exception as exc:
             self.banner.show_message(f"Field series preflight blocked: {exc}", severity="error")
             return
@@ -2084,6 +2096,10 @@ class KeithleyCharacterizationCard(QWidget):
 
     @Slot()
     def _on_start_clicked(self) -> None:
+        if self._output_proof_worker is not None:
+            return
+        if self._single_report_worker is not None or self._single_artifacts_worker is not None:
+            return
         if self._field_report_worker is not None and self._field_report_worker.isRunning():
             return
         if self._field_lease is not None:
@@ -2116,19 +2132,6 @@ class KeithleyCharacterizationCard(QWidget):
             self.banner.show_message(f"Keithley instrument unavailable: {exc}")
             return
 
-        try:
-            if hasattr(device_proxy, "connected") and not device_proxy.connected:
-                self.banner.show_message(
-                    "Keithley instrument is not connected. Connect the device before starting measurement."
-                )
-                return
-        except Exception as exc:
-            self.banner.show_message(
-                "Keithley connection state could not be read; characterization was blocked: "
-                f"{exc}"
-            )
-            return
-
         # The normal card remains the single source of every source, range,
         # sense, NPLC, dwell and compliance-limit field.  Only the response to
         # a compliance event is allowed to be overridden for this run.
@@ -2146,52 +2149,69 @@ class KeithleyCharacterizationCard(QWidget):
             self.banner.show_message(f"Station safety preflight rejection: {exc}")
             return
 
-        # Do not begin a policy transition while a manual run is still
-        # energizing the selected channel.  This read-only snapshot is also
-        # the explicit proof that the modal's "no output" promise is true.
+        self._request_output_proof(device_proxy, channel, config)
+
+    def _request_output_proof(self, proxy, channel, config=None, *, field_series=False) -> None:
+        from app.devices.keithley_2600.characterization.output_proof import OutputProofWorker
+        self._set_run_input_lock(True)
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.policy_retry_button.setEnabled(False)
+        self.status_label.setText("Confirming Keithley OUTPUT OFF...")
         try:
-            readback = device_proxy.read_configuration()
-            channels = getattr(readback, "channels", ())
-            channel_readback = next(
-                (
-                    item
-                    for item in channels
-                    if str(getattr(item, "channel", "")) == channel
-                ),
-                None,
-            )
-            if channel_readback is None:
-                raise SafetyViolation(
-                    f"Keithley channel {channel} output state was not returned by readback."
-                )
-            if bool(getattr(channel_readback, "output_enabled", True)):
-                self.banner.show_message(
-                    f"Keithley channel {channel} OUTPUT is ON. Turn it OFF before starting "
-                    "characterization; card settings will be applied and verified automatically."
-                )
+            worker = OutputProofWorker(proxy, channel, config, self._settings, self, field_series=field_series)
+            self._output_proof_worker = worker
+            worker.finished.connect(self._output_proof_finished)
+            worker.start()
+        except Exception as exc:
+            if self._output_proof_worker is not None:
+                self._output_proof_worker.deleteLater()
+            self._output_proof_worker = None
+            self._finish_output_proof_ui()
+            self.banner.show_message(f"Keithley preflight could not start: {exc}", severity="error")
+
+    def _finish_output_proof_ui(self) -> None:
+        if self._temporary_policy_phase == "idle" and self._field_lease is None and (self._worker is None or not self._worker.isRunning()):
+            self._set_run_input_lock(False)
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+        elif self._temporary_policy_phase == "restore_failed":
+            self.stop_button.setEnabled(False)
+            self.policy_retry_button.setEnabled(True)
+
+    def _output_proof_finished(self) -> None:
+        worker = self._output_proof_worker
+        if worker is None:
+            return
+        self._output_proof_worker = None
+        worker.deleteLater()
+        try:
+            if worker.cancelled.is_set():
+                self.status_label.setText("Keithley preflight cancelled; no measurement started")
                 return
+            if worker.error is not None:
+                raise SafetyViolation(worker.error)
+            if worker.settings != self._settings:
+                raise SafetyViolation("Station settings changed during preflight; start again.")
+            if worker.field_series:
+                if self._selected_channel() != "A" or worker.config != self._build_field_start_config():
+                    raise SafetyViolation("Field-series configuration changed during preflight; start again.")
+                self._continue_field_start(worker.config, worker.result)
+                return
+            if worker.config is None:
+                if self._temporary_policy_phase != "restore_failed" or self._temporary_policy_channel != worker.channel:
+                    raise SafetyViolation("Policy restoration context changed during readback.")
+                self._begin_policy_restore()
+                return
+            if worker.config != self._build_config(compliance_policy_override="stop"):
+                raise SafetyViolation("Characterization configuration changed during preflight; start again.")
+            self._continue_single_start(worker.proxy, worker.channel, worker.config, worker.result)
         except Exception as exc:
-            self.banner.show_message(
-                "Keithley output state could not be confirmed OFF; characterization was blocked: "
-                f"{exc}"
-            )
-            return
+            self.banner.show_message(f"Keithley output state/preflight could not be confirmed; operation blocked: {exc}", severity="error")
+        finally:
+            self._finish_output_proof_ui()
 
-        try:
-            active_policy = str(device_proxy.compliance_policy(channel))
-        except Exception as exc:
-            self.banner.show_message(
-                "Keithley compliance policy could not be read; characterization was blocked: "
-                f"{exc}"
-            )
-            return
-
-        if active_policy not in {"stop", "warn_clamp", "skip"}:
-            self.banner.show_message(
-                "Keithley returned an unknown compliance policy; characterization was blocked."
-            )
-            return
-
+    def _continue_single_start(self, device_proxy, channel, config, active_policy) -> None:
         try:
             normal_policy = str(self._compliance_policy_provider(channel))
         except Exception as exc:
@@ -2317,6 +2337,7 @@ class KeithleyCharacterizationCard(QWidget):
         self.curve_r_app.setData([], [])
         self.progress_bar.setValue(0)
         self.status_label.setText("Measurement in progress...")
+        self._clear_single_parameters()
 
         self._update_plot_labels()
         comp_val = config.compliance_si
@@ -2548,7 +2569,7 @@ class KeithleyCharacterizationCard(QWidget):
     def _finalize_run_ui(self) -> None:
         self._finish_single_report_after_restore()
         self._set_run_input_lock(False)
-        self.start_button.setEnabled(True)
+        self.start_button.setEnabled(self._single_report_worker is None and self._single_artifacts_worker is None)
         self.stop_button.setEnabled(False)
         self.policy_retry_button.setVisible(False)
         self.policy_retry_button.setEnabled(False)
@@ -2587,29 +2608,21 @@ class KeithleyCharacterizationCard(QWidget):
         channel = self._temporary_policy_channel
         if channel is None:
             return
+        if self._output_proof_worker is not None:
+            return
         try:
             device_proxy = self._controller.adapter_for_run()
-            if hasattr(device_proxy, "connected") and not device_proxy.connected:
-                raise RuntimeError("Keithley instrument is not connected.")
-            confirm_output_off = getattr(device_proxy, "confirm_output_off", None)
-            if callable(confirm_output_off):
-                confirm_output_off(channel)
-            else:
-                device_proxy.assert_output_state(channel, expected_enabled=False)
+            self._request_output_proof(device_proxy, channel)
         except Exception as exc:
-            self.banner.show_message(
-                "Policy restoration retry blocked; OUTPUT OFF is not confirmed: "
-                f"{exc}",
-                severity="error",
-                timeout_ms=0,
-            )
-            return
-        self.policy_retry_button.setEnabled(False)
-        self._temporary_policy_phase = "restoring"
-        self._begin_policy_restore()
+            self.banner.show_message(f"Policy restoration retry blocked: {exc}", severity="error", timeout_ms=0)
 
     @Slot()
     def _on_stop_clicked(self) -> None:
+        if self._output_proof_worker is not None:
+            self._output_proof_worker.cancelled.set()
+            self.stop_button.setEnabled(False)
+            self.status_label.setText("Cancelling Keithley preflight...")
+            return
         if self._field_worker is not None and self._field_worker.isRunning():
             self.status_label.setText("Stopping field series; confirming both outputs OFF...")
             self._field_worker.request_stop()
@@ -2625,31 +2638,34 @@ class KeithleyCharacterizationCard(QWidget):
             else self._worker is None or self._worker._config.mode == "current"
         )
         self._live_dem_points.append(point.demanded_si)
-        if math.isfinite(point.true_resistance_ohm):
-            self._live_r_points.append(point.true_resistance_ohm)
-        else:
-            self._live_r_points.append(self._live_r_points[-1] if self._live_r_points else 0.0)
-        self._live_app_r_points.append(point.apparent_resistance_ohm if math.isfinite(point.apparent_resistance_ohm) else 0.0)
+        self._live_r_points.append(
+            point.true_resistance_ohm
+            if point.valid and math.isfinite(point.true_resistance_ohm) else math.nan
+        )
+        self._live_app_r_points.append(
+            point.apparent_resistance_ohm
+            if point.valid and math.isfinite(point.apparent_resistance_ohm) else math.nan
+        )
 
         if is_current:
             self._live_i_points.append(point.demanded_si)
-            self._live_v_points.append(point.measured_voltage_v)
-            self.curve_iv.setData(self._live_i_points, self._live_v_points)
+            self._live_v_points.append(point.measured_voltage_v if point.valid else math.nan)
+            self.curve_iv.setData(self._live_i_points, self._live_v_points, connect="finite")
             if point.compliance_active:
                 self._live_comp_x.append(point.demanded_si)
-                self._live_comp_y.append(point.measured_voltage_v)
+                self._live_comp_y.append(point.measured_voltage_v if point.valid else math.nan)
                 self.curve_clamped.setData(self._live_comp_x, self._live_comp_y)
         else:
             self._live_v_points.append(point.demanded_si)
-            self._live_i_points.append(point.measured_current_a)
-            self.curve_iv.setData(self._live_v_points, self._live_i_points)
+            self._live_i_points.append(point.measured_current_a if point.valid else math.nan)
+            self.curve_iv.setData(self._live_v_points, self._live_i_points, connect="finite")
             if point.compliance_active:
                 self._live_comp_x.append(point.demanded_si)
-                self._live_comp_y.append(point.measured_current_a)
+                self._live_comp_y.append(point.measured_current_a if point.valid else math.nan)
                 self.curve_clamped.setData(self._live_comp_x, self._live_comp_y)
 
-        self.curve_r_true.setData(self._live_dem_points, self._live_r_points)
-        self.curve_r_app.setData(self._live_dem_points, self._live_app_r_points)
+        self.curve_r_true.setData(self._live_dem_points, self._live_r_points, connect="finite")
+        self.curve_r_app.setData(self._live_dem_points, self._live_app_r_points, connect="finite")
 
     @Slot(int, int)
     def _on_progress_changed(self, current: int, total: int) -> None:
@@ -2692,10 +2708,55 @@ class KeithleyCharacterizationCard(QWidget):
         else:
             self.status_label.setText("Measurement completed successfully — output OFF")
 
-        # Run scientific analysis
-        params = KeithleyCharacterizationAnalyzer.analyze(dataset)
-        self._current_parameters = params
+        self._current_parameters = None
+        self._current_csv_path = self._current_pdf_path = None
+        self._clear_single_parameters()
+        try:
+            from app.devices.keithley_2600.characterization.single_artifacts import SingleArtifactsWorker
+            target = self._run_inventory_target or (
+                self.selected_sample_id(), *self.selected_device_coord())
+            worker = SingleArtifactsWorker(dataset, self._automatic_run_directory(dataset), target, self)
+            self._single_artifacts_worker = worker
+            worker.finished.connect(self._single_artifacts_finished)
+            worker.start()
+        except Exception as exc:
+            if self._single_artifacts_worker is not None:
+                self._single_artifacts_worker.deleteLater()
+            self._single_artifacts_worker = None
+            self.banner.show_message(f"Could not prepare measurement artifacts: {exc}", severity="error", timeout_ms=0)
+        finally:
+            self._begin_policy_restore()
 
+    def _single_artifacts_finished(self) -> None:
+        worker = self._single_artifacts_worker
+        if worker is None:
+            return
+        dataset, result, error = worker.dataset, worker.result, worker.error
+        target = worker.inventory_target
+        self._single_artifacts_worker = None
+        worker.deleteLater()
+        try:
+            if error is not None or result is None:
+                raise RuntimeError(error or "No artifact result")
+            self._current_parameters = result.parameters
+            if result.parameters is not None:
+                self._show_single_parameters(dataset, result.parameters)
+            self._publish_completed_measurement(dataset, result, target)
+        except Exception as exc:
+            self.banner.show_message(f"Measurement artifact publication failed: {exc}", severity="error", timeout_ms=0)
+        finally:
+            if self._temporary_policy_phase == "idle":
+                self._finalize_run_ui()
+
+    def _clear_single_parameters(self) -> None:
+        for widget, text in (
+            (self.metric_r0, "R₀: —"), (self.metric_g0, "G₀: —"),
+            (self.metric_ra, "R·A: —"), (self.metric_comp, "Compliance: —"),
+            (self.metric_pmax, "P_max: —"), (self.metric_r2, "Linearity R²: —"),
+        ):
+            widget.setText(text)
+
+    def _show_single_parameters(self, dataset, params) -> None:
         # Update metrics cards
         r0 = params.zero_bias_resistance_ohm
         g0 = params.zero_bias_conductance_s
@@ -2727,9 +2788,6 @@ class KeithleyCharacterizationCard(QWidget):
         self.metric_pmax.setText(f"P_max: {params.max_power_dissipated_w * 1e3:.2f} mW")
         self.metric_r2.setText(f"Linearity R²: {params.linearity_r2:.4f}" if math.isfinite(params.linearity_r2) else "Linearity R²: —")
 
-        self._save_completed_measurement(dataset, params)
-        self._begin_policy_restore()
-
     def _automatic_run_directory(self, dataset: CharacterizationDataset) -> Path:
         sample_id = sanitize_run_file_stem(
             dataset.config.metadata.sample_id or self.selected_sample_id(), fallback="sample"
@@ -2759,60 +2817,26 @@ class KeithleyCharacterizationCard(QWidget):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         return root.resolve() / coord / timestamp
 
-    def _save_completed_measurement(
-        self,
-        dataset: CharacterizationDataset,
-        params: ExtractedScientificParameters,
-    ) -> None:
-        """Persist raw CSV now; defer PDF until policy restoration completes."""
-        run_dir = self._automatic_run_directory(dataset)
-        try:
-            run_dir = create_run_directory(run_dir)
-        except Exception as exc:
-            self.banner.show_message(
-                f"Measurement finished with output OFF, but its run directory could not be created: {exc}",
-                severity="error",
-                timeout_ms=0,
-            )
-            self._run_inventory_target = None
-            return
-
-        csv_path = run_dir / "characterization.csv"
-        pdf_path = report_path(run_dir)
-        errors: list[str] = []
-        try:
-            self._current_csv_path = KeithleyDataExporter.export_csv(dataset, csv_path)
-        except Exception as exc:
-            self._current_csv_path = None
-            errors.append(f"CSV: {exc}")
-
-        try:
-            from app.devices.keithley_2600.characterization.rigol_report import export_rigol_equivalence
-            export_rigol_equivalence(dataset, run_dir / "rigol_equivalence.csv")
-        except Exception as exc:
-            errors.append(f"Rigol equivalence CSV: {exc}")
-
+    def _publish_completed_measurement(self, dataset, result, target) -> None:
+        """Publish prepared artifacts; dataset processing and file I/O are finished."""
+        params, pdf_path = result.parameters, result.pdf_path
+        errors = list(result.errors)
+        self._current_csv_path = result.csv_path
         self._current_pdf_path = None
-        self._pending_single_report = (dataset, params, pdf_path, None)
-
+        self._pending_single_report = (dataset, params, pdf_path, None) if params is not None else None
         self.csv_button.setEnabled(self._current_csv_path is not None)
-        self.pdf_button.setEnabled(self._current_pdf_path is not None)
-
-        if self._run_inventory_target is not None:
-            sample_id, row, col, label = self._run_inventory_target
-        else:
-            sample_id = self.selected_sample_id()
-            row, col, label = self.selected_device_coord()
+        self.pdf_button.setEnabled(False)
+        sample_id, row, col, label = target
         if (
             self._inventory_store is not None
             and sample_id
             and (row or col)
             and self._current_csv_path is not None
+            and result.csv_sha256 is not None
         ):
             try:
                 sample = self._inventory_store.get_sample(sample_id)
                 s_name = sample.name if sample else sample_id
-                digest = hashlib.sha256(self._current_csv_path.read_bytes()).hexdigest()
                 rec = SampleRunRecord(
                     sample_id=sample_id,
                     sample_name=s_name,
@@ -2820,7 +2844,7 @@ class KeithleyCharacterizationCard(QWidget):
                     col=str(col),
                     device_label=str(label or f"R{row}:C{col}"),
                     run_path=str(self._current_csv_path),
-                    run_sha256=digest,
+                    run_sha256=result.csv_sha256,
                     created_at_utc=dataset.completed_at_iso or datetime.now(timezone.utc).isoformat(),
                     status=dataset.completion_status,
                     point_count=len(dataset.points),
@@ -2831,12 +2855,13 @@ class KeithleyCharacterizationCard(QWidget):
                         f"G₀={params.zero_bias_conductance_s*1e3:.3f} mS, "
                         f"Linearity R²={params.linearity_r2:.4f}"
                         + (f"; {dataset.termination_detail}" if dataset.termination_detail else "")
-                    ),
+                    ) if params is not None else "Scientific analysis unavailable",
                     csv_path=str(self._current_csv_path),
                     report_path=str(self._current_pdf_path or ""),
                 )
                 self._inventory_store.record_run(rec)
-                self._pending_single_report = (dataset, params, pdf_path, rec)
+                if params is not None:
+                    self._pending_single_report = (dataset, params, pdf_path, rec)
                 self._populate_device_combo_for_selected_sample()
                 self.measurement_saved.emit(sample_id)
             except Exception as exc:
@@ -2861,9 +2886,39 @@ class KeithleyCharacterizationCard(QWidget):
             return
         dataset, params, path, record = pending
         self._pending_single_report = None
+        from app.devices.keithley_2600.characterization.single_report import SingleReportWorker
         try:
-            from app.devices.keithley_2600.characterization.report_pdf import KeithleyPdfReportGenerator
-            self._current_pdf_path = KeithleyPdfReportGenerator.generate(dataset, params, path)
+            self._single_report_worker = SingleReportWorker(dataset, params, path, self)
+            self._single_report_record = record
+            self._single_report_worker.finished.connect(self._single_report_finished)
+            self.start_button.setEnabled(False)
+            self.status_label.setText(f"{self.status_label.text()} · Generating PDF report…")
+            self._single_report_worker.start()
+        except Exception as exc:
+            if self._single_report_worker is not None:
+                self._single_report_worker.deleteLater()
+            self._single_report_worker = None
+            self._single_report_record = None
+            self.banner.show_message(
+                f"Output is OFF and policy restoration finished, but PDF preparation failed: {exc}",
+                severity="error", timeout_ms=0)
+
+    def _single_report_finished(self) -> None:
+        worker = self._single_report_worker
+        if worker is None:
+            return
+        record = self._single_report_record
+        self._single_report_record = None
+        self._single_report_worker = None
+        result, error = worker.result, worker.error
+        worker.deleteLater()
+        self.start_button.setEnabled(self._temporary_policy_phase == "idle" and self._field_lease is None)
+        try:
+            if error is not None:
+                raise RuntimeError(error)
+            if result is None:
+                raise RuntimeError("PDF renderer returned no artifact")
+            self._current_pdf_path = result
             self.pdf_button.setEnabled(True)
             if record is not None and self._inventory_store is not None:
                 self._inventory_store.register_run_artifacts(
@@ -2942,6 +2997,13 @@ class KeithleyCharacterizationCard(QWidget):
 
     def prepare_application_shutdown(self) -> bool:
         """Keep the controller alive until acquisition, restoration and reports finish."""
+        if getattr(self, "_output_proof_worker", None) is not None:
+            self._output_proof_worker.cancelled.set()
+            return False
+        if getattr(self, "_single_artifacts_worker", None) is not None:
+            return False
+        if getattr(self, "_single_report_worker", None) is not None:
+            return False
         if self._field_recovery_worker is not None and self._field_recovery_worker.isRunning():
             return False
         if self._field_worker is not None and self._field_worker.isRunning():
@@ -2960,17 +3022,8 @@ class KeithleyCharacterizationCard(QWidget):
         return True
 
     def closeEvent(self, event) -> None:
-        """Safely terminate background acquisition worker on card close."""
-        self._save_operator_drafts()
-        if self._field_report_worker is not None and self._field_report_worker.isRunning():
+        """Retain workers/controllers until acquisition and restoration finish."""
+        if not self.prepare_application_shutdown():
             event.ignore()
             return
-        if self._field_lease is not None:
-            if self._field_worker is not None and self._field_worker.isRunning():
-                self._field_worker.request_stop()
-            event.ignore()
-            return
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.request_stop()
-            self._worker.wait(2000)
         super().closeEvent(event)

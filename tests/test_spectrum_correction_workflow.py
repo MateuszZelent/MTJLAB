@@ -99,7 +99,7 @@ def test_reference_then_signal_archives_every_completed_sweep_and_replays(tmp_pa
         wait_until(application, lambda: not workspace.running or bool(errors), timeout=15)
         assert not errors
         assert signal_sweeps == 4
-        assert workspace.recording_title.text() == "Recording finished"
+        assert workspace.recording_title.text() == "Recording stopped"
         assert "4 raw spectra saved" in workspace.state_label.text()
         assert workspace._latest_result is not None and workspace._latest_result.count == 4
         assert workspace._latest_result.standard_uncertainty_w is None
@@ -121,8 +121,7 @@ def test_reference_then_signal_archives_every_completed_sweep_and_replays(tmp_pa
                 metadata = json.loads(file["run/simulation_json"].asstr()[()])
                 assert metadata["enabled"] is True and metadata["mode"] == "simulation"
                 assert metadata["mode_source"] == "application_runtime"
-        assert requests.count("read_full_configuration") == 2
-        assert requests.count("read_advanced_spectrum") == 2
+        assert requests.count("read_acquisition_configuration") == 2
         assert requests.count("single_sweep") == 7
     finally:
         assert workspace.shutdown()
@@ -183,7 +182,7 @@ def test_record_dialog_validates_before_file_selection_and_starts_without_second
         workspace.reference_state.setText("control state; signal absence unknown")
         workspace._start_dialog("reference")
         assert selected and workspace.running
-        assert requests == [("read_full_configuration", None)]
+        assert requests == [("read_acquisition_configuration", None)]
         assert not workspace.acquire_reference.isEnabled()
         assert workspace.acquire_reference.text() == "Recording background…"
         assert workspace.stop.isEnabled()
@@ -223,7 +222,7 @@ def test_save_cancel_does_not_claim_recording_and_preflight_failure_stays_visibl
         with pytest.raises(ValueError, match="during a recording"):
             workspace.set_simulation_mode(True)
         assert workspace.recording_title.text() == "Starting background recording…"
-        assert workspace.handle_error("read_full_configuration", "Instrument timeout")
+        assert workspace.handle_error("read_acquisition_configuration", "Instrument timeout")
         wait_until(application, lambda: "No archive was opened" in workspace.archive_label.text())
         assert not workspace.running and workspace.recording_activity.isHidden()
         assert workspace.recording_title.text() == "Recording failed"

@@ -69,6 +69,7 @@ class SpectrumPlotWidget(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
         toolbar = FlowLayout() if responsive_toolbar else QHBoxLayout()
+        self.toolbar_layout = toolbar
         if responsive_toolbar:
             toolbar.setContentsMargins(0, 0, 0, 0)
             toolbar.setHorizontalSpacing(4)
@@ -167,6 +168,8 @@ class SpectrumPlotWidget(QWidget):
         y: str = "Power",
         y_unit: str = "dBm",
     ) -> None:
+        if x_unit != self._x_unit or y_unit != self._y_unit:
+            self.clear_holds()
         self._x_label = x
         self._x_unit = x_unit
         self._y_unit = y_unit
@@ -249,7 +252,8 @@ class SpectrumPlotWidget(QWidget):
         if x_values.ndim != 1 or y_values.ndim != 1 or x_values.size != y_values.size:
             raise ValueError("Spectrum X and Y must be equally-sized one-dimensional arrays.")
         finite = np.isfinite(x_values) & np.isfinite(y_values)
-        x_values, y_values = x_values[finite], y_values[finite]
+        # Missing samples are gaps, not permission to join their neighbours.
+        y_values = np.where(finite, y_values, np.nan)
         self._traces[name] = (x_values, y_values)
         self._legend_labels[name] = legend_label or name
         line_width = self._trace_line_width(name)
@@ -265,7 +269,9 @@ class SpectrumPlotWidget(QWidget):
             self._token_owned_primary_curves.add(name)
         elif caller_supplied_color:
             self._token_owned_primary_curves.discard(name)
-        curve.setData(x_values, y_values)
+        curve.setDownsampling(auto=bool(np.all(finite)), method="peak")
+        curve.setClipToView(bool(np.all(finite)))
+        curve.setData(x_values, y_values, connect="finite")
         curve.setSymbol("o" if show_points else None)
         if show_points:
             curve.setSymbolSize(6)
@@ -275,6 +281,8 @@ class SpectrumPlotWidget(QWidget):
         curve.setVisible(effective_visible)
         self._sync_legend(name, curve, effective_visible)
         if primary or self._hold_source is None:
+            if self._hold_source is not None and self._hold_source != name:
+                self.clear_holds()
             self._hold_source = name
             self._update_holds(x_values, y_values)
 
@@ -352,7 +360,7 @@ class SpectrumPlotWidget(QWidget):
         """Return the finite point count for GUI tests and status reporting."""
 
         data = self._traces.get(name)
-        return 0 if data is None else int(data[0].size)
+        return 0 if data is None else int(np.count_nonzero(np.isfinite(data[0]) & np.isfinite(data[1])))
 
     def clear(self) -> None:
         for name in tuple(self._curves):
@@ -524,7 +532,11 @@ class SpectrumPlotWidget(QWidget):
             self.status_changed.emit("Peak search unavailable: no finite trace data.")
             return
         x_values, y_values = data
-        index = int(np.nanargmax(y_values))
+        valid = np.flatnonzero(np.isfinite(x_values) & np.isfinite(y_values))
+        if not valid.size:
+            self.status_changed.emit("Peak search unavailable: no finite trace data.")
+            return
+        index = int(valid[np.argmax(y_values[valid])])
         self.marker.setPos(float(x_values[index]))
         self.marker.show()
         self._marker_x = float(x_values[index])
@@ -612,17 +624,22 @@ class SpectrumPlotWidget(QWidget):
 
     def _update_holds(self, x_values: np.ndarray, y_values: np.ndarray) -> None:
         for name, operation, attribute, color in (
-            ("Max hold", np.maximum, "_max_hold", tokens_for(self._theme_name).danger),
-            ("Min hold", np.minimum, "_min_hold", tokens_for(self._theme_name).success),
+            ("Max hold", np.fmax, "_max_hold", tokens_for(self._theme_name).danger),
+            ("Min hold", np.fmin, "_min_hold", tokens_for(self._theme_name).success),
         ):
             curve = self._curves.get(name)
             if curve is None or not curve.isVisible():
                 continue
             previous = getattr(self, attribute)
-            held = y_values.copy() if previous is None or previous.size != y_values.size else operation(previous, y_values)
+            previous_trace = self._traces.get(name)
+            same_grid = previous_trace is not None and np.array_equal(previous_trace[0], x_values, equal_nan=True)
+            held = y_values.copy() if previous is None or not same_grid else operation(previous, y_values)
             setattr(self, attribute, held)
             self._traces[name] = (x_values, held)
-            curve.setData(x_values, held)
+            finite = np.isfinite(x_values) & np.isfinite(held)
+            curve.setDownsampling(auto=bool(np.all(finite)), method="peak")
+            curve.setClipToView(bool(np.all(finite)))
+            curve.setData(x_values, held, connect="finite")
             curve.setPen(pg.mkPen(color, width=1.3))
 
     def _mouse_moved(self, event: tuple[object, ...]) -> None:

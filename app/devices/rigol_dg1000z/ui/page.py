@@ -6,6 +6,7 @@ import math
 from collections import defaultdict, deque
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
+from copy import deepcopy
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
@@ -95,6 +96,13 @@ class RigolPage(QWidget):
 
     LEVEL_MODE_AMPLITUDE_OFFSET = "Amplitude + Offset"
     LEVEL_MODE_HIGH_LOW = "High Level + Low Level (asymmetric)"
+    FULL_CONFIGURATION_EFFECTS = (
+        "Full waveform / shape apply: selected channel OUTPUT OFF; modulation, "
+        "hardware sweep, burst, harmonics and waveform summing OFF; amplitude unit VPP. "
+        "USER waveform also selects FREQ playback. Carrier, load, phase and applicable "
+        "shape settings are written from this form. OUTPUT ON performs this full apply "
+        "when the visible carrier has not already been confirmed."
+    )
 
     def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -124,6 +132,8 @@ class RigolPage(QWidget):
         self._output_state_known = {1: False, 2: False}
         self._last_counter_reading: RigolCounterReading | None = None
         self._execution_readbacks: dict[int, dict[str, object]] = {}
+        self._last_execution_render = None
+        self._execution_controlled = False
         self._rigol_field_edited_while_live: set[str] = set()
         self._rigol_return_pressed_field: str | None = None
         layout = QVBoxLayout(self)
@@ -246,7 +256,7 @@ class RigolPage(QWidget):
         self.waveform_apply_button = configure
         self.basic_scroll = self._form_page(
             "Basic parameters",
-            "For a standard sine wave, change only Frequency and Amplitude. Other fields already contain safe defaults.",
+            "Review the carrier, load and shape settings before applying the complete waveform.",
             (
                 ("Channel", self.channel),
                 ("Waveform", self.waveform),
@@ -381,6 +391,10 @@ class RigolPage(QWidget):
         splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 4)
         splitter.setSizes([620, 500])
+        self.configuration_effects = BodyLabel(self.FULL_CONFIGURATION_EFFECTS, self)
+        self.configuration_effects.setObjectName("rigolConfigurationEffects")
+        self.configuration_effects.setWordWrap(True)
+        layout.addWidget(self.configuration_effects)
         layout.addWidget(splitter, 1)
 
         configure.clicked.connect(self.configure)
@@ -850,9 +864,12 @@ class RigolPage(QWidget):
 
     def quick_setpoint_value_read(self, target: str, value_si: float) -> None:
         parts = target.split(".")
-        if len(parts) != 3 or parts[0] != "rigol" or parts[1] != self.channel.currentText():
+        if len(parts) != 3 or parts[0] != "rigol" or parts[1] not in {"1", "2"}:
             return
         field = parts[2]
+        self._record_confirmed_quick_readback(int(parts[1]), field, value_si)
+        if parts[1] != self.channel.currentText():
+            return
         if field == "frequency":
             timer = getattr(self, "_live_rigol_timers", {}).get("frequency")
             if (
@@ -912,7 +929,6 @@ class RigolPage(QWidget):
                     self._sync_levels_from_vpp_offset()
         finally:
             self._quick_control_projection = False
-        self._record_visible_quick_readback(int(parts[1]))
 
     def apply_execution_readback(
         self,
@@ -932,6 +948,9 @@ class RigolPage(QWidget):
 
         if channel not in {1, 2}:
             return
+        for field, value in (("frequency", frequency_hz), ("high_level", high_level_v), ("low_level", low_level_v)):
+            if value is not None:
+                self._record_confirmed_quick_readback(channel, field, value)
         if output_state == "on":
             self._set_rigol_channel_output(channel, True)
         elif output_state == "off":
@@ -956,7 +975,6 @@ class RigolPage(QWidget):
             )
         if high_level_v is not None or low_level_v is not None:
             self._sync_vpp_offset_from_levels()
-        self._record_visible_quick_readback(channel)
 
     def apply_execution_event(
         self,
@@ -972,11 +990,11 @@ class RigolPage(QWidget):
             if isinstance(actual, Mapping):
                 self._execution_readbacks[channel] = dict(actual)
             state = output_status.get(f"rigol.{channel}")
-            if state == "on":
+            if state == "on" and (not self._output_state_known[channel] or not self._output_states[channel]):
                 self._set_rigol_channel_output(channel, True)
-            elif state == "off":
+            elif state == "off" and (not self._output_state_known[channel] or self._output_states[channel]):
                 self._set_rigol_channel_output(channel, False)
-            elif state == "unknown":
+            elif state == "unknown" and self._output_state_known[channel]:
                 self._set_rigol_channel_output_unknown(channel)
 
         if event_name in {"action_started", "manual_stage_waiting"}:
@@ -994,12 +1012,39 @@ class RigolPage(QWidget):
 
     def _render_execution_channel(self, channel: int) -> None:
         actual = self._execution_readbacks.get(channel, {})
-        self.apply_execution_readback(
-            channel,
-            frequency_hz=self._execution_number(actual.get("frequency_hz")),
-            high_level_v=self._execution_number(actual.get("high_level_v")),
-            low_level_v=self._execution_number(actual.get("low_level_v")),
-        )
+        if channel != int(self.channel.currentText()):
+            return
+        render = (channel, actual)
+        if self._last_execution_render == render:
+            return
+        self._last_execution_render = deepcopy(render)
+        previous_projection = self._quick_control_projection
+        self._quick_control_projection = True
+        try:
+            waveform = actual.get("waveform")
+            if isinstance(waveform, str) and self.waveform.findText(waveform) >= 0:
+                self.waveform.setCurrentText(waveform)
+            if "output_load" in actual:
+                self.load.setText(str(actual["output_load"]))
+            for name, editor, dimension in (
+                ("phase_deg", self.phase, None),
+                ("square_duty_percent", self.duty, None),
+                ("ramp_symmetry_percent", self.ramp_symmetry, None),
+                ("pulse_width_s", self.pulse_width, DIMENSION_TIME),
+                ("pulse_leading_s", self.pulse_leading, DIMENSION_TIME),
+                ("pulse_trailing_s", self.pulse_trailing, DIMENSION_TIME),
+            ):
+                value = self._execution_number(actual.get(name))
+                if value is not None:
+                    editor.setText(format_quantity_auto(value, dimension) if dimension else f"{value:.12g}")
+            self.apply_execution_readback(
+                channel,
+                frequency_hz=self._execution_number(actual.get("frequency_hz")),
+                high_level_v=self._execution_number(actual.get("high_level_v")),
+                low_level_v=self._execution_number(actual.get("low_level_v")),
+            )
+        finally:
+            self._quick_control_projection = previous_projection
 
     @staticmethod
     def _execution_number(value: object) -> float | None:
@@ -1009,16 +1054,29 @@ class RigolPage(QWidget):
         return number if math.isfinite(number) else None
 
     def set_execution_controlled(self, controlled: bool) -> None:
+        if controlled and not self._execution_controlled:
+            self._execution_readbacks.clear()
+            self._last_execution_render = None
+        self._execution_controlled = controlled
         self.execution_badge.setVisible(controlled)
 
-    def _record_visible_quick_readback(self, channel: int) -> None:
-        try:
-            config = self._visible_channel_config()
-        except Exception:
-            self._confirmed_carrier_configs[channel] = None
+    def _record_confirmed_quick_readback(self, channel: int, field: str, value: float) -> None:
+        """Update only the verified field; never promote a form draft to readback."""
+        config = self._confirmed_carrier_configs.get(channel)
+        if config is None or not math.isfinite(value):
             return
-        if config.channel == channel:
-            self._confirmed_carrier_configs[channel] = config
+        names = {"frequency": "frequency_hz", "high_level": "high_level_v", "low_level": "low_level_v"}
+        if field in names:
+            changes = {names[field]: value}
+        elif field == "amplitude":
+            offset = (config.high_level_v + config.low_level_v) / 2
+            changes = {"high_level_v": offset + value / 2, "low_level_v": offset - value / 2}
+        elif field == "offset":
+            half_amplitude = (config.high_level_v - config.low_level_v) / 2
+            changes = {"high_level_v": value + half_amplitude, "low_level_v": value - half_amplitude}
+        else:
+            return
+        self._confirmed_carrier_configs[channel] = replace(config, **changes)
 
     @staticmethod
     def _set_help(widget: QWidget, title: str, text: str) -> None:
@@ -1096,8 +1154,8 @@ class RigolPage(QWidget):
             self.burst_gate_polarity: ("Burst gate polarity", "Selects which level at the external gate input allows waveform output in GAT mode."),
             self.burst_idle: ("Burst idle level", "Determines the output level between bursts: first point, top, center or bottom of the waveform."),
             self.sync_phases_button: ("Synchronize phases", "Aligns the phase reference of CH1 and CH2. It does not enable either output."),
-            configure: ("Apply waveform safely", "Validates limits, forces the selected output OFF, writes only parameters relevant to the selected waveform and verifies read-back."),
-            shape_apply: ("Apply shape", "Applies the waveform together with its duty, symmetry or pulse-edge parameters while OUTPUT remains OFF."),
+            configure: ("Apply waveform safely", self.FULL_CONFIGURATION_EFFECTS),
+            shape_apply: ("Apply shape", self.FULL_CONFIGURATION_EFFECTS),
             configure_output: ("Apply output path", "Configures load, polarity, gate and SYNC settings while OUTPUT remains OFF."),
             output_on: (
                 "OUTPUT ON",
@@ -1568,6 +1626,14 @@ class RigolPage(QWidget):
             sync_polarity=self.sync_polarity.currentText(),
             sync_delay=self.sync_delay.text().strip(),
         )
+
+    def configuration_review_snapshot_for(self, channel: int):
+        """Do not present another channel's fallback draft as known state."""
+        if (channel != int(self.channel.currentText())
+                and channel not in self._channel_form_snapshots
+                and channel not in self._confirmed_carrier_configs):
+            return None
+        return self.configuration_snapshot_for(channel)
 
     def configuration_snapshot_for(
         self, channel: int | None = None
@@ -2059,7 +2125,7 @@ class RigolPage(QWidget):
             widget.setProperty("deviceState", semantic_state)
             widget.style().unpolish(widget)
             widget.style().polish(widget)
-        if normalized in {"verified", "output_off"}:
+        if normalized == "output_off":
             for channel in (1, 2):
                 self._output_states[channel] = False
                 self._output_state_known[channel] = True
@@ -2079,6 +2145,8 @@ class RigolPage(QWidget):
                 for channel in (1, 2):
                     self._set_rigol_channel_output_unknown(channel)
         elif normalized in {"disconnected", "fault", "unknown"}:
+            self._execution_readbacks.clear()
+            self._last_execution_render = None
             for channel in (1, 2):
                 self._set_rigol_channel_output_unknown(channel)
                 self._confirmed_carrier_configs[channel] = None
@@ -3123,7 +3191,7 @@ class RigolPage(QWidget):
                 )
                 if self._pending_output_matches(request):
                     self._clear_pending_output(request_id=request.request_id)
-                if self._device_state_value in {"verified", "output_off"}:
+                if self._device_state_value == "output_off":
                     self._set_rigol_channel_output(channel, False)
                 else:
                     self._set_rigol_channel_output_unknown(channel)

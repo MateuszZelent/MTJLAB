@@ -19,6 +19,7 @@ from app.spectrum import (
     clean_spectrum_values,
     detect_spectrum_peaks,
 )
+from app.spectrum.display_processing import clean_display_spectrum
 from app.spectrum.preview_processing import PreviewStatistics, SpectrumPreviewProcessor
 
 
@@ -47,6 +48,7 @@ class SpectrumAnalysisRequest:
     reference_values_dbm: tuple[float, ...] | None = None
     reference_operation: str = "none"
     interference_calibration: object = None
+    tracking_context: tuple[int, float, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +115,25 @@ class SpectrumAnalysisOutcome:
     processing_duration_s: float = 0.0
     raw_snapshot: object = None
     statistics: PreviewStatistics | None = None
+    tracking_context: tuple[int, float, float] | None = None
+    tracked_peak: SpectrumPeak | None = None
+
+
+def _tracking_peak(frequencies, values, unit, context):
+    if context is None:
+        return None
+    _session, target, gate = context
+    frequencies, values = np.asarray(frequencies), np.asarray(values)
+    local = np.abs(frequencies - target) <= gate * 4.
+    if np.count_nonzero(local) >= 5:
+        frequencies, values = frequencies[local], values[local]
+    try:
+        candidates = detect_spectrum_peaks(frequencies, values, min_snr_db=4.,
+            min_prominence_db=2., max_peaks=40, fit=False, unit=unit)
+    except ValueError:
+        return None
+    nearest = min(candidates, key=lambda peak: abs(peak.frequency_hz - target), default=None)
+    return nearest if nearest is not None and abs(nearest.frequency_hz - target) <= gate else None
 
 
 def _finite_runs(values):
@@ -122,38 +143,7 @@ def _finite_runs(values):
 
 
 def _clean_display(values, *, allow_gaps=False, **options):
-    """Preserve invalid linear-subtraction bins without filtering across gaps."""
-    array = np.asarray(values, dtype=float)
-    if np.all(np.isfinite(array)) or not allow_gaps:
-        return clean_spectrum_pipeline(values, **options)
-    if np.any(np.isinf(array)):
-        raise ValueError("Reference processing overflowed; infinite powers cannot be displayed.")
-    frequencies = options["frequencies_hz"]
-    history = options.pop("history", ())
-    cleaned = array.copy()
-    modified, removed, interference = [], [], []
-    methods, notes, noise = [], [], []
-    applied_modes = []
-    for start, stop in _finite_runs(array):
-        if stop - start < 3:
-            continue
-        result = clean_spectrum_pipeline(array[start:stop], **{
-            **options, "frequencies_hz": frequencies[start:stop],
-            "history": tuple(row[start:stop] for row in history),
-        })
-        cleaned[start:stop] = result.values
-        noise.append(result.noise_sigma_db)
-        methods.append(result.method)
-        applied_modes.extend(result.applied_modes)
-        notes.extend(result.notes)
-        modified.extend(start + index for index in result.modified_bin_indices)
-        removed.extend(start + index for index in result.removed_peak_indices)
-        interference.extend(start + index for index in result.stationary_interference_indices)
-    notes.insert(0, f"{np.count_nonzero(~np.isfinite(array))} non-positive power residual bins remain undefined in dBm.")
-    return SpectrumCleanupResult(tuple(cleaned), max(noise, default=0.), tuple(interference),
-        "; ".join(dict.fromkeys(methods)) or "No finite residual", options["unit"],
-        tuple(modified), tuple(removed), tuple(dict.fromkeys(notes)),
-        input_values=tuple(array), applied_modes=tuple(dict.fromkeys(applied_modes)))
+    return clean_display_spectrum(values, allow_gaps=allow_gaps, pipeline=clean_spectrum_pipeline, **options)
 
 
 def _display_peaks(frequencies, values, *, allow_gaps=False, **options):
@@ -187,7 +177,26 @@ class _SpectrumAnalysisWorker(QObject):
         self._reference_rows = {}
         self._preview_processor = SpectrumPreviewProcessor()
 
+    @staticmethod
+    def _check_interruption():
+        if QThread.currentThread().isInterruptionRequested():
+            raise RuntimeError("Spectrum analysis cancelled during shutdown.")
+
     def _analyze_spectrogram(self, request):
+        if (not request.modes and request.reference_operation == "none"
+                and request.parameters.temporal_average_frames <= 1):
+            selected = [(stamp, row) for stamp, row in zip(request.timestamps_s, request.rows, strict=True)
+                        if request.display_start_s is None or stamp >= request.display_start_s]
+            self._check_interruption()
+            matrix = np.stack([row for _, row in selected])
+            matrix.setflags(write=False)
+            levels = spectrogram_color_levels(matrix, request.source_unit)
+            if levels is None:
+                raise ValueError("No finite spectrum values are available for the spectrogram.")
+            self.completed.emit(SpectrogramAnalysisOutcome(
+                request.generation, request.frequencies_hz, tuple(stamp for stamp, _ in selected),
+                matrix, request.source_unit, "Raw", request.cache_key, levels))
+            return
         if self._spectrogram_cache_key != request.cache_key:
             self._spectrogram_rows.clear()
             self._spectrogram_cache_key = request.cache_key
@@ -202,6 +211,7 @@ class _SpectrumAnalysisWorker(QObject):
                 raise ValueError("Choose one configured correction: Background or Reference.")
             converted = []
             for stamp, row in zip(request.timestamps_s, request.rows, strict=True):
+                self._check_interruption()
                 if stamp not in self._reference_rows:
                     values, input_unit = apply_reference_operation(row, request.reference_values_dbm, request.reference_operation)
                     self._reference_rows[stamp] = (values, input_unit)
@@ -241,6 +251,7 @@ class _SpectrumAnalysisWorker(QObject):
             values, unit, method, _history_key, statistics = cached
             outputs.append(values)
             output_times.append(stamp)
+        self._check_interruption()
         matrix = np.stack(outputs)
         matrix = np.frombuffer(matrix.tobytes(), dtype=matrix.dtype).reshape(matrix.shape)
         levels = spectrogram_color_levels(matrix, unit)
@@ -262,6 +273,7 @@ class _SpectrumAnalysisWorker(QObject):
             self.failed.emit(-1, "Invalid spectrum-analysis request.")
             return
         try:
+            self._check_interruption()
             started = time.perf_counter()
             statistics = None
             if isinstance(request.mode, tuple):
@@ -293,6 +305,7 @@ class _SpectrumAnalysisWorker(QObject):
                     parameters=request.parameters,
                     frequencies_hz=request.frequencies_hz,
                 )
+            self._check_interruption()
             peaks: tuple[SpectrumPeak, ...] | None = (
                 _display_peaks(
                     request.frequencies_hz,
@@ -306,6 +319,11 @@ class _SpectrumAnalysisWorker(QObject):
                 if request.detect_peaks
                 else None
             )
+            self._check_interruption()
+            tracked_peak = _tracking_peak(request.frequencies_hz,
+                cleanup.values if request.parameters.peak_measure_filtered or cleanup.input_values is None
+                else cleanup.input_values, cleanup.unit, request.tracking_context)
+            self._check_interruption()
             self.completed.emit(
                 SpectrumAnalysisOutcome(
                     request.generation,
@@ -320,6 +338,8 @@ class _SpectrumAnalysisWorker(QObject):
                     time.perf_counter() - started,
                     request.raw_snapshot,
                     statistics,
+                    request.tracking_context,
+                    tracked_peak,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - report failures through Qt
@@ -384,13 +404,14 @@ class SpectrumAnalysisController(QObject):
         if pending is not None:
             self.submit(pending)
 
-    def close(self) -> None:
+    def close(self, *, timeout_ms: int = 100) -> bool:
+        """Request stop without destroying or waiting forever for a live thread."""
+        if type(timeout_ms) is not int or timeout_ms < 0:
+            raise ValueError("Analysis shutdown timeout must be a non-negative integer.")
         self._closed = True
         self._pending = None
         if not self._thread.isRunning():
-            return
+            return True
         self._thread.requestInterruption()
         self._thread.quit()
-        if not self._thread.wait(3_000):
-            self._thread.requestInterruption()
-            self._thread.wait()
+        return self._thread.wait(timeout_ms)

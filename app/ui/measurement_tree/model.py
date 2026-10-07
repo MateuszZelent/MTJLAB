@@ -83,6 +83,7 @@ class MeasurementTreeModel(QAbstractItemModel):
         if self._outputs_forced_off == forced_off:
             return
         self._outputs_forced_off = forced_off
+        self._render_cache = {}
         for ref in self._by_id.values():
             if self._is_output_enable_node(ref):
                 index = self.index_for_semantic_id(ref.node.semantic_id)
@@ -127,6 +128,7 @@ class MeasurementTreeModel(QAbstractItemModel):
         return False
 
     def _reindex(self) -> None:
+        self._render_cache = {}
         self._roots = tuple(_NodeRef(node, None, index) for index, node in enumerate(self.tree.roots))
         self._by_id = {}
 
@@ -140,9 +142,12 @@ class MeasurementTreeModel(QAbstractItemModel):
             visit(root)
 
     def set_read_only(self, read_only: bool) -> None:
+        self._render_cache = {}
         self._read_only = bool(read_only)
 
     def index(self, row: int, column: int, parent: QModelIndex = QModelIndex()) -> QModelIndex:
+        if parent.isValid() and parent.column() != 0:
+            return QModelIndex()
         if row < 0 or column < 0 or column >= self.COLUMN_COUNT:
             return QModelIndex()
         ref: _NodeRef | None
@@ -281,7 +286,7 @@ class MeasurementTreeModel(QAbstractItemModel):
             return acquisition_summary(ref.node.data, reference_only=ref.node.data["type"] == "acquire_reference")
         state = self._descendant_state(ref)
         if (
-            ref.node.kind is SemanticNodeKind.ACTION
+            ref.node.kind in {SemanticNodeKind.ACTION, SemanticNodeKind.GENERATED_SAFETY}
             and ("output" in ref.node.label.lower() or ref.node.data.get("is_output"))
         ):
             if self._is_node_disabled(ref) and self._is_output_enable_node(ref):
@@ -356,6 +361,22 @@ class MeasurementTreeModel(QAbstractItemModel):
         ref = index.internalPointer()
         if not isinstance(ref, _NodeRef):
             return None
+        theme = isDarkTheme()
+        if getattr(self, "_render_cache_theme", None) != theme:
+            self._render_cache_theme = theme
+            self._render_cache = {}
+        cache = self._render_cache
+        key = (ref.node.semantic_id, index.column(), role)
+        if key not in cache:
+            cache[key] = self._render_data(index, role)
+        return cache[key]
+
+    def _render_data(self, index: QModelIndex, role: int) -> Any:
+        if not index.isValid():
+            return None
+        ref = index.internalPointer()
+        if not isinstance(ref, _NodeRef):
+            return None
         node = ref.node
         state = self._descendant_state(ref)
         if role == int(Qt.ItemDataRole.DisplayRole):
@@ -390,10 +411,12 @@ class MeasurementTreeModel(QAbstractItemModel):
                 SemanticNodeKind.SWEEP_AXIS: "SWEEP",
                 SemanticNodeKind.LOOP_BODY: "FLOW",
                 SemanticNodeKind.SET_ROI_VALUE: "WAITING",
-                SemanticNodeKind.FINALLY: "SAFE",
+                SemanticNodeKind.FINALLY: "PLANNED" if node.data.get("shutdown_compiled") else "PENDING",
                 SemanticNodeKind.GENERATED_SAFETY: "AUTO",
             }.get(node.kind, "READY")
         if role == int(Qt.ItemDataRole.ToolTipRole):
+            if node.kind is SemanticNodeKind.GENERATED_SAFETY and "safeguards" in node.data:
+                return "\n".join((node.label, str(node.data.get("detail", "")), *node.data["safeguards"]))
             if node.data.get("type") in {"acquire_spectrum", "acquire_reference"}:
                 return f"{node.label}\n{self._value_text(ref)}"
             if self._outputs_forced_off and self._is_output_enable_node(ref):
@@ -523,6 +546,7 @@ class MeasurementTreeModel(QAbstractItemModel):
         batching boundary.
         """
 
+        self._render_cache = {}
         changed: dict[str, _NodeRef] = {}
         for state in states:
             semantic_id = _state_value(state, "semantic_id")
@@ -536,13 +560,13 @@ class MeasurementTreeModel(QAbstractItemModel):
                 continue
             self._states[semantic_id] = state
             changed[semantic_id] = ref
-            if ref.node.kind is SemanticNodeKind.SET_ROI_VALUE:
-                ancestor = ref.parent
-                while ancestor is not None:
-                    if ancestor.node.kind is SemanticNodeKind.SWEEP_AXIS:
-                        changed[ancestor.node.semantic_id] = ancestor
-                        break
-                    ancestor = ancestor.parent
+            # Container rows derive phase/progress from descendants as well.
+            # Invalidating the render cache alone does not make Qt repaint
+            # them. Notify ancestors once per batch without resetting the tree.
+            ancestor = ref.parent
+            while ancestor is not None:
+                changed[ancestor.node.semantic_id] = ancestor
+                ancestor = ancestor.parent
 
         for ref in changed.values():
             index = self.index_for_semantic_id(ref.node.semantic_id)

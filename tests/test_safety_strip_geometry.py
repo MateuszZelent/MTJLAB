@@ -32,6 +32,13 @@ def test_emergency_caption_and_actions_fit_without_test_only_shortening(shell_qt
         strip.show()
         application.processEvents()
         assert strip.width() == width
+        for active, unknown in ((0, 1), (2, 0), (2, 1)):
+            strip.update_snapshot(StationSafetySnapshot(False, active, True,
+                "LAB/operator-with-a-deliberately-long-identity", ("engineer", "operator"), unknown))
+            application.processEvents()
+            for label in (strip.readiness, strip.outputs, strip.mode):
+                assert label.width() >= label.fontMetrics().horizontalAdvance(label.text()) + 4
+                assert strip.rect().contains(label.geometry())
         assert strip.estop.isVisible() and strip.estop.isEnabled()
         assert "disable all outputs and abort acquisition" in strip.estop.accessibleName()
         assert strip.estop.text() == ("E-STOP | ALL OFF" if width < 520 else "E-STOP  |  ALL OUTPUTS OFF")

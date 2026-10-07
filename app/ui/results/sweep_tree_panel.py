@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QThreadPool
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QSplitter,
@@ -24,6 +24,7 @@ from qfluentwidgets import (
 )
 
 from app.ui.widgets.fluent_code_viewer import FluentCodeViewer
+from app.devices.registry import built_in_device_registry
 from app.recipes.models import parse_recipe_text
 from app.recipes.semantic_tree import (
     SemanticMeasurementTree,
@@ -31,6 +32,8 @@ from app.recipes.semantic_tree import (
     SemanticTreeNode,
     normalize_recipe_tree,
 )
+from app.storage.hdf5_reader import StoredReferenceSummary, Hdf5RunReader
+from app.ui.results.workers import ResultReadTask
 from app.storage import (
     RunDetail,
     StoredPoint,
@@ -70,6 +73,10 @@ class SweepTreePanel(QWidget):
         self._selected_thatec_row: ThatecRow | None = None
         self._selected_stored_point: StoredPoint | None = None
         self._selected_stored_variant = "raw"
+        self._detail_pool = QThreadPool(self)
+        self._detail_pool.setMaxThreadCount(1)
+        self._detail_request = 0
+        self._detail_task = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -98,7 +105,10 @@ class SweepTreePanel(QWidget):
 
         # 2. Storage Checkpoints & Datasets Tree
         self.tree = TreeWidget(self)
+        self._checkpoint_pages = {}
+        self.tree.itemExpanded.connect(self._expand_checkpoint_page)
         self.tree.setHeaderLabels(["THATEC experiment", "Type"])
+        self.tree.setColumnWidth(0, 340)
         self.tree.setMinimumHeight(80)
         self.tree_stack.addWidget(self.tree)
 
@@ -162,10 +172,11 @@ class SweepTreePanel(QWidget):
         tree: tuple[ThatecTreeNode, ...],
         *,
         points: tuple[StoredPoint, ...] = (),
-        references: tuple[StoredReference, ...] = (),
+        references: tuple[StoredReference | StoredReferenceSummary, ...] = (),
         detail: RunDetail | None = None,
     ) -> None:
         """Populate the panel from a loaded THATEC result."""
+        self.cancel_detail_read()
         self._run = run
         self._selected_path = path
         self._selected_thatec_row = None
@@ -183,7 +194,7 @@ class SweepTreePanel(QWidget):
         if recipe_source:
             try:
                 recipe = parse_recipe_text(recipe_source, origin=str(path))
-                snapshot = normalize_recipe_tree(recipe)
+                snapshot = normalize_recipe_tree(recipe, built_in_device_registry().sweep_providers())
                 self.tree_model.replace_tree(snapshot)
                 self.measurement_tree.expandAll()
                 tree_built = True
@@ -200,6 +211,8 @@ class SweepTreePanel(QWidget):
 
     def clear(self) -> None:
         """Reset the panel to its empty state."""
+        self.cancel_detail_read()
+        self._checkpoint_pages.clear()
         self.tree.clear()
         self.tree_model.replace_tree(SemanticMeasurementTree((), {}, source_text=""))
         self.inspector.clear()
@@ -311,7 +324,7 @@ class SweepTreePanel(QWidget):
         tree: tuple[ThatecTreeNode, ...],
         *,
         points: tuple[StoredPoint, ...] = (),
-        references: tuple[StoredReference, ...] = (),
+        references: tuple[StoredReference | StoredReferenceSummary, ...] = (),
     ) -> None:
         self.tree.setUpdatesEnabled(False)
         try:
@@ -324,8 +337,9 @@ class SweepTreePanel(QWidget):
         tree: tuple[ThatecTreeNode, ...],
         *,
         points: tuple[StoredPoint, ...] = (),
-        references: tuple[StoredReference, ...] = (),
+        references: tuple[StoredReference | StoredReferenceSummary, ...] = (),
     ) -> None:
+        self._checkpoint_pages.clear()
         self.tree.clear()
         self.inspector.clear()
         self.values_tree.clear()
@@ -373,6 +387,70 @@ class SweepTreePanel(QWidget):
             [f"Checkpoints ({len(points)})", "private /points"]
         )
         results.addChild(checkpoints)
+        if len(points) <= 100:
+            self._append_checkpoint_page(checkpoints, points)
+        else:
+            for start in range(0, len(points), 100):
+                chunk = points[start:start + 100]
+                page = QTreeWidgetItem([
+                    f"Checkpoints {chunk[0].index}-{chunk[-1].index}",
+                    f"{len(chunk)} checkpoints: expand to inspect",
+                ])
+                page.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+                checkpoints.addChild(page)
+                self._checkpoint_pages[id(page)] = (page, chunk)
+
+
+        if public_checkpoint_count:
+            results.addChild(
+                QTreeWidgetItem(
+                    [
+                        f"Public checkpoints ({public_checkpoint_count})",
+                        "/measurement",
+                    ]
+                )
+            )
+
+        references_item = QTreeWidgetItem(
+            [f"References ({len(references)})", "private /references"]
+        )
+        results.addChild(references_item)
+        for reference in references:
+            item = QTreeWidgetItem(
+                [
+                    f"{reference.purpose.capitalize()} {reference.index}",
+                    f"{reference.kind} · {reference.average_count} average(s)",
+                ]
+            )
+            item.setData(0, Qt.ItemDataRole.UserRole, reference)
+            references_item.addChild(item)
+
+        public_datasets = QTreeWidgetItem(
+            [
+                f"Public datasets ({sum(bool(row.shape) for row in self._run.rows.values())})",
+                "/measurement",
+            ]
+        )
+        results.addChild(public_datasets)
+        for row in self._run.rows.values():
+            if not row.shape:
+                continue
+            label = row.control_name or row.device_name or row.id
+            item = QTreeWidgetItem([label, " x ".join(str(size) for size in row.shape)])
+            item.setData(0, Qt.ItemDataRole.UserRole, row)
+            item.setData(1, Qt.ItemDataRole.UserRole, row.id)
+            public_datasets.addChild(item)
+        self.tree.expandToDepth(1)
+
+    def _expand_checkpoint_page(self, item):
+        pending = self._checkpoint_pages.pop(id(item), None)
+        if pending is None:
+            return
+        self._append_checkpoint_page(item, pending[1])
+        item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless)
+
+    @staticmethod
+    def _append_checkpoint_page(parent, points):
         point_items: list[QTreeWidgetItem] = []
         for point in points:
             point_item = QTreeWidgetItem(
@@ -416,48 +494,7 @@ class SweepTreePanel(QWidget):
                 spectrum_items.append(processed_item)
             if spectrum_items:
                 point_item.addChildren(spectrum_items)
-        checkpoints.addChildren(point_items)
-
-        if public_checkpoint_count:
-            results.addChild(
-                QTreeWidgetItem(
-                    [
-                        f"Public checkpoints ({public_checkpoint_count})",
-                        "/measurement",
-                    ]
-                )
-            )
-
-        references_item = QTreeWidgetItem(
-            [f"References ({len(references)})", "private /references"]
-        )
-        results.addChild(references_item)
-        for reference in references:
-            item = QTreeWidgetItem(
-                [
-                    f"Reference {reference.index}",
-                    f"{reference.kind} · {reference.average_count} average(s)",
-                ]
-            )
-            item.setData(0, Qt.ItemDataRole.UserRole, reference)
-            references_item.addChild(item)
-
-        public_datasets = QTreeWidgetItem(
-            [
-                f"Public datasets ({sum(bool(row.shape) for row in self._run.rows.values())})",
-                "/measurement",
-            ]
-        )
-        results.addChild(public_datasets)
-        for row in self._run.rows.values():
-            if not row.shape:
-                continue
-            label = row.control_name or row.device_name or row.id
-            item = QTreeWidgetItem([label, " x ".join(str(size) for size in row.shape)])
-            item.setData(0, Qt.ItemDataRole.UserRole, row)
-            item.setData(1, Qt.ItemDataRole.UserRole, row.id)
-            public_datasets.addChild(item)
-        self.tree.expandToDepth(1)
+        parent.addChildren(point_items)
 
     def _add_tree_node(
         self, parent: QTreeWidgetItem, node: ThatecTreeNode
@@ -482,6 +519,7 @@ class SweepTreePanel(QWidget):
         item: QTreeWidgetItem | None,
         _previous: QTreeWidgetItem | None,
     ) -> None:
+        self.cancel_detail_read()
         record = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
         self.show_spectrum_button.setEnabled(False)
         self._selected_thatec_row = record if isinstance(record, ThatecRow) else None
@@ -514,24 +552,17 @@ class SweepTreePanel(QWidget):
             self._selected_thatec_row = None
             self.thatec_checkpoint.setRange(0, 0)
             self.values_tree.clear()
-            self.inspector.setPlainText(
-                _format_json(
-                    {
-                        "checkpoint": record.index,
-                        "status": record.status,
-                        "timestamp_utc": record.timestamp_utc,
-                        "setpoints": record.setpoints,
-                        "measurements": record.measurements,
-                        "metadata": record.metadata,
-                        "device_states": record.device_states,
-                        "has_spectrum": record.has_spectrum,
-                    }
-                )
-            )
+            self._show_point_inspector(record)
             self._selected_stored_point = record
             self.show_spectrum_button.setEnabled(record.has_spectrum)
             self.node_selected.emit(record)
-        elif isinstance(record, StoredReference):
+            if not record.details_loaded and self._selected_path is not None:
+                task = ResultReadTask(self._detail_request, Hdf5RunReader.point, self._selected_path, record.index)
+                self._detail_task = task
+                task.signals.loaded.connect(self._detail_loaded)
+                task.signals.failed.connect(self._detail_failed)
+                self._detail_pool.start(task)
+        elif isinstance(record, (StoredReference, StoredReferenceSummary)):
             self._selected_thatec_row = None
             self.values_tree.clear()
             self.inspector.setPlainText(
@@ -542,7 +573,8 @@ class SweepTreePanel(QWidget):
                         "average_count": record.average_count,
                         "trace_name": record.trace_name,
                         "acquired_at_utc": record.acquired_at_utc,
-                        "frequency_points": len(record.frequencies_hz),
+                        "frequency_points": (record.source_point_count if isinstance(record, StoredReferenceSummary)
+                                             else len(record.frequencies_hz)),
                     }
                 )
             )
@@ -575,6 +607,36 @@ class SweepTreePanel(QWidget):
             self.node_selected.emit(record)
         else:
             self.node_selected.emit(None)
+
+    def cancel_detail_read(self):
+        self._detail_request += 1
+        if self._detail_task is not None:
+            self._detail_task.cancel()
+        self._detail_task = None
+        self._detail_pool.clear()
+
+    def _detail_loaded(self, request, record):
+        if request != self._detail_request:
+            return
+        self._detail_task = None
+        self._selected_stored_point = record
+        self._show_point_inspector(record)
+        self.node_selected.emit(record)
+
+    def _detail_failed(self, request, message):
+        if request == self._detail_request:
+            self._detail_task = None
+            self.inspector.setPlainText(f"Cannot read checkpoint details: {message}")
+
+    def _show_point_inspector(self, record):
+        self.inspector.setPlainText(_format_json({
+            "checkpoint": record.index, "status": record.status,
+            "timestamp_utc": record.timestamp_utc, "setpoints": record.setpoints,
+            "measurements": record.measurements,
+            "metadata": record.metadata if record.details_loaded else "Loading full metadata...",
+            "device_states": record.device_states if record.details_loaded else "Loading device states...",
+            "has_spectrum": record.has_spectrum,
+        }))
 
     def _render_selected_row(self) -> None:
         record = self._selected_thatec_row

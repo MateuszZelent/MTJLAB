@@ -7,13 +7,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSettings, QObject, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
 from app.devices.keithley_2600.characterization.field_scenario import build_field_scenario
 from app.devices.keithley_2600.ui.characterization_card import KeithleyCharacterizationCard
 from app.devices.keithley_2600.ui.field_scenario_dialog import FieldScenarioDialog
+from tests.test_spectrum_correction_controller import wait_until
 from app.domain.errors import SafetyViolation
 from tests.test_keithley_field_worker import make_worker
 from tests.test_keithley_field_series import config
@@ -22,6 +23,14 @@ from tests.test_keithley_field_series import config
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def isolated_drafts(tmp_path, monkeypatch):
+    def preferences(*_):
+        return QSettings(str(tmp_path / "drafts.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr("app.devices.keithley_2600.ui.characterization_card.QSettings", preferences)
+    monkeypatch.setattr("app.devices.keithley_2600.ui.page.QSettings", preferences)
 
 
 def test_scenario_preserves_zero_repeats_and_executor_nonzero_grid(tmp_path):
@@ -62,16 +71,22 @@ def test_worker_blocks_changed_reviewed_config(tmp_path):
 def test_page_reservation_keeps_settings_locked_and_off_available(app, tmp_path):
     from app.devices.keithley_2600.ui.page import KeithleyPage
     worker, _ = make_worker(tmp_path)
-    controller = Mock()
+    class Controller(QObject):
+        result = Signal(str, object)
+        error = Signal(str, str)
+        state_changed = Signal(str)
+        reservation_changed = Signal(bool)
+    controller = Controller()
+    controller.call = Mock()
     page = KeithleyPage(controller, worker.settings)
     try:
         # Preserve a Live selection without starting actual polling.
         page.live_channel_a.blockSignals(True)
         page.live_channel_a.setChecked(True)
         page.live_channel_a.blockSignals(False)
-        page._field_reservation_changed(True)
+        controller.reservation_changed.emit(True)
         controller.call.reset_mock()
-        page._project_field_policies({"A": "stop", "B": "stop"})
+        page.characterization_card.field_policies_changed.emit({"A": "stop", "B": "stop"})
         page._device_state_changed("VERIFIED")
         page._device_state_changed("OUTPUT_ON")
         page._request_live_measurement()
@@ -85,8 +100,8 @@ def test_page_reservation_keeps_settings_locked_and_off_available(app, tmp_path)
             assert not page.channel_cards[ch]["output_on_action"].isEnabled()
             assert page.channel_cards[ch]["output_off_action"].isEnabled()
         controller.call.assert_not_called()
-        page._project_field_policies({"A": "warn_clamp", "B": "skip"})
-        page._field_reservation_changed(False)
+        page.characterization_card.field_policies_changed.emit({"A": "warn_clamp", "B": "skip"})
+        controller.reservation_changed.emit(False)
         assert page.configuration_panel.isEnabled()
         assert page.live_channel_a.isChecked()
         assert page._characterization_compliance_policy("A") == "warn_clamp"
@@ -133,6 +148,7 @@ def make_card(tmp_path):
     controller.acquire_run_lease.return_value = device
     device.release = Mock()
     card = KeithleyCharacterizationCard(controller, template.settings)
+    card.channel_combo.setCurrentText("Channel A")
     card.set_source_request_provider(
         lambda ch, mode, level: replace(device.requests[ch], mode=mode, level_si=level),
         lambda ch: device.policies[ch],
@@ -167,6 +183,7 @@ def test_cancelled_modal_never_acquires_or_mutates(app, tmp_path, monkeypatch):
         assert card.field_panel.currents.width() > 100
         assert card.grab().save(str(tmp_path / "field_series_card.png"))
         card._on_start_clicked()
+        wait_until(app, lambda: card._output_proof_worker is None)
         assert len(seen) == 1
         controller.acquire_run_lease.assert_not_called()
         assert device.calls == []
@@ -210,6 +227,7 @@ def test_live_validator_blocks_invalid_series_before_hardware_access(app, tmp_pa
 def test_live_validator_rejects_optimistic_30_second_timeout(app, tmp_path):
     card, controller, device = make_card(tmp_path)
     try:
+        device.requests["B"] = replace(device.requests["B"], source_range_si=.01)
         card.points_spin.setValue(101)
         card.dwell_edit.setText("100 ms")
         card.field_panel.currents.setText("0 mA; 5 mA; 10 mA")
@@ -238,6 +256,7 @@ def test_completion_modal_reports_curves_safety_and_missing_fit_window(
         lambda parent, title, text, *args, **kwargs: messages.append((title, text)),
     )
     card._field_worker = SimpleNamespace(
+        isRunning=lambda: False,
         outcome=SimpleNamespace(
             status="completed", outputs_off=True, policies_restored=True,
             directory=tmp_path / "series",
@@ -294,7 +313,7 @@ def test_confirmed_modal_executes_exact_reviewed_snapshot(app, tmp_path, monkeyp
     try:
         card._on_start_clicked()
         deadline = time.monotonic() + 30
-        while (card._field_lease is not None or (
+        while (card._output_proof_worker is not None or card._field_lease is not None or (
             card._field_report_worker is not None and card._field_report_worker.isRunning()
         )) and time.monotonic() < deadline:
             app.processEvents()

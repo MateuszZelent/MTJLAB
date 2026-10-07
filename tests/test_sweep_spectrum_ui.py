@@ -92,6 +92,38 @@ def test_shown_editor_geometry_and_roundtrip(application, theme, reference):
         application.processEvents()
 
 
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_timed_background_editor_preserves_duration_and_purpose(application, theme):
+    apply_application_theme(application, theme)
+    fields = {"average_count": 30, "minimum_duration": "30 s", "purpose": "background"}
+    dialog = AnritsuAcquisitionEditorDialog(RecipeNode("bg", "acquire_reference", fields))
+    try:
+        dialog.resize(760, 800)
+        dialog.show()
+        application.processEvents()
+        for widget in (dialog.minimum_duration, dialog.reference_purpose, dialog.average_count, dialog.apply_button):
+            contained(dialog, widget)
+        values = dialog.node_fields()
+        assert values["minimum_duration"] == "30 s" and values["purpose"] == "background"
+        assert values["average_count"] == 30
+        directory = Path("docs/audits/2026-10-05-requested-sweep")
+        directory.mkdir(parents=True, exist_ok=True)
+        assert dialog.grab().save(str(directory / f"background-editor-{theme}.png"))
+        managed = AnritsuNodeEditorDialog(simulation_settings())
+        try:
+            managed.node_role.setCurrentIndex(managed.node_role.findData("acquire_reference"))
+            managed.load_acquisition_options(values)
+            assert managed.acquisition_options()["minimum_duration"] == "30 s"
+            assert managed.acquisition_options()["purpose"] == "background"
+        finally:
+            managed.close()
+            managed.deleteLater()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        application.processEvents()
+
+
 def test_managed_editor_opens_shared_options_and_rebuild_preserves_them(application):
     dialog = AnritsuNodeEditorDialog(simulation_settings())
     try:

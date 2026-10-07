@@ -10,7 +10,6 @@ from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
-from app.ui.widgets.plot_ownership import create_plot_widget, own_plot_item_menus, own_signal_proxy
 from pyqtgraph.exporters import ImageExporter, SVGExporter
 from PySide6.QtCore import QRectF, QSize, QThreadPool, Signal
 from PySide6.QtGui import QResizeEvent, QShowEvent
@@ -24,12 +23,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, ComboBox, FluentIcon, PushButton
-from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto
 from app.recipes.parameter_registry import parameter_descriptor
 from app.storage import StoredPoint, ThatecRow, ThatecRun, ThatecRunReader
 from app.ui.design_system import plot_theme, tokens_for
+from app.ui.dialogs import StationFileDialog as QFileDialog
+from app.ui.results.data_classifier import find_heatmap_rows
 from app.ui.results.heatmap_coordinates import (
     HeatmapCoordinates,
     HeatmapDimension,
@@ -37,10 +37,11 @@ from app.ui.results.heatmap_coordinates import (
     build_heatmap_coordinates,
     read_heatmap_matrix,
 )
-from app.ui.results.data_classifier import find_heatmap_rows
+from app.ui.results.processing import ResultSpectrumProcessor
+from app.ui.results.processing_controls import ResultProcessingControls
 from app.ui.results.state_card import ResultsStateCard
 from app.ui.results.workers import ResultReadTask
-
+from app.ui.widgets.plot_ownership import create_plot_widget, own_plot_item_menus, own_signal_proxy
 
 _BACKGROUND_MATRIX_THRESHOLD = 100_000
 
@@ -63,6 +64,7 @@ class _HeatmapPayload:
     levels: tuple[float, float]
     missing_checkpoints: int
     cell_checkpoints: np.ndarray
+    processing_notes: tuple[str, ...] = ()
 
 
 def _read_heatmap_payload(
@@ -72,10 +74,13 @@ def _read_heatmap_payload(
     request: HeatmapRequest,
     *,
     cancelled: Callable[[], bool] | None = None,
+    processing=None,
+    points=(),
 ) -> _HeatmapPayload:
     """Read the exact requested physical-coordinate plane."""
 
-    matrix = read_heatmap_matrix(path, row, coordinates, request, cancelled=cancelled)
+    processor = ResultSpectrumProcessor(path, processing, points, cancelled=cancelled) if processing and processing.active else None
+    matrix = read_heatmap_matrix(path, row, coordinates, request, cancelled=cancelled, processor=processor)
     return _HeatmapPayload(
         matrix=matrix.values,
         x_values=matrix.x_values,
@@ -89,6 +94,7 @@ def _read_heatmap_payload(
         levels=(float(np.nanmin(matrix.values)), float(np.nanmax(matrix.values))),
         missing_checkpoints=matrix.missing_checkpoints,
         cell_checkpoints=matrix.cell_checkpoints,
+        processing_notes=tuple(processor.notes) if processor else (),
     )
 
 
@@ -184,7 +190,7 @@ class HeatmapPlotWidget(QWidget):
         self.color_bar = pg.ColorBarItem(
             interactive=True,
             orientation="right",
-            label="Amplitude (dBm)",
+            label=None,
         )
         self.color_bar.setImageItem(self.image_item, insert_in=self.plot.getPlotItem())
         own_plot_item_menus(self.color_bar, self.plot)
@@ -626,6 +632,9 @@ class HeatmapResultsTab(QWidget):
         self._filter_combos: dict[str, ComboBox] = {}
         controls_layout.addWidget(self.filter_host)
         layout.addWidget(self.controls_card)
+        self.processing_controls = ResultProcessingControls(self)
+        layout.addWidget(self.processing_controls)
+        self.processing_controls.changed.connect(self._processing_changed)
         self.setMinimumHeight(220)
 
         # --- Heatmap ---
@@ -690,10 +699,11 @@ class HeatmapResultsTab(QWidget):
     # ------------------------------------------------------------------
 
     def load(
-        self, path: Path, run: ThatecRun, points: tuple[StoredPoint, ...] = ()
+        self, path: Path, run: ThatecRun, points: tuple[StoredPoint, ...] = (), *, references=()
     ) -> None:
         """Prepare the tab with available spectrum rows from a THATEC result."""
         self._invalidate_pending_read()
+        self.processing_controls.set_references(references)
         self._selected_path = path
         self._run = run
         self._points = points
@@ -742,6 +752,9 @@ class HeatmapResultsTab(QWidget):
             )
             return
 
+        if self.processing_controls.state.active and dict(row.definition).get("lab control role") == "spectrum_processed":
+            self._show_heatmap_error("Choose a raw spectrum row before applying post-processing.")
+            return
         checkpoints = row.shape[0]
         freq_points = row.shape[1]
         self.load_button.setEnabled(False)
@@ -751,12 +764,13 @@ class HeatmapResultsTab(QWidget):
             f"{checkpoints * freq_points:,} spectral samples...",
             loading=True,
         )
-        if checkpoints > 4 or checkpoints * freq_points > _BACKGROUND_MATRIX_THRESHOLD:
+        if self.processing_controls.state.active or checkpoints > 4 or checkpoints * freq_points > _BACKGROUND_MATRIX_THRESHOLD:
             self._start_read(self._selected_path, row)
             return
         try:
             payload = _read_heatmap_payload(
-                self._selected_path, row, self._active_coordinates(), self._request()
+                self._selected_path, row, self._active_coordinates(), self._request(),
+                processing=self.processing_controls.state, points=self._points,
             )
         except Exception as exc:
             self._show_heatmap_error(str(exc))
@@ -764,7 +778,8 @@ class HeatmapResultsTab(QWidget):
         self._render_payload(row, payload)
 
     def _render_payload(self, row: ThatecRow, payload: _HeatmapPayload) -> None:
-        label = row.control_name or row.device_name or row.id
+        label = ("Post-processed spectrum" if self.processing_controls.state.active
+                 else row.control_name or row.device_name or row.id)
         z_axis_label = payload.z_label
         if payload.z_unit:
             z_axis_label = f"{z_axis_label} ({payload.z_unit})"
@@ -794,6 +809,8 @@ class HeatmapResultsTab(QWidget):
             f"range {payload.levels[0]:.4g} to {payload.levels[1]:.4g}{unit}."
             f"{missing} Click the heatmap to open one checkpoint spectrum."
         )
+        if payload.processing_notes:
+            message += " " + "; ".join(payload.processing_notes)
         self.info_label.setText(message)
         self.heatmap_view.setCurrentWidget(self.heatmap)
         self.load_button.setEnabled(True)
@@ -812,6 +829,7 @@ class HeatmapResultsTab(QWidget):
         self._selected_path = None
         self._run = None
         self._points = ()
+        self.processing_controls.set_references(())
         self._coordinates = None
         self._coordinate_row_id = None
         self._range_combos = {}
@@ -825,6 +843,14 @@ class HeatmapResultsTab(QWidget):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _processing_changed(self, _state=None) -> None:
+        if self.processing_controls.state.active:
+            index = self.variant_combo.findData("raw")
+            if index >= 0 and self.variant_combo.currentIndex() != index:
+                self.variant_combo.setCurrentIndex(index)
+        self.variant_combo.setEnabled(not self.processing_controls.state.active)
+        self._load_selected_row()
 
     def _load_selected_row(self) -> None:
         row_id = self.row_combo.currentData()
@@ -916,6 +942,7 @@ class HeatmapResultsTab(QWidget):
         while self.filter_layout.count():
             item = self.filter_layout.takeAt(0)
             if item.widget() is not None:
+                item.widget().hide()
                 item.widget().deleteLater()
             elif item.layout() is not None:
                 self._clear_layout(item.layout())
@@ -1046,6 +1073,7 @@ class HeatmapResultsTab(QWidget):
         while layout.count():
             item = layout.takeAt(0)
             if item.widget() is not None:
+                item.widget().hide()
                 item.widget().deleteLater()
             elif item.layout() is not None:
                 HeatmapResultsTab._clear_layout(item.layout())
@@ -1111,6 +1139,7 @@ class HeatmapResultsTab(QWidget):
             self._active_coordinates(),
             self._request(),
             cooperative_cancel=True,
+            processing=self.processing_controls.state, points=self._points,
         )
         self._read_tasks[request_id] = task
         task.signals.loaded.connect(

@@ -1,0 +1,12 @@
+tests\test_spectrum_correction_layout.py:4:8: F401 [*] `csv` imported but unused
+tests\test_spectrum_correction_layout.py:5:25: F401 [*] `dataclasses.replace` imported but unused
+tests\test_spectrum_correction_layout.py:13:28: F401 [*] `PySide6.QtCore.QPoint` imported but unused
+tests\test_spectrum_correction_layout.py:15:28: F401 [*] `PySide6.QtTest.QTest` imported but unused
+tests\test_spectrum_correction_layout.py:18:49: F401 [*] `app.devices.anritsu_ms2830a.ui.page.AnritsuPage` imported but unused
+tests\test_spectrum_correction_layout.py:18:62: F401 [*] `app.devices.anritsu_ms2830a.ui.page.AnritsuPageState` imported but unused
+tests\test_spectrum_correction_layout.py:19:26: F401 [*] `app.settings.SettingsRepository` imported but unused
+tests\test_spectrum_correction_layout.py:20:34: F401 [*] `app.ui.design_system.apply_application_theme` imported but unused
+tests\test_spectrum_correction_layout.py:22:27: F401 [*] `tests.helpers.SETTINGS_TEMPLATE` imported but unused
+tests\test_sweep_release_contracts.py:11:51: F401 [*] `app.domain.errors.SafetyViolation` imported but unused
+Found 10 errors.
+[*] 10 fixable with the `--fix` option.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import math
 
 from app.domain.quantities import format_quantity_auto
@@ -24,8 +25,13 @@ class ManualMetadataValue:
     unit: str
     value_si: float
     source: str = "last confirmed value"
+    recorded_at_utc: datetime | None = None
 
     def __post_init__(self) -> None:
+        if self.recorded_at_utc is not None:
+            if self.recorded_at_utc.tzinfo is None or self.recorded_at_utc.utcoffset() is None:
+                raise ValueError("Manual metadata timestamp requires timezone evidence.")
+            object.__setattr__(self, "recorded_at_utc", self.recorded_at_utc.astimezone(timezone.utc))
         if not self.key.strip():
             raise ValueError("Manual metadata requires a stable key.")
         if not self.device.strip() or not self.label.strip():

@@ -26,6 +26,9 @@ from app.ui.settings_page import _SafetyLimitValidationDelegate
 from app.devices.keithley_2600.ui.page import KeithleyConfigurationPanel
 from app.ui.shell import MainWindow
 from tests.helpers import SETTINGS_TEMPLATE
+from tests.shell_test_isolation import (  # noqa: F401
+    isolated_shell_persistence, shell_qt_application,
+)
 
 
 class FluentSettingsPageTests(unittest.TestCase):

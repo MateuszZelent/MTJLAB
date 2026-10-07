@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -37,6 +38,10 @@ class FakeAdapter(DeviceAdapter):
 
     def fail_for_run(self) -> None:
         raise RuntimeError("injected run operation failure")
+
+    def acquire_single_sweep(self):
+        time.sleep(0.02)
+        return threading.get_ident()
 
 
 class DeviceRunLeaseTests(unittest.TestCase):
@@ -79,6 +84,61 @@ class DeviceRunLeaseTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "injected run operation failure"):
                 controller.adapter_for_run().fail_for_run()
         finally:
+            controller.close()
+
+    def test_repeated_acquisition_keeps_gui_live_without_duplicate_state_signals(self):
+        controller = DeviceController(FakeAdapter())
+        states, errors, gaps, owners = [], [], [], []
+        controller.state_changed.connect(states.append)
+        lease = controller.acquire_run_lease()
+        done = threading.Event()
+        main_thread = threading.get_ident()
+        previous = time.perf_counter()
+        def tick():
+            nonlocal previous
+            now = time.perf_counter()
+            gaps.append(now - previous)
+            previous = now
+        timer = QTimer()
+        timer.setInterval(10)
+        timer.timeout.connect(tick)
+        def acquire():
+            try:
+                lease.connect()
+                # Reference and spectrum averaging both repeatedly acquire
+                # through this same leased transport path.
+                for _ in range(64):
+                    owners.append(lease.acquire_single_sweep())
+                    assert lease.state == DeviceState.VERIFIED
+                lease.emergency_off()
+                try:
+                    lease.fail_for_run()
+                except RuntimeError:
+                    pass
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                done.set()
+        thread = threading.Thread(target=acquire)
+        try:
+            timer.start()
+            thread.start()
+            deadline = time.monotonic() + 10
+            while not done.is_set() and time.monotonic() < deadline:
+                self.application.processEvents()
+                time.sleep(.002)
+            thread.join(timeout=1)
+            self.application.processEvents()
+            self.assertTrue(done.is_set())
+            self.assertFalse(errors)
+            self.assertGreater(len(gaps), 40)
+            self.assertLess(max(gaps), .250)
+            self.assertTrue(all(owner != main_thread for owner in owners))
+            self.assertEqual(states, ["verified", "output_off", "output_off"])
+        finally:
+            timer.stop()
+            if done.is_set():
+                lease.release()
             controller.close()
 
     def test_exclusive_lease_blocks_other_proxies_and_expires(self) -> None:

@@ -1,0 +1,3190 @@
+[
+  {
+    "operation": "processEvents",
+    "seconds": 0.3080810001119971
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.15242670010775328
+  },
+  {
+    "operation": "synchronous_start_path",
+    "seconds": 0.1158253001049161
+  },
+  {
+    "operation": "RunMonitorPage.run_started",
+    "seconds": 0.10773360030725598
+  },
+  {
+    "operation": "ExecutionPlanTimeline.set_plan",
+    "seconds": 0.09325749985873699
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.08425650000572205
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.08100440027192235
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0626318003050983
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.05328809982165694
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.049145299941301346
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.03410380007699132
+  },
+  {
+    "operation": "MeasurementTreeView.paintEvent",
+    "seconds": 0.03096160013228655
+  },
+  {
+    "operation": "MeasurementTreeView.paintEvent",
+    "seconds": 0.026864999905228615
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.02554129995405674
+  },
+  {
+    "operation": "MeasurementTreeView.paintEvent",
+    "seconds": 0.02414780016988516
+  },
+  {
+    "operation": "MeasurementTreeView.paintEvent",
+    "seconds": 0.023887199815362692
+  },
+  {
+    "operation": "GraphicsView.paintEvent",
+    "seconds": 0.02009670017287135
+  },
+  {
+    "operation": "MeasurementTreeView.paintEvent",
+    "seconds": 0.020076300017535686
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.019142699893563986
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.019127299543470144
+  },
+  {
+    "operation": "MeasurementTreeView.paintEvent",
+    "seconds": 0.018381299916654825
+  },
+  {
+    "operation": "GraphicsView.paintEvent",
+    "seconds": 0.017690000124275684
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0175827001221478
+  },
+  {
+    "operation": "GraphicsView.paintEvent",
+    "seconds": 0.016402199864387512
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.015346199739724398
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.013625199906527996
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00937770027667284
+  },
+  {
+    "operation": "RunMonitorPage._build_live_manifest",
+    "seconds": 0.009047700092196465
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.008107000030577183
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.007944900076836348
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.007465200033038855
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0068270000629127026
+  },
+  {
+    "operation": "GraphicsView.paintEvent",
+    "seconds": 0.006381399929523468
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.006343299988657236
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.0061250003054738045
+  },
+  {
+    "operation": "GraphicsView.paintEvent",
+    "seconds": 0.00595139991492033
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.005607299972325563
+  },
+  {
+    "operation": "GraphicsView.paintEvent",
+    "seconds": 0.005520099774003029
+  },
+  {
+    "operation": "GraphicsView.paintEvent",
+    "seconds": 0.005344899836927652
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.005265399813652039
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.00507269985973835
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.004883399698883295
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.004414900206029415
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.003942400217056274
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0038966001011431217
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0038304002955555916
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.003508700057864189
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0031106998212635517
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0030941995792090893
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0030272002331912518
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0027084997855126858
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0026909001171588898
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.002651900053024292
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.002573200035840273
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0024721999652683735
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.002445800229907036
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0022859997116029263
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.002264599781483412
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.002231100108474493
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0022177998907864094
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0021521998569369316
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00193759985268116
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.001824399922043085
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0018201000057160854
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.001771099865436554
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.0017411001026630402
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0017228000797331333
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.0017185998149216175
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.0017067003063857555
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0016748001798987389
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0016339002177119255
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0015934002585709095
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.001586299855262041
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0015344000421464443
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0015298002399504185
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0015047001652419567
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.001502899918705225
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.0014983001165091991
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0014952998608350754
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0014884001575410366
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.0014800997450947762
+  },
+  {
+    "operation": "MainWindow._set_run_ui_locked",
+    "seconds": 0.0014654002152383327
+  },
+  {
+    "operation": "AxisItem.paint",
+    "seconds": 0.001449699979275465
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0014456002973020077
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0014410000294446945
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0014303000643849373
+  },
+  {
+    "operation": "MainWindow._set_device_pages_execution_read_only",
+    "seconds": 0.001423100009560585
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0013882997445762157
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0013766000047326088
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0013549001887440681
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0013429997488856316
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0013366998173296452
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0012802998535335064
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0012464998289942741
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0012333998456597328
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0012169997207820415
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0012067998759448528
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.00120449997484684
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0011741998605430126
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0011730003170669079
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.0011685998179018497
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0011585000902414322
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0011506997980177402
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.001143299974501133
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0011165998876094818
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.001107499934732914
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0010815002024173737
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0010041999630630016
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0009782002307474613
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0009759999811649323
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0009431000798940659
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0009423000738024712
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0009401999413967133
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000905399676412344
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0009050001390278339
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0008491999469697475
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0008199997246265411
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0008112997747957706
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0007966998964548111
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0007825000211596489
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0007660002447664738
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0007604998536407948
+  },
+  {
+    "operation": "ScatterPlotItem.paint",
+    "seconds": 0.0007557002827525139
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0007347003556787968
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0007163998670876026
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0007130000740289688
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000691200140863657
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0006907000206410885
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.000670300330966711
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0006506000645458698
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.000647200271487236
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0006327000446617603
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0006261002272367477
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0006186002865433693
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0006110998801887035
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.000593000091612339
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.0005903001874685287
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0005703996866941452
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.0005550999194383621
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0005541001446545124
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0005482002161443233
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000546600203961134
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0005389000289142132
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0005311998538672924
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0005276002921164036
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.0005220999009907246
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.0005095996893942356
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0005034003406763077
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.0004819999448955059
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0004676003009080887
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.00046740006655454636
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0004569999873638153
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00045319972559809685
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0004502004012465477
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.0004461999051272869
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0004461999051272869
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.0004460001364350319
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0004428001120686531
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00044160010293126106
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00044109998270869255
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.00043530017137527466
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00043480005115270615
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0004320000298321247
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0004257000982761383
+  },
+  {
+    "operation": "ScatterPlotItem.paint",
+    "seconds": 0.0004239003174006939
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00042139971628785133
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.00042010005563497543
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0004191999323666096
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00041580013930797577
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0004150001332163811
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0004122997634112835
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00040789972990751266
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0004071001894772053
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.00040709972381591797
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.0004070000723004341
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00040670018643140793
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0004066997207701206
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00040499959141016006
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00040460005402565
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0004026000387966633
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.0004020002670586109
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000399099662899971
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.0003963001072406769
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003929003141820431
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003925999626517296
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00038950005546212196
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.00038930028676986694
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.00038870004937052727
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003878003917634487
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00038639968261122704
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.000386199913918972
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00038240011781454086
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000381499994546175
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003790999762713909
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00037899985909461975
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003782999701797962
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003762999549508095
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003761998377740383
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00037560006603598595
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00037509994581341743
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003749001771211624
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003741001710295677
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00037349993363022804
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003725001588463783
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000372100155800581
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000372100155800581
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00037090014666318893
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003694002516567707
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00036900024861097336
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003679003566503525
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003656996414065361
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003654998727142811
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003646998666226864
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00036429986357688904
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003634002059698105
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00036300020292401314
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00036170007660984993
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003611999563872814
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00035980017855763435
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003597000613808632
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00035820016637444496
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00035750027745962143
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00035690004006028175
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003546997904777527
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00035430025309324265
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003542001359164715
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00035370001569390297
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003534001298248768
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00035269977524876595
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00035109976306557655
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003496999852359295
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003492003306746483
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00034719984978437424
+  },
+  {
+    "operation": "ScatterPlotItem.paint",
+    "seconds": 0.0003469996154308319
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00034639984369277954
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000345699954777956
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00034529995173215866
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00034289993345737457
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003424999304115772
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00034220004454255104
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000341199804097414
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00034060003235936165
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003400002606213093
+  },
+  {
+    "operation": "ScatterPlotItem.paint",
+    "seconds": 0.00033929990604519844
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003392002545297146
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003386000171303749
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003379001282155514
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003372998908162117
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00033719977363944054
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00033719977363944054
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00033709965646266937
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000336300116032362
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00033480022102594376
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003347001038491726
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003341003321111202
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003336002118885517
+  },
+  {
+    "operation": "ScatterPlotItem.paint",
+    "seconds": 0.0003333999775350094
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00033140042796730995
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003311997279524803
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003301999531686306
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00032979995012283325
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003291000612080097
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003270003944635391
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003255000337958336
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003248997963964939
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00032369978725910187
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003235996700823307
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00032350001856684685
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003232997842133045
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00032270001247525215
+  },
+  {
+    "operation": "ScatterPlotItem.paint",
+    "seconds": 0.0003223000094294548
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003219996578991413
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003213002346456051
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00032059988006949425
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003185998648405075
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000318099744617939
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003172997385263443
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003162999637424946
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00031510042026638985
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00031480006873607635
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003146999515593052
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003137001767754555
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00031090015545487404
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00031089968979358673
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00030980026349425316
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00030979979783296585
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003093997947871685
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003092000260949135
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00030820025131106377
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00030770013108849525
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003069997765123844
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003069997765123844
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00030640000477433205
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00030640000477433205
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003060000017285347
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00030559999868273735
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003041001036763191
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003041001036763191
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003040996380150318
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00030350033193826675
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003033997491002083
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0003027999773621559
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00030250009149312973
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00030219973996281624
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00030110031366348267
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00029959995299577713
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002981000579893589
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00029719993472099304
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00029719993472099304
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00029690004885196686
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00029690004885196686
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00029639992862939835
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002963002771139145
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002962001599371433
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002950001507997513
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002949000336229801
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002946997992694378
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00029460014775395393
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002943999134004116
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00029379967600107193
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002937000244855881
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002934001386165619
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002933996729552746
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002933000214397907
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002929000183939934
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002907998859882355
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002898997627198696
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002886001020669937
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002883998677134514
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00028769997879862785
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002875998616218567
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002864999696612358
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00028609996661543846
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002835998311638832
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00028350017964839935
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002828002907335758
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00028270017355680466
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00028010038658976555
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00027950014919042587
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002782996743917465
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002779001370072365
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002760002389550209
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00027529988437891006
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002749999985098839
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00027459999546408653
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002745003439486027
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00027299998328089714
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002729003317654133
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00027240021154284477
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00027159973978996277
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002715000882744789
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00027059996500611305
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002705003134906292
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000269399955868721
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002679000608623028
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002676001749932766
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002657999284565449
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002641999162733555
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002639000304043293
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002628001384437084
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00026040012016892433
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00026030000299215317
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00025769975036382675
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002576000988483429
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002574003301560879
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002569998614490032
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002552000805735588
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002545001916587353
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002544000744819641
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00025269994512200356
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00025250017642974854
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00025060027837753296
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002503995783627033
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002502002753317356
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00024880003184080124
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00024800002574920654
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00024659978225827217
+  },
+  {
+    "operation": "ScatterPlotItem.paint",
+    "seconds": 0.0002457997761666775
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002446998842060566
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00024359999224543571
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00023930007591843605
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00023910030722618103
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00023879995569586754
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000238100066781044
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00023799994960427284
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00023619970306754112
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00023610005155205727
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00023430027067661285
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00023199990391731262
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002318001352250576
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00023010000586509705
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00022860011085867882
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00022779963910579681
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002259998582303524
+  },
+  {
+    "operation": "ScatterPlotItem.paint",
+    "seconds": 0.00022540008649230003
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002210000529885292
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002202000468969345
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0002171001397073269
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00021059997379779816
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00020819995552301407
+  },
+  {
+    "operation": "ScatterPlotItem.paint",
+    "seconds": 0.00019490020349621773
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.00019450020045042038
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0001889001578092575
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0001889001578092575
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00018540024757385254
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00018450012430548668
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00018379976972937584
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00017899973317980766
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00017380015924572945
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00017350027337670326
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0001730998046696186
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0001642000861465931
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00016039982438087463
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00015780003741383553
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000157299917191267
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00015069963410496712
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0001454995945096016
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.00014510005712509155
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00014489982277154922
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.00014219991862773895
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00014120014384388924
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0001400001347064972
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00013959966599941254
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00013830000534653664
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0001372997649013996
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.00013689976185560226
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 0.00013640010729432106
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0001362999901175499
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00013609975576400757
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00013379985466599464
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00013360008597373962
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0001330999657511711
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00013300031423568726
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00013140030205249786
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00012849969789385796
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00012219976633787155
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.000121300108730793
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00012129964306950569
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00011970009654760361
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00011709984391927719
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00011650007218122482
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0001146998256444931
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00011450005695223808
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0001133996993303299
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00011229980736970901
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00011140014976263046
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00011119991540908813
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00011059967800974846
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010990025475621223
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010959990322589874
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010940013453364372
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.0001083998940885067
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010760035365819931
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010709976777434349
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010660011321306229
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010649999603629112
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010439986363053322
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010399986058473587
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010319985449314117
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 0.00010309973731637001
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010300008580088615
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010270019993185997
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010199984535574913
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 0.00010169995948672295
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 9.999983012676239e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.889993816614151e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.889993816614151e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.740004315972328e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.719980880618095e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.700004011392593e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.689992293715477e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.67998057603836e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.660003706812859e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.63001511991024e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.63001511991024e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.63001511991024e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.609991684556007e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.599979966878891e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.559979662299156e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.480025619268417e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.369989857077599e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.34000127017498e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.29003581404686e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.199976921081543e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.139999747276306e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.040022268891335e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.040022268891335e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.030010551214218e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.950009942054749e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.890032768249512e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.729984983801842e-05
+  },
+  {
+    "operation": "MainWindow._audit_record",
+    "seconds": 8.729984983801842e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.71000811457634e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.670007809996605e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.639972656965256e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.579995483160019e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.559972047805786e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.4699597209692e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.409982547163963e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.400017395615578e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.25999304652214e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.110003545880318e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.059991523623466e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 7.970025762915611e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 7.960014045238495e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 7.720012217760086e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 7.499987259507179e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 7.399963214993477e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 7.029995322227478e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 6.880005821585655e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 6.810016930103302e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 6.609968841075897e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 6.309989839792252e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 6.280001252889633e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 6.100023165345192e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 6.0199759900569916e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 5.9499870985746384e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 5.770009011030197e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 5.7499855756759644e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 5.570007488131523e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 5.340017378330231e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 5.300017073750496e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 5.200039595365524e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 5.1999930292367935e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 5.159992724657059e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 5.159992724657059e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 5.119992420077324e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 5.029980093240738e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 4.91999089717865e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 4.900014027953148e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 4.7999899834394455e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 4.79002483189106e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 4.779966548085213e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 4.759989678859711e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 4.700012505054474e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 4.519987851381302e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 4.42001037299633e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 4.409998655319214e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 4.220008850097656e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 4.190020263195038e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 4.039984196424484e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 4.020007327198982e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.910018131136894e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.800028935074806e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 3.769993782043457e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.749970346689224e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 3.6500394344329834e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.590015694499016e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.519980236887932e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.519980236887932e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.439979627728462e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.4300144761800766e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 3.3999793231487274e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.3800024539232254e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.310013562440872e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.3099669963121414e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 3.2899901270866394e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.2899901270866394e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.2899901270866394e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.2700132578611374e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.190012648701668e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.169989213347435e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.1400006264448166e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.1299889087677e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.0899886041879654e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.0899886041879654e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.08002345263958e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.08002345263958e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.079976886510849e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.079976886510849e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.0700117349624634e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.060000017285347e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.0499882996082306e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.0499882996082306e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 3.0199997127056122e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.0199997127056122e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.0199997127056122e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 3.0100345611572266e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.989964559674263e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.989964559674263e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.989964559674263e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.969987690448761e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.969987690448761e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.9600225389003754e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.9600225389003754e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.9599759727716446e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.930033951997757e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.9100105166435242e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.890033647418022e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.890033647418022e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.8899870812892914e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.8699636459350586e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 2.859998494386673e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.859998494386673e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.8499867767095566e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.8399750590324402e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.820044755935669e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.8199981898069382e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.7999747544527054e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.7900096029043198e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 2.7799978852272034e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.7799978852272034e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.7700327336788177e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.750009298324585e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.7399975806474686e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.730032429099083e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.730032429099083e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.7200207114219666e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.71000899374485e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.7099624276161194e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.6999972760677338e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.690032124519348e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.6899855583906174e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.6700086891651154e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.6700086891651154e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.659996971487999e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.6500318199396133e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.6300083845853806e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.619996666908264e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 2.5999732315540314e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 2.5999732315540314e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.5900080800056458e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.5900080800056458e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.5700312107801437e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.569984644651413e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.5600194931030273e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.5400426238775253e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.5399960577487946e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.529984340071678e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.5200191885232925e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.5200191885232925e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 2.4999957531690598e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.4999957531690598e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.4999957531690598e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.490030601620674e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.479972317814827e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.4700071662664413e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.4499837309122086e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.4499837309122086e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.440018579363823e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.440018579363823e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.440018579363823e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.4300068616867065e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.400018274784088e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.400018274784088e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.3900065571069717e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.3900065571069717e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.3900065571069717e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.389959990978241e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.3799948394298553e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.3799948394298553e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.369983121752739e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.369983121752739e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.369983121752739e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.3399945348501205e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.330029383301735e-05
+  },
+  {
+    "operation": "MainWindow._run_event",
+    "seconds": 2.329982817173004e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.3200176656246185e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.310005947947502e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.2999942302703857e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.290029078722e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.2600404918193817e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.259993925690651e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.259993925690651e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.2500287741422653e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.2500287741422653e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.240017056465149e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.239970490336418e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.219993621110916e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.2099819034337997e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.200016751885414e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.200016751885414e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.1999701857566833e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.1900050342082977e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.1799933165311813e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.1700281649827957e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.1600164473056793e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.1600164473056793e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.150004729628563e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.150004729628563e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.1399930119514465e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.1200161427259445e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.110004425048828e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.1000392735004425e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.0800158381462097e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.0800158381462097e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.0800158381462097e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.059992402791977e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.059992402791977e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.059992402791977e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.059992402791977e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.059992402791977e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.059992402791977e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.0499806851148605e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.0300038158893585e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.0300038158893585e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 2.019992098212242e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.9900035113096237e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.9900035113096237e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.9900035113096237e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.9900035113096237e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.950003206729889e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.950003206729889e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.950003206729889e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.949956640601158e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.9400380551815033e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.9399914890527725e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.929979771375656e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.929979771375656e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.9200146198272705e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.9200146198272705e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.9000377506017685e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.890026032924652e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.890026032924652e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.8700025975704193e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.8600374460220337e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.859990879893303e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.840014010667801e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.83996744453907e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.83996744453907e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.8300022929906845e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.819990575313568e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.8100254237651825e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.8099788576364517e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.800013706088066e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.7999671399593353e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.7799902707338333e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.7799902707338333e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.7799902707338333e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.750001683831215e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.730024814605713e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.729978248476982e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.729978248476982e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.690024510025978e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.6899779438972473e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.6600359231233597e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.659989356994629e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.6500242054462433e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.639965921640396e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.619989052414894e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.6100239008665085e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.6099773347377777e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.5900004655122757e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.5900004655122757e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.58003531396389e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.5600118786096573e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.5600118786096573e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.5600118786096573e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.5399884432554245e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.5200115740299225e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.5200115740299225e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.5199650079011917e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.4999881386756897e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.4899764209985733e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.4899764209985733e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.4800112694501877e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.4500226825475693e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.4500226825475693e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.4499761164188385e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.4400109648704529e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.4299992471933365e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.4299992471933365e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.400010660290718e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.400010660290718e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.400010660290718e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.3999640941619873e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.3899989426136017e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.3899989426136017e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.3799872249364853e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.3699755072593689e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.3600103557109833e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.3399869203567505e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.3399869203567505e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.3299752026796341e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.3200100511312485e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.3199634850025177e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.309998333454132e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.309998333454132e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.309998333454132e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.2800097465515137e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.2699980288743973e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.2500211596488953e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.2400094419717789e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.2400094419717789e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.2299977242946625e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.1999625712633133e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.1899974197149277e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.1300202459096909e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.12997367978096e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.1200085282325745e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.0800082236528397e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.0400079190731049e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 1.0100193321704865e-05
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.700190275907516e-06
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.600073099136353e-06
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 9.499955922365189e-06
+  },
+  {
+    "operation": "processEvents",
+    "seconds": 8.500181138515472e-06
+  }
+]

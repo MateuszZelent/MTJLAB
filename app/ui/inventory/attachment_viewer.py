@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+from app.ui.dialogs import StationDialog
+
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
-    QDialog,
     QHBoxLayout,
     QLabel,
     QScrollArea,
     QSizePolicy,
-    QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
@@ -27,7 +27,7 @@ from app.inventory.models import SampleAttachment
 from app.inventory.store import InventoryStore
 
 
-class ImageViewerDialog(QDialog):
+class ImageViewerDialog(StationDialog):
     """High-resolution zoomable viewer for microscope, SEM, and chip layout images."""
 
     def __init__(
@@ -36,7 +36,7 @@ class ImageViewerDialog(QDialog):
         title: str = "Image Preview",
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent, resizable=True)
         self.setWindowTitle(title)
         self.resize(800, 650)
         self.setModal(True)
@@ -44,7 +44,7 @@ class ImageViewerDialog(QDialog):
         self._original_pixmap = QPixmap(str(image_path))
         self._zoom_factor = 1.0
 
-        layout = QVBoxLayout(self)
+        layout = self.modal_content_layout()
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
@@ -132,6 +132,7 @@ class ImageViewerDialog(QDialog):
         scale_h = area_size.height() / max(self._original_pixmap.height(), 1)
         self._zoom_factor = min(scale_w, scale_h, 1.0)
         self._update_display()
+
 
 
 def open_attachment(

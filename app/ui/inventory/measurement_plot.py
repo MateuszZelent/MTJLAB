@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Sequence
+import math
 
 import pyqtgraph as pg
 from app.ui.widgets.plot_ownership import create_plot_widget, own_signal_proxy
@@ -249,7 +250,9 @@ class MeasurementPlotWidget(QWidget):
             symbolBrush=pg.mkBrush(tokens.accent),
             symbolPen=None,
             name=series.y_label,
+            connect="finite",
         )
+        self._preserve_gaps(curve, series)
         self._plot_items.append(curve)
         self.crosshair_x.show()
         self.crosshair_y.show()
@@ -294,12 +297,22 @@ class MeasurementPlotWidget(QWidget):
                 symbolBrush=brush,
                 symbolPen=None,
                 name=name,
+                connect="finite",
             )
+            self._preserve_gaps(curve, s)
             self._plot_items.append(curve)
 
         self.crosshair_x.show()
         self.crosshair_y.show()
         self.reset_view()
+
+    @staticmethod
+    def _preserve_gaps(curve, series: MeasurementSeries) -> None:
+        if any(not math.isfinite(v) for v in series.x_values) or any(
+            not math.isfinite(v) for v in series.y_values
+        ):
+            curve.setDownsampling(ds=1, auto=False)
+            curve.setClipToView(False)
 
     def _on_channel_combo_changed(self, _idx: int) -> None:
         ch = self.channel_combo.currentText()

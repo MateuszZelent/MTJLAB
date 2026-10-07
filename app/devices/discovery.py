@@ -244,11 +244,14 @@ def discover_tcp_endpoints(
         raise ValueError("TCP port must be in 1..65535.")
     if not 0.01 <= timeout_s <= 2.0:
         raise ValueError("TCP scan timeout must be in 0.01..2 seconds.")
-    hosts = tuple(str(host) for host in subnet.hosts())
-    if not hosts:
-        raise ValueError("TCP scan network contains no usable host addresses.")
-    if len(hosts) > max_hosts:
+    if type(max_hosts) is not int or max_hosts < 1:
+        raise ValueError("TCP scan max_hosts must be a positive integer.")
+    # IPv4 /31 and /32 include every address; other prefixes exclude the
+    # network and broadcast addresses. Check the size before enumeration.
+    host_count = subnet.num_addresses if subnet.prefixlen >= 31 else subnet.num_addresses - 2
+    if host_count > max_hosts:
         raise ValueError(f"TCP scan is limited to {max_hosts} hosts; use a narrower subnet.")
+    hosts = tuple(str(host) for host in subnet.hosts())
     return _scan_tcp_hosts(
         hosts, port, timeout_s=timeout_s, connector=connector, verify_moke=verify_moke,
         progress_callback=progress_callback, activity_callback=activity_callback,
@@ -287,6 +290,8 @@ def discover_tcp_ip_range(
     if not 0.01 <= timeout_s <= 2.0:
         raise ValueError("TCP scan timeout must be in 0.01..2 seconds.")
     count = int(last) - int(first) + 1
+    if type(max_hosts) is not int or max_hosts < 1:
+        raise ValueError("TCP scan max_hosts must be a positive integer.")
     if count > max_hosts:
         raise ValueError(f"TCP scan is limited to {max_hosts} hosts; use a narrower range.")
     hosts = tuple(str(ipaddress.IPv4Address(value)) for value in range(int(first), int(last) + 1))

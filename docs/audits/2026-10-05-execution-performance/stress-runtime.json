@@ -1,0 +1,14 @@
+{
+  "stored_points": 1000,
+  "gui_timer_ticks": 5234,
+  "maximum_gui_gap_s": 0.3748182998970151,
+  "maximum_gap_context": {
+    "points": 0,
+    "worker_running": true
+  },
+  "max_tree_update_duration_s": 0.03891750006005168,
+  "max_preview_update_duration_s": 0.02509110001847148,
+  "result_import_pending": true,
+  "result_reader_active": false,
+  "result_path": "C:\\Users\\Shark\\AppData\\Local\\Temp\\pytest-of-Shark\\pytest-439\\test_execution_tree_keeps_qt_e0\\responsiveness\\20261005T171536.381536Z_responsiveness.h5"
+}

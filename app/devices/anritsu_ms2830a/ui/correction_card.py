@@ -591,7 +591,7 @@ class SpectrumCorrectionWorkspace(QWidget):
             self._await_cycle_state()
             return
         self._message("Save accepted. Reading analyzer settings before recording the first sweep…")
-        self._request("read_full_configuration")
+        self._request("read_acquisition_configuration")
 
     def _request(self, operation):
         self._expected_device = operation
@@ -604,12 +604,12 @@ class SpectrumCorrectionWorkspace(QWidget):
             return False
         self._expected_device = None
         try:
-            if operation == "read_full_configuration" and isinstance(result, AnritsuFullConfigurationReadback):
-                self._full = result
-                self._message("Starting recording: reading detector and advanced spectrum settings…")
-                self._request("read_advanced_spectrum")
-            elif operation == "read_advanced_spectrum" and isinstance(result, AdvancedSpectrumSnapshot):
-                self._advanced = result
+            if operation == "read_acquisition_configuration":
+                if (not isinstance(result, tuple) or len(result) != 2
+                        or not isinstance(result[0], AnritsuFullConfigurationReadback)
+                        or not isinstance(result[1], AdvancedSpectrumSnapshot)):
+                    raise ValueError("Invalid analyzer acquisition configuration response.")
+                self._full, self._advanced = result
                 if self._interleaved is not None and self._context is not None and (
                         self._configuration_fingerprint() != self._context.configuration_fingerprint):
                     raise ValueError("Analyzer settings changed between blocks. Start a new archive with matching REF.")
@@ -696,6 +696,12 @@ class SpectrumCorrectionWorkspace(QWidget):
         self._cpu.ingest(envelope, trace)
 
     def _processed(self, operation, result):
+        if self._recording_failed and operation in {
+            "start", "frame", "reference", "snapshot", "operator_state_confirmation", "processing_change",
+        }:
+            # Drain the faulted session's close acknowledgement, but never
+            # publish late results or schedule another instrument request.
+            return
         if operation == "start":
             self._processor_active = True
             self.set_available(self._allowed)
@@ -728,7 +734,7 @@ class SpectrumCorrectionWorkspace(QWidget):
                 self.progress.setValue(min(100, round(100 * elapsed / self._duration_s)))
                 self._message(f"Reference: {result['reference_count']} completed sweeps, {elapsed:.1f} s.")
                 enough = result["reference_count"] >= self._processor_config.minimum_reference_sweeps
-                if (elapsed >= self._duration_s and enough) or (self._stopping and enough):
+                if not self._stopping and elapsed >= self._duration_s and enough:
                     self._cpu.finish_reference()
                     return
             elif not self._stopping:
@@ -753,6 +759,11 @@ class SpectrumCorrectionWorkspace(QWidget):
             else:
                 self._request("single_sweep")
         elif operation == "reference":
+            if self._stopping:
+                # A queued finalization may finish after Cancel. Retain RAW
+                # but do not activate its profile or mark the run completed.
+                self._cpu.stop_session("aborted")
+                return
             self._profile = result
             self._clear_interference_calibrations()
             self._dirty_view = True
@@ -787,7 +798,7 @@ class SpectrumCorrectionWorkspace(QWidget):
             if self._stopping:
                 self._cpu.stop_session("aborted")
             else:
-                self._request("read_full_configuration")
+                self._request("read_acquisition_configuration")
         elif operation == "processing_change" and result == SpectrumDecisionOperation.RESET_SEGMENT.value:
             self._segment_reset_pending = False
             self._signal_segment_index += 1
@@ -814,7 +825,7 @@ class SpectrumCorrectionWorkspace(QWidget):
             self.recording_activity.stop()
             self.recording_activity.hide()
             if not self._recording_failed:
-                self.recording_title.setText("Recording finished")
+                self.recording_title.setText("Recording finished" if succeeded else "Recording stopped")
                 qualification = " Signal absence and uncertainty remain unqualified." if self._kind == "reference" else ""
                 self._message(f"Archive closed. {self._committed_count} raw spectra saved.{qualification}"
                               + (f"\n{self._last_rejection_message}" if self._last_rejection_message else ""))
@@ -959,7 +970,7 @@ class SpectrumCorrectionWorkspace(QWidget):
                 self._cpu.confirm_operator_state(confirmation)
             else:
                 self._initial_confirmation = confirmation
-                self._request("read_full_configuration")
+                self._request("read_acquisition_configuration")
             self.set_available(self._allowed)
         except (ValueError, BufferError) as exc:
             self._failed("interleaved_state", str(exc))
@@ -1062,8 +1073,8 @@ class SpectrumCorrectionWorkspace(QWidget):
         self._cycle_pending = None
         self.confirm_interleaved_state.hide()
         self.stable_state.hide()
-        self._running = False
-        self._stopping = False
+        self._running = operation != "stop"
+        self._stopping = self._running
         self._pending_raw = None
         self.recording_title.setText("Recording failed" if self._committed_count == 0 else "Recording interrupted")
         self.archive_label.setText(f"Requested archive: {self._archive_path} · recording failed")
@@ -1072,10 +1083,11 @@ class SpectrumCorrectionWorkspace(QWidget):
         self.progress.hide()
         self._message(f"Correction {operation} failed: {error}")
         try:
-            self._cpu.stop_session("faulted")
+            if self._running:
+                self._cpu.stop_session("faulted")
         except (ValueError, BufferError):
-            pass
-        self.busy_changed.emit(False)
+            self._running = self._stopping = False
+        self.busy_changed.emit(self._running)
         self.set_available(self._allowed)
         self.recording_finished.emit(self._kind, False)
 

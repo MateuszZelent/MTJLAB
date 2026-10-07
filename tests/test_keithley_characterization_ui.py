@@ -18,8 +18,13 @@ from app.devices.simulators import simulated_station_settings
 from app.settings.models import StationSettings
 from app.ui.dialogs import StationMessageBox
 from app.ui.shell.page_host import FluentPageHost
+from app.ui.shell.main_window import MainWindow
 from app.ui.widgets import LimitField
 from tests.helpers import loaded_settings
+from tests.test_spectrum_correction_controller import wait_until
+from tests.shell_test_isolation import (  # noqa: F401
+    isolated_shell_persistence, shell_qt_application,
+)
 
 
 class KeithleyCharacterizationUiTests(unittest.TestCase):
@@ -49,6 +54,11 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
     def tearDown(self) -> None:
         try:
             if hasattr(self, "page") and self.page is not None:
+                card = self.page.characterization_card
+                if card._output_proof_worker is not None:
+                    card._output_proof_worker.cancelled.set()
+                wait_until(self.app, lambda: card._output_proof_worker is None, timeout=15)
+                wait_until(self.app, lambda: card._single_artifacts_worker is None and card._single_report_worker is None, timeout=15)
                 self.page.deleteLater()
         except RuntimeError:
             pass
@@ -287,12 +297,11 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         self.controller.adapter_for_run.return_value = proxy
 
         card._on_start_clicked()
-        self.app.processEvents()
+        wait_until(self.app, lambda: card._output_proof_worker is None)
         self.assertIn("not connected", card.banner.last_message.lower())
 
     def test_main_window_keithley_characterization_navigation(self) -> None:
         """Verify MainWindow hosts characterization route under apparatus navigation."""
-        from app.ui.shell.main_window import MainWindow
 
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -407,7 +416,6 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
 
     def test_main_window_limit_edit_spec_for_characterization(self) -> None:
         """Verify MainWindow _limit_edit_spec correctly identifies characterization fields."""
-        from app.ui.shell.main_window import MainWindow
 
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -702,7 +710,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
                 )
 
                 card._on_sweep_finished(dataset)
-                self.app.processEvents()
+                wait_until(self.app, lambda: card._single_artifacts_worker is None and card._single_report_worker is None, timeout=15)
 
                 # Verify runs were logged in store
                 runs = store.list_runs_for_sample("RUN-SAMPLE")
@@ -777,7 +785,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
             self.app.processEvents()
 
             card._on_sweep_finished(dataset)
-            self.app.processEvents()
+            wait_until(self.app, lambda: card._single_artifacts_worker is None and card._single_report_worker is None, timeout=15)
 
             self.assertTrue(card.isVisible())
             self.assertGreater(card.geometry().width(), 0)
@@ -857,7 +865,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         self.assertEqual(card.shared_configuration_label.styleSheet(), "")
         self.assertIn("source range 10 mA", card.shared_configuration_label.text())
         self.assertIn("measure V 100 mV", card.shared_configuration_label.text())
-        self.assertIn("measure I 10 mA", card.shared_configuration_label.text())
+        self.assertIn("measure I from source (10 mA)", card.shared_configuration_label.text())
         self.assertIn("2-wire local", card.shared_configuration_label.text())
 
     def test_characterization_blocks_non_stop_policy_from_normal_card(self) -> None:
@@ -941,6 +949,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
             return_value=StationMessageBox.StandardButton.Yes,
         ):
             card._on_start_clicked()
+            wait_until(self.app, lambda: card._output_proof_worker is None)
 
         self.app.processEvents()
         self.assertEqual(card._temporary_policy_phase, "setting")
@@ -971,7 +980,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         ) as worker_type:
             worker = worker_type.return_value
             card._on_start_clicked()
-            self.app.processEvents()
+            wait_until(self.app, lambda: card._output_proof_worker is None)
 
         self.assertEqual(card._temporary_policy_phase, "idle")
         self.assertEqual(
@@ -1110,10 +1119,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         self.assertEqual(cfg.metadata.diameter_nm, 600.0)
         self.assertAlmostEqual(cfg.metadata.junction_area_um2 or 0.0, 0.2827, places=3)
 
-    def test_sense_mode_defaults_to_2wire_and_warns_on_4wire(self) -> None:
-        """Verify 2-wire is default, removed from main cards, and switching to 4-wire in Settings warns."""
-        from unittest.mock import patch
-        from app.ui.dialogs import StationMessageBox
+    def test_sense_mode_is_local_only_and_remote_settings_are_rejected(self) -> None:
         from app.settings.repository import SettingsRepository
         from app.ui.settings_page import SettingsPage
 
@@ -1121,53 +1127,19 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         active_channel = self.page.channel.currentText()
         self.page._compliance_policy[active_channel] = "stop"
         self.page._stop_on_compliance[active_channel] = True
-
-        # 1. Neither KeithleyPage nor CharacterizationCard has a sense_mode combo box
-        self.assertFalse(hasattr(card, "sense_combo"))
-        self.assertFalse(hasattr(self.page, "sense_mode"))
-
-        # 2. 2-wire is default everywhere
         self.assertEqual(card._build_config().sense_mode, "2wire")
-        self.assertTrue(card.sense_warning_label.isHidden())
-
-        # 3. SettingsPage controls 4-wire with safety confirmation
-        repo = SettingsRepository(".config/settings.yml")
-        settings_page = SettingsPage(repo)
+        settings_page = SettingsPage(SettingsRepository(".config/settings.yml"))
         try:
             path = ("devices", "keithley", "safety", "channels", "B", "sense_mode")
-            editor = settings_page._form_editors.get(path)
-            self.assertIsNotNone(editor, "Keithley Channel B sense_mode editor should exist in SettingsPage")
-            idx_4wire = editor.findData("4wire")
-            self.assertGreaterEqual(idx_4wire, 0)
-
-            # Cancel reverts to 2-wire
-            with patch.object(StationMessageBox, "warning", return_value=StationMessageBox.StandardButton.Cancel) as mock_warn:
-                editor.setCurrentIndex(idx_4wire)
-                self.app.processEvents()
-                self.assertTrue(mock_warn.called)
-                self.assertEqual(editor.currentData(), "2wire")
-
-            # Yes accepts 4-wire
-            with patch.object(StationMessageBox, "warning", return_value=StationMessageBox.StandardButton.Yes) as mock_warn:
-                editor.setCurrentIndex(idx_4wire)
-                self.app.processEvents()
-                self.assertTrue(mock_warn.called)
-                self.assertEqual(editor.currentData(), "4wire")
+            editor = settings_page._form_editors[path]
+            self.assertEqual(editor.findData("4wire"), -1)
+            self.assertEqual(editor.currentData(), "2wire")
         finally:
             settings_page.deleteLater()
-
-        # 4. Updating settings to 4-wire updates characterization card
         updated = deepcopy(self.settings.model_dump(mode="python"))
         updated["devices"]["keithley"]["safety"]["channels"]["B"]["sense_mode"] = "4wire"
-        new_settings = StationSettings.model_validate(updated)
-        self.page.set_settings(new_settings)
-        card.channel_combo.setCurrentText("Channel B")
-        self.page._compliance_policy["B"] = "stop"
-        self.page._stop_on_compliance["B"] = True
-        self.app.processEvents()
-
-        self.assertEqual(card._build_config().sense_mode, "4wire")
-        self.assertFalse(card.sense_warning_label.isHidden())
+        with self.assertRaisesRegex(ValueError, "prohibited"):
+            StationSettings.model_validate(updated)
 
     def test_keithley_discrete_hardware_range_comboboxes(self) -> None:
         """Verify range controls use discrete hardware ComboBoxes switching dynamically with mode."""
@@ -1186,14 +1158,14 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         # 2. Current mode: source_range has discrete current ranges
         panel.mode.setCurrentText("current")
         self.app.processEvents()
-        self.assertEqual(panel.form.labelForField(panel.source_range_field).text(), "Current source range")
+        self.assertEqual(panel.advanced_ranges_form.labelForField(panel.source_range_field).text(), "Current source range")
         items = [panel.source_range.itemText(i) for i in range(panel.source_range.count()) if panel.source_range.itemText(i) not in {"AUTO", "Select range"}]
         self.assertEqual(items, list(KEITHLEY_CURRENT_RANGES_TEXT))
 
         # 3. Voltage mode: source_range dynamically switches to discrete voltage ranges
         panel.mode.setCurrentText("voltage")
         self.app.processEvents()
-        self.assertEqual(panel.form.labelForField(panel.source_range_field).text(), "Voltage source range")
+        self.assertEqual(panel.advanced_ranges_form.labelForField(panel.source_range_field).text(), "Voltage source range")
         items_v = [panel.source_range.itemText(i) for i in range(panel.source_range.count()) if panel.source_range.itemText(i) not in {"AUTO", "Select range"}]
         self.assertEqual(items_v, list(KEITHLEY_VOLTAGE_RANGES_TEXT))
 

@@ -437,12 +437,16 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
             self.assertFalse(path.exists())
 
             page.save_manual_spectrum.click()
+            self.assertTrue(wait_for_ui(lambda: page._manual_archive_thread is None, timeout_ms=30_000))
             page._show_trace(second)
             page.save_manual_spectrum.click()
+            self.assertTrue(wait_for_ui(lambda: page._manual_archive_thread is None, timeout_ms=30_000))
 
             self.assertEqual(Hdf5RunReader.summary(path).point_count, 2)
+            self.assertTrue(Hdf5RunReader.detail(path).simulation_metadata["enabled"])
             self.assertEqual(page._manual_save_options, options)
             page.close_manual_archive_session()
+            self.assertTrue(wait_for_ui(lambda: page._manual_archive_thread is None, timeout_ms=30_000))
 
     def test_anritsu_manual_timestamped_save_queues_optional_elab_upload(self) -> None:
         self.window._navigate_to("anritsu")
@@ -476,6 +480,7 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
             page._show_trace(trace)
             page._apply_manual_save_options(options)
             page.save_manual_spectrum.click()
+            self.assertTrue(wait_for_ui(lambda: page._manual_archive_thread is None, timeout_ms=30_000))
 
             self.assertEqual(len(uploaded), 1)
             self.assertTrue(uploaded[0].is_file())
@@ -512,8 +517,10 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
             page._show_trace(trace)
             page._apply_manual_save_options(first_options)
             page.save_manual_spectrum.click()
+            self.assertTrue(wait_for_ui(lambda: page._manual_archive_thread is None, timeout_ms=30_000))
             page._apply_manual_save_options(second_options)
             page.save_manual_spectrum.click()
+            self.assertTrue(wait_for_ui(lambda: page._manual_archive_thread is None, timeout_ms=30_000))
 
             self.assertTrue(second_path.exists(), page.manual_save_status.text())
 
@@ -528,9 +535,11 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
             )
             page._show_trace(incompatible)
             page.save_manual_spectrum.click()
+            self.assertTrue(wait_for_ui(lambda: page._manual_archive_thread is None, timeout_ms=30_000))
             self.assertEqual(page._manual_save_options, second_options)
             self.assertIn("failed", page.manual_save_status.text().lower())
             page.close_manual_archive_session()
+            self.assertTrue(wait_for_ui(lambda: page._manual_archive_thread is None, timeout_ms=30_000))
 
     def test_anritsu_workspace_stacks_without_clipping_at_minimum_window_size(self) -> None:
         self.window.resize(820, 560)

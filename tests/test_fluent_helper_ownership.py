@@ -5,9 +5,31 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 from qfluentwidgets import PopUpAniStackedWidget, ScrollArea, qrouter
 from shiboken6 import isValid
+from shiboken6 import delete
 
 from app.ui.widgets.fluent_ownership import own_fluent_helpers
 from tests.shell_test_isolation import shell_qt_application as shell_qt_application
+
+
+def test_stack_cleanup_when_router_was_destroyed_first(shell_qt_application, monkeypatch):
+    import sys
+    from app.ui.widgets import fluent_ownership
+    router = type(qrouter)()
+    monkeypatch.setattr(fluent_ownership, "qrouter", router)
+    errors = []
+    monkeypatch.setattr(sys, "excepthook", lambda *args: errors.append(args))
+    stack = PopUpAniStackedWidget()
+    page = QWidget(stack)
+    page.setObjectName("test-page")
+    stack.addWidget(page)
+    own_fluent_helpers(stack)
+    router.push(stack, "test-page")
+    delete(router)
+    assert not isValid(router)
+    delete(stack)
+    assert not errors
+    assert not router.history
+    assert not router.stackHistories
 
 
 def test_scroll_and_page_animations_work_and_die_with_their_target(shell_qt_application):

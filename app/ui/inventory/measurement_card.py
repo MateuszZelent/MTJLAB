@@ -232,8 +232,8 @@ class MeasurementAnalyticsCard(SimpleCardWidget):
             self.tile_rap.value_label.setText(_fmt_val(metrics.r_ap, "Ω"))  # type: ignore[attr-defined]
             self.tile_tmr.value_label.setText(f"{metrics.tmr_percent:.1f} %" if metrics.tmr_percent is not None else "—")  # type: ignore[attr-defined]
             self.tile_ra.value_label.setText(f"{metrics.ra_product:.2f} Ω·µm²" if metrics.ra_product is not None else "—")  # type: ignore[attr-defined]
-            self.tile_hc.value_label.setText(f"{metrics.h_coercive:.2f} Oe" if metrics.h_coercive is not None else "—")  # type: ignore[attr-defined]
-            self.tile_hoff.value_label.setText(f"{metrics.h_offset:.2f} Oe" if metrics.h_offset is not None else "—")  # type: ignore[attr-defined]
+            self.tile_hc.value_label.setText(metrics.format_field(metrics.h_coercive))  # type: ignore[attr-defined]
+            self.tile_hoff.value_label.setText(metrics.format_field(metrics.h_offset))  # type: ignore[attr-defined]
         else:
             for tile in (self.tile_rp, self.tile_rap, self.tile_tmr, self.tile_ra, self.tile_hc, self.tile_hoff):
                 tile.value_label.setText("—")  # type: ignore[attr-defined]

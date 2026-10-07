@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 from app.domain.errors import ExecutionError
-from app.storage.pythat_bridge import open_measurement_tree
+from app.storage.pythat_bridge import inspect_measurement_tree
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,11 +74,23 @@ class ThatecCompatibilityValidator:
             return self._report(target, errors, warnings)
 
         with handle as h5:
-            self._validate_root(h5, errors)
-            self._validate_required_tables(h5, errors)
-            self._validate_devices(h5, errors, warnings)
-            self._validate_scan_and_measurement(h5, errors, warnings)
-            self._validate_private_run_state(h5, errors)
+            # A malformed dataset/group/attribute is an invalid archive, not
+            # a reason to escape without a validation report. Continue the
+            # independent sections so one corrupt object does not hide others.
+            checks = (
+                ("/", self._validate_root, (h5, errors)),
+                ("/", self._validate_required_tables, (h5, errors)),
+                ("/devices", self._validate_devices, (h5, errors, warnings)),
+                ("/scan_definition", self._validate_scan_and_measurement, (h5, errors, warnings)),
+                ("/run", self._validate_private_run_state, (h5, errors)),
+            )
+            for section, check, arguments in checks:
+                try:
+                    check(*arguments)
+                except (TypeError, ValueError, KeyError, AttributeError, IndexError, OSError, OverflowError) as exc:
+                    errors.append(CompatibilityIssue(
+                        section, f"cannot validate malformed structure ({type(exc).__name__}): {exc}"
+                    ))
 
         if require_pythat and not errors:
             try:
@@ -94,9 +106,7 @@ class ThatecCompatibilityValidator:
                             f"version {pythat_version!r} is not qualified; expected {qualified!r}",
                         )
                     )
-                tree = open_measurement_tree(target)
-                dimensions = tuple((str(name), int(size)) for name, size in tree.dataset.sizes.items())
-                data_variables = tuple(str(name) for name in tree.dataset.data_vars)
+                dimensions, data_variables = inspect_measurement_tree(target)
             except ExecutionError as exc:
                 errors.append(CompatibilityIssue("PyThat", f"round-trip failed: {exc}"))
             except Exception as exc:
@@ -123,7 +133,8 @@ class ThatecCompatibilityValidator:
                 )
             )
         if target.is_file():
-            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            with target.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
             if digest.lower() != str(golden["sha256"]).lower():
                 errors.append(CompatibilityIssue("/", "golden SHA-256 differs from manifest"))
             try:
@@ -165,8 +176,10 @@ class ThatecCompatibilityValidator:
             value = h5.attrs[name]
             if rule["kind"] == "integer" and not isinstance(value, (int, np.integer)):
                 errors.append(CompatibilityIssue("/", f"attribute {name!r} is not integer"))
+                continue
             if rule["kind"] == "string" and not isinstance(value, (str, bytes)):
                 errors.append(CompatibilityIssue("/", f"attribute {name!r} is not text"))
+                continue
             if "allowed" in rule and int(value) not in rule["allowed"]:
                 errors.append(CompatibilityIssue("/", f"attribute {name!r} has invalid value {value!r}"))
         for group in self.manifest["required_groups"]:
@@ -330,6 +343,11 @@ class ThatecCompatibilityValidator:
         status = h5["run"].attrs.get("status")
         if isinstance(status, bytes):
             status = status.decode("utf-8", errors="replace")
+        if "events" in h5 and status in {"completed", "aborted", "faulted"}:
+            from app.storage.event_log import EVENT_COLUMNS, committed_event_count
+            count = committed_event_count(h5["events"])
+            if any(len(h5["events"][column]) != count for column in EVENT_COLUMNS):
+                errors.append(CompatibilityIssue("/events", "closed archive contains an uncommitted event tail"))
         if status in {"completed", "aborted", "faulted"} and int(
             h5.attrs.get("measurement running", 1)
         ) != 0:

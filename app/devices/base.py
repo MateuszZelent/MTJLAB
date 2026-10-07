@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 import math
+import time
 from typing import Protocol, runtime_checkable
 
 from app.domain.errors import ConnectionError, SafetyViolation
@@ -37,6 +38,35 @@ class InstrumentSession(Protocol):
 @runtime_checkable
 class SessionFactory(Protocol):
     def open(self, resource: str, backend: str, timeout_ms: int) -> InstrumentSession: ...
+
+
+class _DeadlineSession:
+    """Owner-thread view that caps each VISA call by one absolute deadline."""
+
+    def __init__(self, session, deadline):
+        object.__setattr__(self, "_session", session)
+        object.__setattr__(self, "_deadline", deadline)
+
+    def __getattr__(self, name):
+        member = getattr(self._session, name)
+        if name not in {"write", "query", "query_binary_values", "read", "read_raw",
+                        "read_bytes", "write_raw", "query_ascii_values"}:
+            return member
+
+        def call(*args, **kwargs):
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Operation deadline expired before VISA dispatch.")
+            previous = self._session.timeout
+            self._session.timeout = min(previous, max(1, math.ceil(remaining * 1000)))
+            try:
+                return member(*args, **kwargs)
+            finally:
+                self._session.timeout = previous
+        return call
+
+    def __setattr__(self, name, value):
+        setattr(self._session, name, value)
 
 
 class OutputInterlock:
@@ -158,6 +188,46 @@ class DeviceAdapter(ABC):
         return set() if previous == updated else {prefix}
 
     @contextmanager
+    def operation_timeout(self, duration_s: float):
+        """Bound successive VISA calls; non-VISA transports own their deadlines.
+
+        A backend must honor its I/O timeout. This cannot interrupt Python work
+        or a driver that ignores timeout, and must run in the session owner.
+        """
+        if not math.isfinite(duration_s) or duration_s <= 0:
+            raise ValueError("Operation duration must be finite and positive.")
+        session = getattr(self, "_session", None)
+        previous = getattr(self, "_operation_deadline", None)
+        deadline = time.monotonic() + duration_s
+        deadline = deadline if previous is None else min(previous, deadline)
+        self._operation_deadline = deadline
+        if session is not None:
+            self._session = _DeadlineSession(session, deadline)
+        try:
+            yield
+        finally:
+            current = getattr(self, "_session", None)
+            if isinstance(current, _DeadlineSession) and current._deadline == deadline:
+                self._session = current._session
+            self._operation_deadline = previous
+
+    def _open_session(self, factory, resource: str, backend: str, timeout_ms: int):
+        """Open and qualify a new session within an enclosing operation budget."""
+        deadline = getattr(self, "_operation_deadline", None)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Operation deadline expired before opening VISA session.")
+            timeout_ms = min(timeout_ms, max(1, math.ceil(remaining * 1000)))
+        session = factory.open(resource, backend, timeout_ms)
+        if deadline is None:
+            return session
+        if time.monotonic() >= deadline:
+            session.close()
+            raise TimeoutError("Opening VISA session exceeded operation deadline.")
+        return _DeadlineSession(session, deadline)
+
+    @contextmanager
     def io_timeout(self, timeout_s: float):
         """Temporarily cap VISA I/O latency for one high-level operation.
 
@@ -190,10 +260,13 @@ class DeviceAdapter(ABC):
         """Close an instrument session."""
 
     @abstractmethod
-    def emergency_off(self) -> None:
+    def emergency_off(self) -> bool | None:
         """Best-effort, idempotent shutdown.
 
         A transport failure must leave the adapter in ``UNKNOWN`` rather than
         falsely reporting an output-off state.  The method remains
         non-throwing so all other devices still receive their shutdown action.
+        True explicitly confirms shutdown; False reports missing confirmation.
+        Legacy implementations returning None must expose OUTPUT_OFF as their
+        aggregate state. VERIFIED alone never proves that outputs are OFF.
         """

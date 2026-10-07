@@ -12,6 +12,13 @@ from app.safety.rigol_current import quantize_rigol_voltage
 from tests.helpers import simulation_settings
 
 
+def voltage_precision_settings():
+    from app.settings.models import StationSettings
+    raw = simulation_settings().model_dump(mode="python")
+    raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]["measured_current_trip"]["min"] = "-2 mA"
+    return StationSettings.model_validate(raw)
+
+
 class InstrumentPrecisionTests(unittest.TestCase):
     def test_documented_resolution_rounds_long_sweep_values(self) -> None:
         long_value = 0.01111111111111111111111111111111
@@ -54,7 +61,7 @@ class InstrumentPrecisionTests(unittest.TestCase):
     def test_keithley_sweep_level_is_quantized_before_tsp_write(self) -> None:
         session = KeithleySimulator()
         adapter = KeithleyAdapter(
-            simulation_settings(),
+            voltage_precision_settings(),
             session_factory=FakeVisaSessionFactory(session),
         )
         adapter.connect()
@@ -64,6 +71,7 @@ class InstrumentPrecisionTests(unittest.TestCase):
                 mode="voltage",
                 level_si=0.01,
                 compliance_si=0.001,
+                source_range_si=0.1,
             )
         )
 
@@ -112,7 +120,7 @@ class InstrumentPrecisionTests(unittest.TestCase):
     def test_keithley_quantized_duplicate_level_skips_second_tsp_write(self) -> None:
         session = KeithleySimulator()
         adapter = KeithleyAdapter(
-            simulation_settings(),
+            voltage_precision_settings(),
             session_factory=FakeVisaSessionFactory(session),
         )
         adapter.connect()
@@ -122,6 +130,7 @@ class InstrumentPrecisionTests(unittest.TestCase):
                 mode="voltage",
                 level_si=0.01,
                 compliance_si=0.001,
+                source_range_si=0.1,
             )
         )
         initial_writes = session.commands.count("smub.source.levelv = 0.01")

@@ -297,3 +297,33 @@ def test_correction_filter_and_plot_settings_are_separate_rendered_blocks(shared
     page._scale_dialog.close()
     QTest.qWait(60)
     assert page.grab().save(str(directory / f"page-{theme}-{size[0]}.png"))
+
+
+@pytest.mark.parametrize("size", [(1500, 900), (820, 560)])
+def test_configure_reference_mouse_click_opens_visible_dialog(shared_page, size):
+    from PySide6.QtCore import Qt
+    app, page, _, _, _, _, requests, _ = shared_page
+    page.resize(*size)
+    page.show()
+    QTest.qWait(80)
+    if page.compact_plot_settings.isVisible():
+        QTest.mouseClick(page.compact_plot_settings, Qt.MouseButton.LeftButton)
+        QTest.qWait(50)
+    button = page.correction_controls.configure_reference
+    assert button.isVisible() and button.isEnabled()
+    requests.clear()
+    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    QTest.qWait(80)
+    assert page.reference_dialog.isVisible()
+    assert not page.reference_dialog.isMinimized()
+    assert page.reference_status.isVisibleTo(page.reference_dialog)
+    assert page.load_reference.isVisibleTo(page.reference_dialog)
+    assert page.reference_dialog.width() >= 420
+    assert not requests
+    page.reference_dialog.showMinimized()
+    app.processEvents()
+    assert page.reference_dialog.isMinimized()
+    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    QTest.qWait(80)
+    assert not page.reference_dialog.isMinimized()
+    page.reference_dialog.close()

@@ -1,8 +1,8 @@
 """Private raw recipe sweeps committed independently of averaged checkpoints."""
 
-from dataclasses import fields
 import hashlib
 import json
+from dataclasses import fields
 
 import h5py
 import numpy as np
@@ -10,7 +10,6 @@ import numpy as np
 from app.domain.errors import ExecutionError
 from app.domain.recipe_spectrum import MAX_RECIPE_SWEEP_JSON_BYTES, RecipeSpectrumSweep
 from app.domain.spectrum_correction import SpectrumFrameRole, SweepEvidence
-
 
 ROOT = "recipe_raw_sweeps_v1"
 GRID_ROOT = "recipe_raw_grids_v1"
@@ -35,7 +34,7 @@ def _identity(text, record):
 
 
 def append_recipe_sweep(writer, record):
-    if writer._closed or not isinstance(record, RecipeSpectrumSweep):
+    if writer._closed or getattr(writer, "_storage_faulted", False) or not isinstance(record, RecipeSpectrumSweep):
         raise ExecutionError("Recipe raw sweep requires an immutable source record and an open archive.")
     root = writer._file.get(ROOT)
     if root is not None and root.attrs.get("schema") != SCHEMA:
@@ -73,16 +72,25 @@ def append_recipe_sweep(writer, record):
         writer._file.move(f"_pending/{pending_name}", f"{ROOT}/{ordinal}")
         writer._file.flush()
     except Exception as exc:
-        if pending_name in writer._pending:
-            del writer._pending[pending_name]
-        if pending_grid in writer._pending:
-            del writer._pending[pending_grid]
-        writer._file.flush()
-        raise ExecutionError(f"Could not commit recipe raw sweep: {exc}") from exc
+        rollback_errors = []
+        for container, name in ((writer._pending, pending_name), (writer._pending, pending_grid), (root, str(ordinal))):
+            try:
+                if name in container:
+                    del container[name]
+            except Exception as rollback_error:
+                rollback_errors.append(str(rollback_error))
+        try:
+            writer._file.flush()
+        except Exception as rollback_error:
+            rollback_errors.append(str(rollback_error))
+        if rollback_errors:
+            writer._storage_faulted = True
+        detail = "; rollback: " + "; ".join(rollback_errors) if rollback_errors else ""
+        raise ExecutionError(f"Could not commit recipe raw sweep: {exc}{detail}") from exc
     return ordinal
 
 
-def iter_recipe_sweeps(file):
+def iter_recipe_sweeps(file, *, selected_indices=None):
     if ROOT not in file:
         return
     root = file[ROOT]
@@ -117,9 +125,15 @@ def iter_recipe_sweeps(file):
                 if (not isinstance(axis, h5py.Dataset) or axis.ndim != 1 or axis.dtype.kind not in "fiu"
                         or not 2 <= axis.shape[0] <= 1048576 or axis.attrs.get("unit") != unit):
                     raise ExecutionError("Recipe raw sweep requires bounded arrays with explicit Hz/dBm units.")
+            if selected_indices is not None and ordinal not in selected_indices:
+                boundaries[execution] = point
+                continue
             metadata["role"] = SpectrumFrameRole(metadata["role"])
             metadata["evidence"] = SweepEvidence(metadata["evidence"])
             metadata["setpoints_si"] = tuple(tuple(pair) for pair in metadata["setpoints_si"])
+            for key in ("requested_setpoints_si", "applied_setpoints_si", "readback_setpoints_si", "safety_measurements_si"):
+                if key in metadata:
+                    metadata[key] = tuple(tuple(pair) for pair in metadata[key])
             record = RecipeSpectrumSweep(group["frequency_hz"][:], group["power_dbm"][:], **metadata)
             if _identity(text, record) != group.attrs["sha256"]:
                 raise ExecutionError("Recipe raw sweep content identity is corrupted.")

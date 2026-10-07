@@ -1,6 +1,7 @@
 """Persistence isolation for shown-window tests; the actual shell is unchanged."""
 
 from pathlib import Path
+import time
 
 import pytest
 from PySide6.QtCore import QEvent, QSettings
@@ -24,6 +25,9 @@ def shell_qt_application():
 @pytest.fixture(autouse=True)
 def isolated_shell_persistence(tmp_path, monkeypatch, request):
     from app.ui.shell import MainWindow
+    if not hasattr(request.module, "MainWindow"):
+        yield
+        return
     windows = []
 
     def preferences(*_args):
@@ -54,6 +58,11 @@ def isolated_shell_persistence(tmp_path, monkeypatch, request):
     yield
     for window in windows:
         if isValid(window):
+            window.recipe_page._close_discard_confirmed = True
+            deadline = time.monotonic() + 30
+            while not window.anritsu_page.prepare_manual_archive_shutdown() and time.monotonic() < deadline:
+                QApplication.processEvents()
+                time.sleep(.005)
             assert window.close(), "Test shell still has an active shutdown task"
             window.deleteLater()
     application = QApplication.instance()

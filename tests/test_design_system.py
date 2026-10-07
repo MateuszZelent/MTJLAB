@@ -71,9 +71,23 @@ class ThemeBridgeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication([])
+        from app.ui.design_system.fluent_theme import configure_widget_style
+        configure_widget_style(cls.application)
 
     def setUp(self) -> None:
         self.application.setProperty("stationAppliedTheme", None)
+
+    def test_base_style_is_not_replaced_after_controls_exist(self) -> None:
+        from app.ui.design_system.fluent_theme import configure_widget_style
+        button = PrimaryPushButton("Existing control")
+        try:
+            with patch.object(self.application, "setStyle") as replace_style:
+                configure_widget_style(self.application)
+                apply_application_theme(self.application, "light")
+                apply_application_theme(self.application, "dark")
+            replace_style.assert_not_called()
+        finally:
+            button.deleteLater()
 
     def test_theme_bridge_never_repolishes_the_application_stylesheet(self) -> None:
         with (

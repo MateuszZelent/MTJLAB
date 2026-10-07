@@ -1,0 +1,13 @@
+{
+  "python": "3.14.6 | packaged by Anaconda, Inc. | (main, Jun 18 2026, 21:18:42) [MSC v.1942 64 bit (AMD64)]",
+  "platform": "Windows-10-10.0.17763-SP0",
+  "packages": {
+    "PySide6": "6.11.1",
+    "PySide6-Fluent-Widgets": "1.11.2",
+    "numpy": "2.5.1",
+    "h5py": "3.16.0",
+    "pytest": "9.1.1",
+    "pyqtgraph": "0.13.7",
+    "pydantic": "2.13.4"
+  }
+}

@@ -1,0 +1,578 @@
+[
+  {
+    "object": "GraphicsScene",
+    "parents": [
+      "PlotWidget:",
+      "SpectrumPlotWidget:spectrumPlot",
+      "QSplitter:executionMonitorSplitter",
+      "CardWidget:executionWorkspaceCard",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "MetaCall",
+    "seconds": 0.1640769001096487
+  },
+  {
+    "object": "MainWindow",
+    "parents": [
+      "MainWindow:"
+    ],
+    "event": "UpdateRequest",
+    "seconds": 0.1079991003498435
+  },
+  {
+    "object": "GraphicsScene",
+    "parents": [
+      "PlotWidget:",
+      "SpectrumPlotWidget:spectrumPlot",
+      "QSplitter:executionMonitorSplitter",
+      "CardWidget:executionWorkspaceCard",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "MetaCall",
+    "seconds": 0.09534090012311935
+  },
+  {
+    "object": "MainWindow",
+    "parents": [
+      "MainWindow:"
+    ],
+    "event": "UpdateRequest",
+    "seconds": 0.09430939983576536
+  },
+  {
+    "object": "RunMonitorPage",
+    "parents": [
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "LayoutRequest",
+    "seconds": 0.08031659992411733
+  },
+  {
+    "object": "QTimer",
+    "parents": [
+      "QTimer:",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "Timer",
+    "seconds": 0.07679360033944249
+  },
+  {
+    "object": "GraphicsScene",
+    "parents": [
+      "PlotWidget:",
+      "SpectrumPlotWidget:spectrumPlot",
+      "QSplitter:executionMonitorSplitter",
+      "CardWidget:executionWorkspaceCard",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "MetaCall",
+    "seconds": 0.06543159997090697
+  },
+  {
+    "object": "MainWindow",
+    "parents": [
+      "MainWindow:"
+    ],
+    "event": "UpdateRequest",
+    "seconds": 0.0640353998169303
+  },
+  {
+    "object": "GraphicsScene",
+    "parents": [
+      "PlotWidget:",
+      "ExecutionPlanTimeline:",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "MetaCall",
+    "seconds": 0.060722900088876486
+  },
+  {
+    "object": "MainWindow",
+    "parents": [
+      "MainWindow:"
+    ],
+    "event": "UpdateRequest",
+    "seconds": 0.060666900128126144
+  },
+  {
+    "object": "GraphicsScene",
+    "parents": [
+      "PlotWidget:",
+      "ExecutionPlanTimeline:",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "MetaCall",
+    "seconds": 0.05723020015284419
+  },
+  {
+    "object": "MainWindow",
+    "parents": [
+      "MainWindow:"
+    ],
+    "event": "UpdateRequest",
+    "seconds": 0.05624510021880269
+  },
+  {
+    "object": "ExecutionPlanTimeline",
+    "parents": [
+      "ExecutionPlanTimeline:",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "Polish",
+    "seconds": 0.04191099992021918
+  },
+  {
+    "object": "QWidget",
+    "parents": [
+      "QWidget:qt_scrollarea_viewport",
+      "MeasurementTreeView:executionMeasurementTree",
+      "QSplitter:",
+      "QSplitter:executionMonitorSplitter",
+      "CardWidget:executionWorkspaceCard",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "Paint",
+    "seconds": 0.03929730039089918
+  },
+  {
+    "object": "MainWindow",
+    "parents": [
+      "MainWindow:"
+    ],
+    "event": "WindowDeactivate",
+    "seconds": 0.03438879968598485
+  },
+  {
+    "object": "MainWindow",
+    "parents": [
+      "MainWindow:"
+    ],
+    "event": "UpdateRequest",
+    "seconds": 0.032837700098752975
+  },
+  {
+    "object": "QWidget",
+    "parents": [
+      "QWidget:qt_scrollarea_viewport",
+      "MeasurementTreeView:executionMeasurementTree",
+      "QSplitter:",
+      "QSplitter:executionMonitorSplitter",
+      "CardWidget:executionWorkspaceCard",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "Paint",
+    "seconds": 0.0309540000744164
+  },
+  {
+    "object": "QWidget",
+    "parents": [
+      "QWidget:qt_scrollarea_viewport",
+      "MeasurementTreeView:executionMeasurementTree",
+      "QSplitter:",
+      "QSplitter:executionMonitorSplitter",
+      "CardWidget:executionWorkspaceCard",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "Paint",
+    "seconds": 0.029285899829119444
+  },
+  {
+    "object": "QWidget",
+    "parents": [
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "WindowDeactivate",
+    "seconds": 0.027151400223374367
+  },
+  {
+    "object": "QSplitter",
+    "parents": [
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "WindowDeactivate",
+    "seconds": 0.0258222003467381
+  },
+  {
+    "object": "StackedWidget",
+    "parents": [
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "WindowDeactivate",
+    "seconds": 0.025499299634248018
+  },
+  {
+    "object": "PopUpAniStackedWidget",
+    "parents": [
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "WindowDeactivate",
+    "seconds": 0.025462099816650152
+  },
+  {
+    "object": "FluentPageHost",
+    "parents": [
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "WindowDeactivate",
+    "seconds": 0.025417400058358908
+  },
+  {
+    "object": "ScrollArea",
+    "parents": [
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "WindowDeactivate",
+    "seconds": 0.02534310007467866
+  },
+  {
+    "object": "MainWindow",
+    "parents": [
+      "MainWindow:"
+    ],
+    "event": "UpdateRequest",
+    "seconds": 0.0251226001419127
+  },
+  {
+    "object": "QWidget",
+    "parents": [
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "WindowDeactivate",
+    "seconds": 0.024313200265169144
+  },
+  {
+    "object": "RunMonitorPage",
+    "parents": [
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "WindowDeactivate",
+    "seconds": 0.024188500363379717
+  },
+  {
+    "object": "QWidget",
+    "parents": [
+      "QWidget:qt_scrollarea_viewport",
+      "MeasurementTreeView:executionMeasurementTree",
+      "QSplitter:",
+      "QSplitter:executionMonitorSplitter",
+      "CardWidget:executionWorkspaceCard",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "Paint",
+    "seconds": 0.02364009991288185
+  },
+  {
+    "object": "QTimer",
+    "parents": [
+      "QTimer:",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "Timer",
+    "seconds": 0.023210900370031595
+  },
+  {
+    "object": "QWidget",
+    "parents": [
+      "QWidget:",
+      "PlotWidget:",
+      "SpectrumPlotWidget:spectrumPlot",
+      "QSplitter:executionMonitorSplitter",
+      "CardWidget:executionWorkspaceCard",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "Paint",
+    "seconds": 0.022613000124692917
+  },
+  {
+    "object": "ExecutionPlanTimeline",
+    "parents": [
+      "ExecutionPlanTimeline:",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "Show",
+    "seconds": 0.020907599944621325
+  },
+  {
+    "object": "QWidget",
+    "parents": [
+      "QWidget:qt_scrollarea_viewport",
+      "MeasurementTreeView:executionMeasurementTree",
+      "QSplitter:",
+      "QSplitter:executionMonitorSplitter",
+      "CardWidget:executionWorkspaceCard",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "Paint",
+    "seconds": 0.020099999848753214
+  },
+  {
+    "object": "GraphicsScene",
+    "parents": [
+      "PlotWidget:",
+      "SpectrumPlotWidget:spectrumPlot",
+      "QSplitter:executionMonitorSplitter",
+      "CardWidget:executionWorkspaceCard",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "MetaCall",
+    "seconds": 0.01990860002115369
+  },
+  {
+    "object": "MainWindow",
+    "parents": [
+      "MainWindow:"
+    ],
+    "event": "UpdateRequest",
+    "seconds": 0.017923399806022644
+  },
+  {
+    "object": "QWidget",
+    "parents": [
+      "QWidget:",
+      "PlotWidget:",
+      "SpectrumPlotWidget:spectrumPlot",
+      "QSplitter:executionMonitorSplitter",
+      "CardWidget:executionWorkspaceCard",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "Paint",
+    "seconds": 0.017027100082486868
+  },
+  {
+    "object": "QWidget",
+    "parents": [
+      "QWidget:qt_scrollarea_viewport",
+      "MeasurementTreeView:executionMeasurementTree",
+      "QSplitter:",
+      "QSplitter:executionMonitorSplitter",
+      "CardWidget:executionWorkspaceCard",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "Paint",
+    "seconds": 0.016837900038808584
+  },
+  {
+    "object": "RunController",
+    "parents": [
+      "RunController:",
+      "MainWindow:"
+    ],
+    "event": "MetaCall",
+    "seconds": 0.01622570026665926
+  },
+  {
+    "object": "RunController",
+    "parents": [
+      "RunController:",
+      "MainWindow:"
+    ],
+    "event": "MetaCall",
+    "seconds": 0.015224599745124578
+  },
+  {
+    "object": "GraphicsScene",
+    "parents": [
+      "PlotWidget:",
+      "ExecutionPlanTimeline:",
+      "RunMonitorPage:",
+      "QWidget:qt_scrollarea_viewport",
+      "ScrollArea:",
+      "FluentPageHost:executionPageHost",
+      "PopUpAniStackedWidget:",
+      "StackedWidget:fluentApplicationStack",
+      "QSplitter:fluentShellSplitter",
+      "QWidget:fluentShellContent",
+      "MainWindow:"
+    ],
+    "event": "MetaCall",
+    "seconds": 0.015023399610072374
+  }
+]

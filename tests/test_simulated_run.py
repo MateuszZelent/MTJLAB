@@ -73,6 +73,7 @@ root:
       mode: current
       level: "200 uA"
       compliance: "100 mV"
+      source_range: "1 mA"
     - id: rigol-on-in-tree
       type: set_rigol_output
       channel: 1

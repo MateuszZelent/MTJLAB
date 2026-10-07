@@ -19,12 +19,14 @@ class ExecutionPolicy:
     retry_backoff_s: float = 0.25
     heartbeat_interval_s: float = 1.0
     watchdog_grace_s: float = 0.5
+    shutdown_timeout_s: float = 60.0
 
     def __post_init__(self) -> None:
         positive = {
             "command_timeout_s": self.command_timeout_s,
             "acquisition_timeout_s": self.acquisition_timeout_s,
             "heartbeat_interval_s": self.heartbeat_interval_s,
+            "shutdown_timeout_s": self.shutdown_timeout_s,
         }
         for name, value in positive.items():
             if not math.isfinite(value) or value <= 0:
@@ -33,13 +35,16 @@ class ExecutionPolicy:
             raise ConfigurationError("retry_backoff_s must be finite and non-negative.")
         if not math.isfinite(self.watchdog_grace_s) or self.watchdog_grace_s < 0:
             raise ConfigurationError("watchdog_grace_s must be finite and non-negative.")
-        if not 0 <= self.retry_count <= 5:
+        if type(self.retry_count) is not int or not 0 <= self.retry_count <= 5:
             raise ConfigurationError("retry_count must be in the range 0..5.")
 
     @classmethod
     def from_settings(cls, settings: StationSettings) -> "ExecutionPolicy":
         execution = settings.execution
         return cls(
+            shutdown_timeout_s=parse_quantity(
+                execution.get("shutdown_timeout", "60 s"), DIMENSION_TIME
+            ).si_value,
             command_timeout_s=parse_quantity(
                 execution.get("command_timeout", "5 s"), DIMENSION_TIME
             ).si_value,
@@ -47,7 +52,7 @@ class ExecutionPolicy:
                 settings.anritsu.acquisition.operation_complete_timeout,
                 DIMENSION_TIME,
             ).si_value,
-            retry_count=int(execution.get("retry_count", 1)),
+            retry_count=execution.get("retry_count", 1),
             retry_backoff_s=parse_quantity(
                 execution.get("retry_backoff", "250 ms"), DIMENSION_TIME
             ).si_value,
@@ -72,7 +77,20 @@ class ExecutionPolicy:
             average_count = 1 if action.payload.get("source_file") else int(action.payload.get("average_count", 1))
             return (
                 average_count * self.acquisition_timeout_s
+                + float(action.payload.get("minimum_duration_s", 0.0))
+                + max(0, average_count - 1) * float(action.payload.get("inter_sweep_delay_s", 0.0))
                 + self.command_timeout_s
                 + self.watchdog_grace_s
             )
         return self.command_timeout_s + self.watchdog_grace_s
+
+    @staticmethod
+    def retry_candidate(action: PlanAction) -> bool:
+        """Static upper bound; the runner additionally checks live output state."""
+        if action.kind in {"set_rigol_output", "set_keithley_output", "set_anritsu_sg_output"}:
+            return not bool(action.payload["enabled"])
+        return action.kind in {
+            "configure_rigol", "configure_rigol_output", "configure_keithley",
+            "configure_anritsu", "configure_anritsu_advanced", "configure_anritsu_sg",
+            "measure_keithley", "acquire_reference", "acquire_spectrum", "ramp_keithley_to_zero",
+        }

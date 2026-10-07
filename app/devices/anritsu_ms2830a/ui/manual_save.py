@@ -203,7 +203,8 @@ class ManualSpectrumSaveDialog(StationDialog):
                         and value.key in selected_metadata_keys
                     )
                 )
-                check.setToolTip(f"{value.source} · {value.key}")
+                recorded = value.recorded_at_utc.isoformat() if value.recorded_at_utc is not None else "unknown"
+                check.setToolTip(f"{value.source} · {value.key}\nReadback timestamp: {recorded}")
                 value_label = CaptionLabel(
                     f"{value.display_value}  ·  {value.device}", values_host
                 )

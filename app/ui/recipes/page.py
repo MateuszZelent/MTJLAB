@@ -303,6 +303,7 @@ class RecipePage(QWidget):
     settings_issue_requested = Signal(object)
     operator_row_role = int(Qt.ItemDataRole.UserRole) + 17
     _FINALLY_ACTION_TYPES = {
+        "final_state",
         "stop_moke_voltage",
         "ramp_keithley_to_zero",
         "set_keithley_output",
@@ -332,6 +333,8 @@ class RecipePage(QWidget):
             or (settings.moke_box.endpoint or "").startswith("SIM::MOKE")
         )
         qualified_moke_target = f"moke_box.vout{settings.moke_box.voltage_control.channel}.voltage"
+        qualified_moke_targets = {qualified_moke_target, *(f"moke_box.vout{profile.channel}.voltage"
+            for profile in settings.moke_box.channel_profiles.values() if profile.approved)}
         self._recipe_parameter_definitions = tuple(
             item for item in self._recipe_parameter_definitions
             if not item["target"].startswith("moke_box.")
@@ -339,7 +342,7 @@ class RecipePage(QWidget):
         if moke_control_available:
             self._recipe_parameter_definitions += tuple(
                 item for item in self._device_registry.get("moke_box").recipe_extension.parameter_definitions
-                if item["target"] == qualified_moke_target
+                if item["target"] in qualified_moke_targets
             )
         self._settings = settings
         self._keithley_snapshot_provider = None
@@ -356,6 +359,8 @@ class RecipePage(QWidget):
         self._preflight_worker: RecipePreflightWorker | None = None
         self._preflight_source: str | None = None
         self._preflight_outputs_forced_off: bool | None = None
+        self._settings_generation = 0
+        self._preflight_settings_generation: int | None = None
         self._repository = RecipeRepository()
         self._loading_source = False
         # ``_tree_source`` is the only source represented by the visible tree.
@@ -448,9 +453,10 @@ class RecipePage(QWidget):
         )
         self.execution_mode.setMinimumWidth(260)
         self.execution_mode.setToolTip(
-            "Dry run sends configurations and every sweep setpoint to real devices, "
-            "acquires and stores Anritsu spectra, but replaces every OUTPUT ON with "
-            "confirmed OUTPUT OFF."
+            "Dry run programs Keithley, Rigol and Anritsu settings and records spectra "
+            "with their outputs OFF. MOKE DAC writes are skipped because VOUT is itself "
+            "an active output; Kepco power OFF is not verified. Real spectra require "
+            "the station to be outside SIMULATION mode."
         )
         self.run_button = PrimaryPushButton("Run plan")
         self.run_button.setEnabled(False)
@@ -703,6 +709,10 @@ class RecipePage(QWidget):
             "Open only the point/interval editor for the selected sweep",
             QStyle.StandardPixmap.SP_FileDialogDetailedView,
         )
+        self.add_baseline_button = tool_button(
+            "Add baseline", "Insert visible initial settings from this node's stored configuration before its selected changes",
+            QStyle.StandardPixmap.SP_FileDialogNewFolder,
+        )
         self.delete_node_button = tool_button(
             "Delete", "Delete the selected node (Delete)", QStyle.StandardPixmap.SP_TrashIcon
         )
@@ -722,6 +732,7 @@ class RecipePage(QWidget):
         )
         builder_actions.addWidget(self.edit_device_button)
         builder_actions.addWidget(self.edit_generator_button)
+        builder_actions.addWidget(self.add_baseline_button)
         builder_actions.addWidget(self.delete_node_button)
         builder_actions.addWidget(self.duplicate_node_button)
         builder_actions.addWidget(self.move_up_button)
@@ -829,13 +840,12 @@ class RecipePage(QWidget):
         self.workspace_splitter.setStretchFactor(0, 1)
         self.workspace_splitter.setStretchFactor(1, 4)
         self.workspace_splitter.setStretchFactor(2, 2)
-        self.workspace_splitter.setMinimumHeight(430)
+        self.workspace_splitter.setMinimumHeight(200)
         self.workspace_splitter.setProperty("stationSurface", "surface")
         self.workspace_splitter.splitterMoved.connect(self._workspace_splitter_moved)
         self.workspace_card = CardWidget(self)
         self.workspace_card.setObjectName("recipeWorkspaceCard")
         self.workspace_card.setProperty("stationSurface", "surface")
-        self.workspace_card.setMinimumHeight(220)
         workspace_layout = QVBoxLayout(self.workspace_card)
         workspace_layout.setContentsMargins(12, 10, 12, 12)
         workspace_layout.setSpacing(8)
@@ -894,6 +904,7 @@ class RecipePage(QWidget):
         self.edit_device_button.clicked.connect(
             self._edit_selected_device_settings
         )
+        self.add_baseline_button.clicked.connect(self._add_selected_device_baseline)
         self.edit_generator_button.clicked.connect(self._edit_selected_roi)
         self.delete_node_button.clicked.connect(self._delete_selected_node)
         self.duplicate_node_button.clicked.connect(self._duplicate_selected_node)
@@ -923,6 +934,7 @@ class RecipePage(QWidget):
             self.run_button,
             self.edit_device_button,
             self.edit_generator_button,
+            self.add_baseline_button,
             self.delete_node_button,
             self.duplicate_node_button,
             self.move_up_button,
@@ -1085,6 +1097,13 @@ class RecipePage(QWidget):
         show_library = (
             available >= 760 if library_override is None else library_override
         )
+        for action, visible in ((self.library_visibility_action, show_library),
+                                (self.inspector_visibility_action, show_inspector)):
+            previously_blocked = action.blockSignals(True)
+            try:
+                action.setChecked(visible)
+            finally:
+                action.blockSignals(previously_blocked)
         if hasattr(self, "library_panel") and self.library_panel.isVisible() != show_library:
             self.library_panel.setVisible(show_library)
         if hasattr(self, "inspector_panel") and self.inspector_panel.isVisible() != show_inspector:
@@ -1182,10 +1201,13 @@ class RecipePage(QWidget):
                 else PushButton()
             )
             button.setObjectName("recipeLibraryAction")
+            from app.recipes.block_registry import library_block_type
+            block_identity = library_block_type(drag_kind)
+            button.setProperty("recipeBlockType", block_identity)
             button.setProperty("deviceKind", kind)
             button.setProperty("libraryDescription", description)
             button.setText(text)
-            button.setToolTip(description)
+            button.setToolTip(f"{description}\nBlock type: {block_identity}")
             button.setIcon(self.style().standardIcon(icon))
             button.setIconSize(QSize(18, 18))
             button.setMinimumHeight(34)
@@ -1290,7 +1312,12 @@ class RecipePage(QWidget):
             drag_kind="output:anritsu_sg",
         )
 
-        acquisition = group("Acquisition", "4")
+        acquisition = group("Acquisition", "5")
+        action(
+            acquisition, "Set MOKE voltage", "Set a chosen VOUT voltage and keep it for background/reference or the next measurements.",
+            "moke_box", QStyle.StandardPixmap.SP_DialogApplyButton,
+            lambda: self._library_add_basic("set_moke_voltage"), drag_kind="flow:set_moke_voltage",
+        )
         action(
             acquisition,
             "Measure MOKE Hall voltage",
@@ -1328,7 +1355,12 @@ class RecipePage(QWidget):
             drag_kind="flow:acquire_spectrum",
         )
 
-        safety = group("Safe shutdown", "8")
+        safety = group("Completion and shutdown", "9")
+        action(
+            safety, "State after completion", "Choose an explicit per-channel final value and whether to hold OUTPUT ON after success. Faults and Stop still shut down.",
+            "completion", QStyle.StandardPixmap.SP_DialogApplyButton,
+            lambda: self._library_add_basic("final_state"), drag_kind="flow:final_state",
+        )
         action(
             safety, "MOKE DAC ZERO", "Confirm zero programming voltage in Finally; Kepco power state remains unknown", "moke_box",
             QStyle.StandardPixmap.SP_MediaStop,
@@ -1547,6 +1579,7 @@ class RecipePage(QWidget):
                     button.setEnabled(moke_enabled and control_available)
                     button.setToolTip(str(button.property("libraryDescription")) if button.isEnabled() else
                                       "Configure an enabled MOKE Box and approve its output channel in station settings.")
+                    button.setToolTip(f"{button.toolTip()}\nBlock type: {button.property('recipeBlockType')}")
                     continue
                 button.setEnabled(moke_enabled)
                 if not moke_enabled:
@@ -1555,6 +1588,9 @@ class RecipePage(QWidget):
                     )
                 else:
                     button.setToolTip(str(button.property("libraryDescription")))
+            identity = button.property("recipeBlockType")
+            if identity and f"Block type: {identity}" not in button.toolTip():
+                button.setToolTip(f"{button.toolTip()}\nBlock type: {identity}")
 
     def _library_add_elab_upload(
         self,
@@ -1587,8 +1623,26 @@ class RecipePage(QWidget):
         branch: str | None = None,
         index: int | None = None,
     ) -> None:
+        if kind == "final_state":
+            self._edit_final_state()
+            return
         if parent_id is None or branch is None:
             parent_id, branch, index = self._library_default_destination()
+        if kind == "set_moke_voltage":
+            from app.ui.recipes.moke_voltage_dialog import MokeVoltageSetDialog
+            if parent_id == "__finally__":
+                raise ConfigurationError("Use return-to-zero in Finally.")
+            dialog = MokeVoltageSetDialog(self._settings, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            data, _, _ = dialog.validated_data()
+            from app.recipes.moke_nodes import moke_fixed_node
+            node = moke_fixed_node(self._new_node_id("moke-device"),
+                self._new_node_id("moke-operating-point"), data["channel"], data["voltage"])
+            source = add_recipe_node(self._builder_source(), parent_id=parent_id,
+                branch=branch, index=index, node=node)
+            self._apply_builder_source(source, "Added MOKE operating point", selected_node_id=node["id"])
+            return
         self._add_basic_node(
             kind,
             parent_id=parent_id,
@@ -1745,6 +1799,8 @@ class RecipePage(QWidget):
         }
         if kind == "stop_moke_voltage":
             node.pop("enabled")
+            if channel is None:
+                node["channel"] = self._settings.moke_box.voltage_control.channel
         if channel is not None:
             node["channel"] = channel
         if parent_id is not None and parent_id != "__finally__":
@@ -1814,7 +1870,20 @@ class RecipePage(QWidget):
             )
             return
         if device == "moke_box":
-            channel = self._settings.moke_box.voltage_control.channel
+            from app.ui.recipes.moke_voltage_dialog import MokeVoltageSetDialog
+            setup = MokeVoltageSetDialog(self._settings, self, allow_sweep=True)
+            if setup.exec() != QDialog.DialogCode.Accepted:
+                return
+            channel = setup.channel.currentData()
+            if setup.mode.currentData() == "fixed":
+                data, _, _ = setup.validated_data()
+                from app.recipes.moke_nodes import moke_fixed_node
+                node = moke_fixed_node(self._new_node_id("moke-device"),
+                    self._new_node_id("moke-operating-point"), data["channel"], data["voltage"])
+                source = add_recipe_node(self._builder_source(), parent_id=parent_id,
+                    branch=branch, index=index, node=node)
+                self._apply_builder_source(source, "Added fixed MOKE operating point", selected_node_id=node["id"])
+                return
             definition = next((item for item in self._recipe_parameter_definitions
                                if item["target"] == f"moke_box.vout{channel}.voltage"), None)
             if definition is None:
@@ -1822,8 +1891,7 @@ class RecipePage(QWidget):
             dialog = SweepGeneratorDialog(dict(definition), self)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            node = self._sweep_node_from_generator(dict(definition), dialog.segment_data())
-            node.update(device_module="moke_box", label="MOKE Box", text=f"MOKE Box · VOUT {channel}")
+            node = self._sweep_node_from_generator(dict(dialog.definition), dialog.segment_data())
             source = add_recipe_node(self._builder_source(), parent_id=parent_id,
                                      branch=branch, index=index, node=node)
             self._apply_builder_source(source, "Added configured MOKE Box", selected_node_id=str(node["id"]))
@@ -1921,7 +1989,7 @@ class RecipePage(QWidget):
                 raise ConfigurationError(
                     f"Malformed library block identifier {drag_kind!r}."
                 )
-            if parent_id == "__finally__" and category in {"device", "flow"}:
+            if parent_id == "__finally__" and category in {"device", "flow"} and kind != "final_state":
                 raise ConfigurationError(
                     "Finally accepts only ramp-to-zero and OUTPUT OFF safety actions."
                 )
@@ -2046,6 +2114,9 @@ class RecipePage(QWidget):
 
     def set_settings(self, settings: StationSettings) -> None:
         previous_default_output_directory = self._default_output_directory()
+        self._settings_generation += 1
+        if self._preflight_thread is not None and self._preflight_thread.isRunning():
+            self._preflight_thread.requestInterruption()
         self._settings = settings
         current_output_directory = self.output_directory.text().strip()
         if not current_output_directory or current_output_directory == previous_default_output_directory:
@@ -2073,15 +2144,17 @@ class RecipePage(QWidget):
 
         self._keithley_snapshot_provider = provider
 
-    def set_rigol_snapshot_provider(self, provider: object) -> None:
+    def set_rigol_snapshot_provider(self, provider: object, review_provider=None) -> None:
         """Bind read-only access to the manual Rigol carrier form state."""
 
         self._rigol_snapshot_provider = provider
+        self._rigol_review_snapshot_provider = review_provider
 
-    def set_anritsu_snapshot_provider(self, provider: object) -> None:
+    def set_anritsu_snapshot_provider(self, provider: object, advanced_provider=None) -> None:
         """Bind read-only access to the manual Anritsu spectrum form state."""
 
         self._anritsu_snapshot_provider = provider
+        self._anritsu_advanced_snapshot_provider = advanced_provider
 
     def set_anritsu_sg_snapshot_provider(self, provider: object) -> None:
         """Bind read-only access to the manual Anritsu SG form state."""
@@ -2115,6 +2188,7 @@ class RecipePage(QWidget):
         if not semantic_id:
             self._selected_semantic_id = None
             self._selected_source_node_id = None
+            self.measurement_tree.clearSelection()
             self._node_selected()
             return
 
@@ -2239,7 +2313,7 @@ class RecipePage(QWidget):
             return None
         try:
             recipe = parse_recipe_text(source, origin=self.path.text() or "recipe")
-            snapshot = normalize_recipe_tree(recipe, self._device_registry.sweep_providers())
+            snapshot = normalize_recipe_tree(recipe, self._device_registry.sweep_providers(), show_safeguard_steps=False)
         except Exception as exc:
             # The last accepted semantic snapshot remains the transactional
             # source of truth while a draft is invalid. Never erase it because
@@ -2260,21 +2334,28 @@ class RecipePage(QWidget):
     ) -> SemanticMeasurementTree:
         """Return the immutable semantic snapshot used by Builder and Runner."""
 
-        del plan  # plan metadata is attached to runtime states, not tree shape
         source = recipe_source if recipe_source is not None else self._tree_source
         if not source.strip():
             source = self.editor.toPlainText()
         recipe = parse_recipe_text(source, origin=self.path.text() or "recipe")
-        snapshot = normalize_recipe_tree(recipe, self._device_registry.sweep_providers())
+        snapshot = normalize_recipe_tree(
+            recipe, self._device_registry.sweep_providers(),
+            safe_shutdown_actions=getattr(plan, "safe_shutdown_actions", None),
+        )
         if recipe_source is None or source == self._tree_source:
-            self.tree_model.replace_tree(snapshot)
+            # The editor keeps a stable authored tree; Execution gets the full
+            # safeguard event nodes from the returned snapshot.
+            self.tree_model.replace_tree(snapshot.editor_projection())
         return snapshot
 
     def _source_changed(self) -> None:
         if self._loading_source:
             return
         self._close_discard_confirmed = False
+        had_plan = self._plan is not None
         self._plan = None
+        if had_plan:
+            self._refresh_semantic_tree()
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
         self.summary.setText(
@@ -2478,7 +2559,7 @@ class RecipePage(QWidget):
     def apply_yaml_to_tree(self, *, show_error: bool = True) -> bool:
         """Commit the YAML editor draft as one validated document transaction."""
 
-        if self._historical_sweep_active:
+        if self._historical_sweep_active or self._execution_controlled:
             return False
         source = self.editor.toPlainText()
         if source == self._tree_source:
@@ -2549,7 +2630,7 @@ class RecipePage(QWidget):
         try:
             recipe = parse_recipe_text(source, origin=self.path.text())
             snapshot = normalize_recipe_tree(
-                recipe, self._device_registry.sweep_providers()
+                recipe, self._device_registry.sweep_providers(), show_safeguard_steps=False
             )
             self._tree_source = source
             self.tree_model.replace_tree(snapshot)
@@ -2758,6 +2839,8 @@ class RecipePage(QWidget):
     def new_recipe(self, *, confirm: bool = True) -> None:
         """Start an empty, valid plan without touching the currently saved file."""
 
+        if self._execution_controlled:
+            return
         if confirm and not self._confirm_discard_unsaved("Starting a new sweep"):
             return
         self._leave_historical_sweep_mode()
@@ -2978,6 +3061,7 @@ class RecipePage(QWidget):
         self._preflight_source = source
         outputs_forced_off = self.execution_mode.currentData() == "dry_run"
         self._preflight_outputs_forced_off = outputs_forced_off
+        self._preflight_settings_generation = self._settings_generation
         self.compile_recipe_action.setText("Cancel validation")
         self.summary.setText(
             "Validating recipe and estimating time/data size in the background…"
@@ -3067,9 +3151,10 @@ class RecipePage(QWidget):
         if (
             self._preflight_source != self.editor.toPlainText()
             or self._preflight_outputs_forced_off != current_outputs_forced_off
+            or self._preflight_settings_generation != self._settings_generation
         ):
             self.summary.setText(
-                "Recipe changed during validation; the stale result was discarded. "
+                "Recipe or station settings changed during validation; the stale result was discarded. "
                 "Validate the current source again."
             )
             self._refresh_document_state()
@@ -3150,6 +3235,7 @@ class RecipePage(QWidget):
         self._preflight_worker = None
         self._preflight_source = None
         self._preflight_outputs_forced_off = None
+        self._preflight_settings_generation = None
         self._refresh_document_state()
 
     def cancel_preflight(self, *, wait_ms: int = 3_000) -> bool:
@@ -3185,6 +3271,7 @@ class RecipePage(QWidget):
         self, recipe: object, plan: ExecutionPlan, estimate: PlanEstimate
     ) -> None:
         self._plan = plan
+        self.semantic_tree_snapshot(plan=plan)
         self.run_button.setEnabled(True)
         self._refresh_document_state()
         self.summary.setText(
@@ -3213,12 +3300,7 @@ class RecipePage(QWidget):
 
         actions = getattr(plan, "safe_shutdown_actions", None)
         if not isinstance(actions, (tuple, list)) or not actions:
-            actions = (
-                "keithley.outputs_off",
-                "rigol.outputs_off",
-                "anritsu.rf_off_and_abort",
-                "storage.flush_checkpoint",
-            )
+            actions = ()
         ramp_channels = tuple(
             str(node.data.get("channel", "")).upper()
             for node in finally_nodes
@@ -3425,8 +3507,9 @@ class RecipePage(QWidget):
                     QStyle.StandardPixmap.SP_DialogOpenButton,
                 )
             return (
-                f"Acquire reference spectrum · {node.data.get('trace', 'TRAC1')} · "
-                f"average {int(node.data.get('average_count', 1))}",
+                f"Acquire {node.data.get('purpose', 'reference')} spectrum · {node.data.get('trace', 'TRAC1')} · "
+                f"average {int(node.data.get('average_count', 1))}"
+                + (f" · at least {node.data['minimum_duration']}" if node.data.get('minimum_duration') else ""),
                 "Anritsu reference acquisition",
                 QStyle.StandardPixmap.SP_DialogSaveButton,
             )
@@ -3887,6 +3970,7 @@ class RecipePage(QWidget):
                 self.wrap_repeat_button,
                 self.edit_device_button,
                 self.edit_generator_button,
+                self.add_baseline_button,
                 self.open_editor_button,
             ):
                 button.setEnabled(False)
@@ -3992,6 +4076,11 @@ class RecipePage(QWidget):
         )
 
         self.edit_device_button.setEnabled(has_device)
+        self.add_baseline_button.setEnabled(bool(
+            has_device and location is not None and location[1] is not None and not location[4]
+            and node.data.get("operation") == "configure_selected_parameters"
+            and isinstance(node.data.get("configuration"), dict)
+        ))
         self.edit_generator_button.setEnabled(has_roi)
         self.delete_node_button.setEnabled(can_delete)
         self.duplicate_node_button.setEnabled(can_duplicate)
@@ -4087,7 +4176,7 @@ class RecipePage(QWidget):
                 + "\n".join(f"{key}: {value}" for key, value in historical.metadata)
             )
         elif node is None:
-            self.inspector_summary.setText("Generated measurement structure · read-only")
+            self.inspector_summary.setText("Completion policy — default safe shutdown" if semantic.kind is SemanticNodeKind.FINALLY else "Generated measurement structure · read-only")
             self.inspector.setPlainText(
                 str(semantic.data.get("detail", "Generated from the accepted recipe."))
             )
@@ -4097,14 +4186,14 @@ class RecipePage(QWidget):
             )
             self.inspector.setPlainText(
                 "\n".join((
-                    f"ID: {node.id}", f"Type: {node.type}",
+                    f"ID: {node.id}", f"Block type: {node.block_type}", f"Type: {node.type}",
                     f"Children: {len(node.children)}",
                     f"Else children: {len(node.else_children)}", "", "Fields:",
                     json.dumps(node.data, ensure_ascii=False, indent=2, default=str),
                 ))
             )
         self.open_editor_button.setText(
-            "Device settings" if has_device else "Edit ROI" if has_roi
+            "Set final output state" if semantic.kind is SemanticNodeKind.FINALLY else "Device settings" if has_device else "Edit ROI" if has_roi
             else "Acquisition settings" if node is not None and node.type in {"acquire_reference", "acquire_spectrum"}
             else "Edit comment" if node is not None and node.type == "comment"
             else "Action settings"
@@ -4114,6 +4203,7 @@ class RecipePage(QWidget):
             and (
                 (is_authored_node and location is not None and location[1] is not None)
                 or (semantic is not None and semantic.kind is SemanticNodeKind.SET_ROI_VALUE)
+                or (semantic is not None and semantic.kind is SemanticNodeKind.FINALLY)
             )
         )
         self.open_editor_button.setEnabled(can_open_editor)
@@ -4324,7 +4414,7 @@ class RecipePage(QWidget):
         return node.id, "children"
 
     def _library_default_destination(self) -> tuple[str, str, int]:
-        """Insert after selection, or inside only after an explicit request."""
+        """Insert inside a selected container, or after a selected step."""
 
         self._builder_source()
         locations = self._recipe_node_locations()
@@ -4442,9 +4532,11 @@ class RecipePage(QWidget):
         self._leave_historical_sweep_mode()
         previous = self._tree_source
         try:
+            from app.recipes.editing import canonical_recipe_source
+            source = canonical_recipe_source(source)
             recipe = parse_recipe_text(source, origin="tree-builder")
             snapshot = normalize_recipe_tree(
-                recipe, self._device_registry.sweep_providers()
+                recipe, self._device_registry.sweep_providers(), show_safeguard_steps=False
             )
         except Exception as exc:
             self._emit_tree_diagnostic(
@@ -4735,7 +4827,7 @@ class RecipePage(QWidget):
                 continue
             try:
                 node = (
-                    self._sweep_node_from_generator(definition, dialog.segment_data())
+                    self._sweep_node_from_generator(dialog.definition, dialog.segment_data())
                     if isinstance(dialog, SweepGeneratorDialog)
                     else self._fixed_node_from_dialog(definition, dialog)
                 )
@@ -4757,6 +4849,10 @@ class RecipePage(QWidget):
         """Open the most specific editor while keeping device and ROI tasks separate."""
 
         if not self._tree_editing_allowed():
+            return
+        semantic = self._selected_semantic_node()
+        if semantic is not None and semantic.kind is SemanticNodeKind.FINALLY:
+            self._edit_final_state()
             return
         node = self._selected_recipe_node()
         anritsu_role = (
@@ -4813,6 +4909,22 @@ class RecipePage(QWidget):
         return None
 
     def _edit_action_node(self, node: RecipeNode) -> None:
+        location = self._recipe_node_locations().get(node.id)
+        if node.type == "final_state" or (node.type == "stop_moke_voltage" and location and location[4]):
+            self._edit_final_state(node)
+            return
+        if node.type == "set_moke_voltage":
+            from app.ui.recipes.moke_voltage_dialog import MokeVoltageSetDialog
+            dialog = MokeVoltageSetDialog(self._settings, self,
+                channel=node.data["channel"], voltage=str(node.data["voltage"]))
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            data, _, _ = dialog.validated_data()
+            replacement = self._node_to_mapping(node)
+            replacement.update(data)
+            source = replace_recipe_node(self._builder_source(), node_id=node.id, node=replacement)
+            self._apply_builder_source(source, "Updated MOKE operating point", selected_node_id=node.id)
+            return
         dialog = ActionNodeEditorDialog(
             node,
             self,
@@ -4825,7 +4937,8 @@ class RecipePage(QWidget):
             return
         replacement = self._node_to_mapping(node)
         for key in tuple(node.data):
-            replacement.pop(key, None)
+            if key != "disabled":
+                replacement.pop(key, None)
         replacement.update(dialog.node_fields())
         try:
             source = replace_recipe_node(
@@ -4838,6 +4951,49 @@ class RecipePage(QWidget):
             )
         except Exception as exc:
             QMessageBox.warning(self, "Action settings", str(exc))
+
+    def _edit_final_state(self, node: RecipeNode | None = None) -> None:
+        from app.ui.recipes.final_state_dialog import FinalStateDialog
+        node_id = node.id if node is not None else self._new_node_id("final-state")
+        source = self._builder_source()
+
+        def edited_source(fields):
+            replacement = {"id": node_id, "type": "final_state", **fields}
+            if node is not None:
+                if node.type != "final_state":
+                    # Successful final targets follow cleanup; fault shutdown remains engine-owned.
+                    return add_recipe_node(delete_recipe_node(source, node_id=node_id),
+                                           parent_id="__finally__", branch="children", node=replacement)
+                return replace_recipe_node(source, node_id=node_id, node=replacement)
+            return add_recipe_node(source, parent_id="__finally__", branch="children", node=replacement)
+
+        def validate(fields):
+            RecipeCompiler(self._settings).compile(parse_recipe_text(edited_source(fields)))
+
+        initial = dict(node.data) if node is not None else None
+        if node is not None and node.type == "stop_moke_voltage":
+            initial = {"device": "moke_box", "channel": node.data.get("channel", self._settings.moke_box.voltage_control.channel),
+                       "output": "off", "voltage": "0 V"}
+        elif node is not None and node.type in {"set_keithley_output", "set_rigol_output", "ramp_keithley_to_zero"}:
+            initial = {"device": "rigol" if node.type == "set_rigol_output" else "keithley",
+                       "channel": node.data.get("channel"), "output": "hold"}
+        dialog = FinalStateDialog(self, initial=initial, validate=validate)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._apply_builder_source(edited_source(dialog.node_fields()), "Updated final output state", selected_node_id=node_id)
+
+    def _edit_selected_final_state(self) -> None:
+        """Keep the endpoint of the selected authored cleanup when changing its policy."""
+        node = self._selected_recipe_node()
+        if isinstance(node, RecipeNode) and node.type == "final_state":
+            self._edit_final_state(node)
+            return
+        location = self._selected_recipe_location()
+        if (isinstance(node, RecipeNode) and location is not None
+                and location[1] == "__finally__" and "channel" in node.data
+                and node.type in {"stop_moke_voltage", "set_keithley_output", "set_rigol_output", "ramp_keithley_to_zero"}):
+            self._edit_final_state(node)
+            return
+        self._edit_final_state()
 
     def _edit_output_policy_from_tree(self, metadata: dict[str, object]) -> None:
         """Edit only the output contract represented by the compact child row."""
@@ -4931,6 +5087,37 @@ class RecipePage(QWidget):
         return None
 
     def _edit_moke_module_node(self, node: RecipeNode) -> None:
+        modern = [child for child in node.children if child.type == "set_moke_voltage"
+            or (child.type == "sweep" and str(child.data.get("target", "")).startswith("moke_box."))]
+        if len(modern) == 1 and not any(child.type == "configure_moke_box" for child in node.children):
+            from app.ui.recipes.moke_voltage_dialog import MokeVoltageSetDialog
+            child = modern[0]
+            channel = child.data["channel"] if child.type == "set_moke_voltage" else int(str(child.data["target"]).split(".")[1].removeprefix("vout"))
+            setup = MokeVoltageSetDialog(self._settings, self, channel=channel,
+                voltage=str(child.data.get("voltage", "0 mV")), allow_sweep=True)
+            setup.mode.setCurrentIndex(0 if child.type == "set_moke_voltage" else 1)
+            if setup.exec() != QDialog.DialogCode.Accepted:
+                return
+            channel = setup.channel.currentData()
+            if setup.mode.currentData() == "fixed":
+                data, _, _ = setup.validated_data()
+                from app.recipes.moke_nodes import moke_fixed_node
+                replacement = moke_fixed_node(node.id, child.id, data["channel"], data["voltage"])
+            else:
+                definition = dict(next(item for item in _SWEEPABLE_PARAMETERS if item["target"] == f"moke_box.vout{channel}.voltage"))
+                roi = SweepGeneratorDialog(definition, self,
+                    initial_segments=list(child.data["segments"]) if child.type == "sweep" else None)
+                if roi.exec() != QDialog.DialogCode.Accepted:
+                    return
+                replacement = self._sweep_node_from_generator(roi.definition, roi.segment_data())
+                replacement.update(id=node.id, device_module="moke_box", channel=roi.channel_selector.currentData())
+            source = replace_recipe_node(self._builder_source(), node_id=node.id, node=replacement)
+            self._apply_builder_source(source, "Updated MOKE configuration", selected_node_id=node.id)
+            return
+        operating_points = [child for child in node.children if child.type == "set_moke_voltage"]
+        if len(operating_points) == 1:
+            self._edit_action_node(operating_points[0])
+            return
         sweeps = [child for child in node.children if child.type == "sweep"]
         fixed = [child for child in node.children if child.type == "update_moke_voltage"]
         if not sweeps and len(fixed) == 1:
@@ -4962,7 +5149,7 @@ class RecipePage(QWidget):
         dialog = SweepGeneratorDialog(dict(definition), self, initial_segments=list(segments))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        generated = self._sweep_node_from_generator(dict(definition), dialog.segment_data())
+        generated = self._sweep_node_from_generator(dict(dialog.definition), dialog.segment_data())
         replacement = self._node_to_mapping(node)
         updates = {child["type"]: child for child in generated["children"]}
         children = []
@@ -4981,6 +5168,23 @@ class RecipePage(QWidget):
         replacement["children"] = children
         source = replace_recipe_node(self._builder_source(), node_id=node.id, node=replacement)
         self._apply_builder_source(source, "Updated MOKE channel voltage sweep", selected_node_id=node.id)
+
+    def _add_selected_device_baseline(self) -> None:
+        if not self._tree_editing_allowed():
+            return
+        location = self._selected_recipe_location()
+        if location is None or location[1] is None or location[4]:
+            return
+        node, parent_id, branch, index, _in_finally = location
+        from app.recipes.baseline_authoring import explicit_baseline_mapping
+        try:
+            baseline = explicit_baseline_mapping(node, node_id=self._new_node_id("initial-settings"))
+            source = add_recipe_node(self._builder_source(), parent_id=parent_id,
+                branch=branch, index=index, node=baseline)
+            self._apply_builder_source(source, "Added visible initial settings; review the configuration before running",
+                selected_node_id=str(baseline["id"]))
+        except (ConfigurationError, ValueError) as exc:
+            QMessageBox.warning(self, "Initial device settings", str(exc))
 
     def _edit_selected_device_settings(self) -> None:
         node = self._selected_recipe_node()
@@ -5256,7 +5460,8 @@ class RecipePage(QWidget):
             )
             return
         dialog = AnritsuNodeEditorDialog(
-            self._settings, self, snapshot=snapshot
+            self._settings, self, snapshot=snapshot,
+            current_values=self._anritsu_comparison_values(),
         )
         dialog.load_plan_actions(
             actions,
@@ -5343,6 +5548,7 @@ class RecipePage(QWidget):
         ]
         dialog = AnritsuSignalGeneratorNodeEditorDialog(
             self,
+            current_snapshot=self._review_snapshot(self._anritsu_sg_snapshot_provider),
             frequency=frequency,
             power=power,
             parameter_actions=actions,
@@ -5394,6 +5600,7 @@ class RecipePage(QWidget):
             settings=self._settings,
             snapshot=snapshot,
             snapshot_resolver=self._rigol_snapshot_for,
+            current_snapshot_resolver=getattr(self, "_rigol_review_snapshot_provider", None),
             parameter_actions=actions,
             output_policy=str(node.data.get("output_policy", "unchanged")),
         )
@@ -5508,14 +5715,33 @@ class RecipePage(QWidget):
             QMessageBox.warning(self, "Rigol ROI editor", str(exc))
 
     def _edit_legacy_keithley_configuration(self, node: RecipeNode) -> None:
+        field_names = {
+            "channel": "channel", "mode": "source_mode", "level": "source_level",
+            "compliance": "compliance", "nplc": "nplc", "settle_time": "settling_time",
+            "settling_time": "settling_time", "sense_mode": "sense_mode",
+            "source_autorange": "source_autorange", "source_range": "source_range",
+            "measure_voltage_autorange": "measure_voltage_autorange",
+            "measure_voltage_range": "measure_voltage_range",
+            "measure_current_autorange": "measure_current_autorange",
+            "measure_current_range": "measure_current_range",
+        }
+        channel = str(node.data.get("channel", "B"))
+        mode = str(node.data.get("mode", "current"))
+        current = self._keithley_snapshot_for(channel, mode)
+        # Settling is a software preference, not an instrument readback. A
+        # missing YAML field means preserve; do not display a fabricated 0 s
+        # (or another channel's draft) as the preserved value.
+        default_settling = self._settings.keithley.safety.channels[channel].defaults.get(
+            "settling_time", "100 ms")
+        preserved_settling = current.settling_time if current is not None else str(default_settling)
         snapshot = replace(
             self._current_keithley_snapshot(),
-            channel=str(node.data.get("channel", "B")),
-            source_mode=str(node.data.get("mode", "current")),
+            channel=channel,
+            source_mode=mode,
             source_level=str(node.data.get("level", "1 mA")),
             compliance=str(node.data.get("compliance", "67 mV")),
             nplc=str(node.data.get("nplc", "1")),
-            settling_time=str(node.data.get("settle_time", "100 ms")),
+            settling_time=str(node.data.get("settle_time", node.data.get("settling_time", preserved_settling))),
             sense_mode=str(node.data.get("sense_mode", "2wire")),
             source_autorange=bool(node.data.get("source_autorange", False)),
             source_range=str(node.data.get("source_range", "Select range")),
@@ -5533,23 +5759,23 @@ class RecipePage(QWidget):
             ),
         )
         dialog = KeithleyNodeEditorDialog(
-            self._settings, self, snapshot=snapshot
+            self._settings, self, snapshot=snapshot,
+            snapshot_resolver=self._keithley_snapshot_for,
+            full_configuration=True,
+            programmed_fields={field_names[key] for key in node.data if key in field_names},
         )
         for selector in dialog.parameter_selectors.values():
             index = selector.findData("set")
             if index >= 0:
                 selector.setCurrentIndex(index)
         dialog.output_policy.setEnabled(False)
-        dialog.output_policy.setToolTip(
-            "Legacy configuration nodes do not change OUTPUT."
-        )
+        dialog.output_policy.setToolTip("Configuration is applied with OUTPUT OFF.")
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
             updated = dialog.configuration_snapshot()
             replacement = self._node_to_mapping(node)
-            replacement.update(
-                {
+            values = {
                     "channel": updated.channel,
                     "mode": updated.source_mode,
                     "level": updated.source_level,
@@ -5564,7 +5790,11 @@ class RecipePage(QWidget):
                     "measure_current_autorange": updated.measure_current_autorange,
                     "measure_current_range": updated.measure_current_range,
                 }
-            )
+            programmed = dialog.programmed_configuration_fields()
+            replacement.update({key: value for key, value in values.items()
+                                if field_names[key] in programmed})
+            if "settling_time" in replacement and "settle_time" in replacement:
+                replacement.pop("settling_time")
             source = replace_recipe_node(
                 self._builder_source(), node_id=node.id, node=replacement
             )
@@ -5598,18 +5828,23 @@ class RecipePage(QWidget):
             settings=self._settings,
             snapshot=snapshot,
             output_policy="unchanged",
+            snapshot_resolver=self._rigol_snapshot_for,
+            carrier_only=True,
+            programmed_fields=set(node.data),
+            current_snapshot_resolver=getattr(self, "_rigol_review_snapshot_provider", None),
         )
         dialog.output_policy.setEnabled(False)
         dialog.output_policy.setToolTip(
-            "Legacy configuration nodes do not change OUTPUT."
+            "Configuration forces this channel OUTPUT OFF. Add a separate OUTPUT ON action if required."
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
             updated = dialog.configuration_snapshot()
             replacement = self._node_to_mapping(node)
+            programmed = dialog.programmed_configuration_fields()
             replacement.update(
-                {
+                {key: value for key, value in {
                     "channel": updated.channel,
                     "waveform": updated.waveform,
                     "frequency": updated.frequency,
@@ -5617,7 +5852,7 @@ class RecipePage(QWidget):
                     "low_level": updated.low_level,
                     "output_load": updated.output_load,
                     "phase_deg": float(updated.phase_deg.replace(",", ".")),
-                }
+                }.items() if key in programmed}
             )
             for key, value, waveform in (
                 ("square_duty_percent", updated.square_duty_percent, "SQU"),
@@ -5626,9 +5861,9 @@ class RecipePage(QWidget):
                 ("pulse_leading", updated.pulse_leading, "PULS"),
                 ("pulse_trailing", updated.pulse_trailing, "PULS"),
             ):
-                if updated.waveform == waveform:
+                if updated.waveform == waveform and key in programmed:
                     replacement[key] = value
-                else:
+                elif updated.waveform != waveform:
                     replacement.pop(key, None)
             source = replace_recipe_node(
                 self._builder_source(), node_id=node.id, node=replacement
@@ -5681,7 +5916,8 @@ class RecipePage(QWidget):
             },
         ]
         dialog = AnritsuNodeEditorDialog(
-            self._settings, self, snapshot=snapshot
+            self._settings, self, snapshot=snapshot,
+            current_values=self._anritsu_comparison_values(),
         )
         dialog.load_plan_actions(
             actions, acquire_single=False, trace=str(node.data.get("trace", "TRAC1"))
@@ -5732,7 +5968,7 @@ class RecipePage(QWidget):
                 "Rigol output policy must be off, on for the block, kept on, "
                 "or continuous."
             )
-        actions = parameter_actions or [
+        actions = parameter_actions if parameter_actions is not None else [
             {
                 "parameter_id": "carrier.frequency",
                 "mode": "set",
@@ -5778,6 +6014,7 @@ class RecipePage(QWidget):
             "id": node.id,
             "type": "sequence",
             "text": f"Rigol CH{channel} · OUTPUT {output_policy.upper()}",
+            **({"disabled": node.data["disabled"]} if "disabled" in node.data else {}),
             "device_module": "rigol",
             "label": "Rigol DG1032Z",
             "operation": "configure_selected_parameters",
@@ -5816,7 +6053,7 @@ class RecipePage(QWidget):
         except TypeError:
             snapshot = provider()
             if isinstance(snapshot, RigolConfigurationSnapshot):
-                return replace(snapshot, channel=channel)
+                return snapshot if snapshot.channel == channel else None
         return snapshot if isinstance(snapshot, RigolConfigurationSnapshot) else None
 
     @staticmethod
@@ -5850,6 +6087,40 @@ class RecipePage(QWidget):
         if snapshot.channel not in {1, 2}:
             raise ConfigurationError("Rigol output channel must be 1 or 2.")
         return snapshot
+
+    @staticmethod
+    def _review_snapshot(provider):
+        try:
+            return provider() if callable(provider) else None
+        except Exception:
+            return None
+
+    def _anritsu_comparison_values(self):
+        basic = self._review_snapshot(self._anritsu_snapshot_provider)
+        advanced = self._review_snapshot(getattr(self, "_anritsu_advanced_snapshot_provider", None))
+        values = {}
+        if basic is not None:
+            values.update({
+                "spectrum.start_frequency": f"{basic.start_hz:.12g} Hz",
+                "spectrum.stop_frequency": f"{basic.stop_hz:.12g} Hz",
+                "spectrum.reference_level": f"{basic.reference_level_dbm:.12g} dBm",
+                "spectrum.points": str(basic.points),
+            })
+        if advanced is not None:
+            values.update({
+                "advanced.rbw_mode": "auto" if advanced.rbw_auto else "manual",
+                "advanced.rbw": f"{advanced.rbw_hz:.12g} Hz",
+                "advanced.vbw_mode": advanced.vbw_mode,
+                "advanced.vbw": None if advanced.vbw_hz is None else f"{advanced.vbw_hz:.12g} Hz",
+                "advanced.vbw_filter_mode": advanced.vbw_filter_mode,
+                "advanced.detector": advanced.detector,
+                "advanced.attenuation_mode": "auto" if advanced.attenuation_auto else "manual",
+                "advanced.attenuation": f"{advanced.attenuation_db:.12g} dB",
+                "advanced.preamplifier_enabled": "true" if advanced.preamplifier_enabled else "false",
+                "advanced.sweep_time_mode": "auto" if advanced.sweep_time_auto else "manual",
+                "advanced.sweep_time": f"{advanced.sweep_time_s:.12g} s",
+            })
+        return values
 
     def _current_anritsu_snapshot(self) -> AnritsuConfigurationSnapshot:
         provider = self._anritsu_snapshot_provider
@@ -6002,6 +6273,7 @@ class RecipePage(QWidget):
                 f"RF {output_label}"
             ),
             "device_module": "anritsu_sg",
+            **({"disabled": node.data["disabled"]} if "disabled" in node.data else {}),
             "label": "Anritsu MS2830A Signal Generator",
             "operation": "configure_selected_parameters",
             "configuration_required": roi_required,
@@ -6038,6 +6310,7 @@ class RecipePage(QWidget):
             "advanced.rbw_mode",
             "advanced.rbw",
             "advanced.vbw_mode",
+            "advanced.vbw_filter_mode",
             "advanced.vbw",
             "advanced.detector",
             "advanced.attenuation_mode",
@@ -6086,8 +6359,9 @@ class RecipePage(QWidget):
             managed_id = managed_id or f"anritsu-acquire-{uuid4().hex[:8]}"
             previous = next((child for child in node.children if child.id == managed_id), None)
             options = (acquisition_options if acquisition_options is not None else previous.data if previous else {})
-            option_keys = ("source_file", "file_kind") if role == "acquire_reference" else ("processing",)
+            option_keys = ("source_file", "file_kind", "minimum_duration", "purpose", "inter_sweep_delay") if role == "acquire_reference" else ("processing", "inter_sweep_delay")
             acquisition: dict[str, object] = {
+                **({"disabled": previous.data["disabled"]} if previous and "disabled" in previous.data else {}),
                 **{key: options[key] for key in option_keys if key in options},
                 "id": managed_id,
                 "type": role,
@@ -6127,6 +6401,7 @@ class RecipePage(QWidget):
             ),
             "device_module": "anritsu",
             "label": "Anritsu MS2830A",
+            **({"disabled": node.data["disabled"]} if "disabled" in node.data else {}),
             "operation": "configure_selected_parameters",
             "configuration_required": roi_required,
             "roi_required": roi_required,
@@ -6238,7 +6513,8 @@ class RecipePage(QWidget):
             return
         replacement = self._node_to_mapping(node)
         for key in tuple(node.data):
-            replacement.pop(key, None)
+            if key != "disabled":
+                replacement.pop(key, None)
         replacement.update(dialog.result_data())
         try:
             source = replace_recipe_node(
@@ -6280,6 +6556,9 @@ class RecipePage(QWidget):
             "processing",
             "source_file",
             "file_kind",
+            "minimum_duration",
+            "purpose",
+            "inter_sweep_delay",
         ):
             replacement.pop(field, None)
         replacement.update(dialog.node_fields())
@@ -6350,6 +6629,7 @@ class RecipePage(QWidget):
             "id": node.id,
             "type": "sequence",
             "text": f"Keithley {snapshot.channel} · {len(actions)} selected action(s)",
+            **({"disabled": node.data["disabled"]} if "disabled" in node.data else {}),
             "device_module": "keithley",
             "label": "Keithley 2600",
             "configuration_required": roi_required,
@@ -6444,17 +6724,19 @@ class RecipePage(QWidget):
         return KeithleyConfigurationSnapshot()
 
     def _keithley_snapshot_for(
-        self, channel: str, mode: str
+        self, channel: str, mode: str | None = None
     ) -> KeithleyConfigurationSnapshot | None:
         provider = self._keithley_snapshot_provider
         if not callable(provider):
             return None
         try:
-            snapshot = provider(channel, mode)
+            snapshot = provider(channel, mode) if mode is not None else provider(channel)
         except TypeError:
             snapshot = provider()
             if isinstance(snapshot, KeithleyConfigurationSnapshot):
-                return replace(snapshot, channel=channel, source_mode=mode)
+                if snapshot.channel != channel:
+                    return None
+                return replace(snapshot, source_mode=mode) if mode is not None else snapshot
         return snapshot if isinstance(snapshot, KeithleyConfigurationSnapshot) else None
 
     @staticmethod
@@ -6539,6 +6821,7 @@ class RecipePage(QWidget):
             lambda: self._add_device_controls(),
         )
         add_action("Wrap in Repeat...", self._wrap_selected_in_repeat)
+        add_action("Set final output state", self._edit_selected_final_state)
         menu.addSeparator()
         edit_device = add_action(
             "Device settings", self._edit_selected_device_settings
@@ -6657,62 +6940,19 @@ class RecipePage(QWidget):
         target = definition["target"]
         value = dialog.value.text().strip()
         if target.startswith("keithley."):
-            _device, channel, mode = target.split(".")
-            channel_settings = self._settings.keithley.safety.channels[channel]
-            is_current = mode == "current"
-            return {
-                "id": self._new_node_id("configure-keithley"),
-                "type": "configure_keithley",
-                "channel": channel,
-                "mode": "current" if is_current else "voltage",
-                "level": value,
-                "compliance": (
-                    channel_settings.lab_limits.voltage_compliance.max
-                    if is_current
-                    else channel_settings.lab_limits.current_compliance.max
-                ),
-                "nplc": 1.0,
-                "settle_time": "100 ms",
-            }
+            return self._sweep_node_from_generator(definition, [{"value": value}])
         if target.startswith("rigol."):
-            _device, channel, field = target.split(".")
-            defaults = self._settings.rigol.safety.channels[channel].defaults
-            return {
-                "id": self._new_node_id("configure-rigol"),
-                "type": "configure_rigol",
-                "channel": int(channel),
-                "waveform": str(defaults.get("waveform", "SIN")),
-                "frequency": value if field == "frequency" else defaults.get("frequency", "1 kHz"),
-                "high_level": value if field == "high_level" else defaults.get("high_level", "1 mV"),
-                "low_level": value if field == "low_level" else defaults.get("low_level", "-1 mV"),
-                "output_load": defaults.get("output_load_setting", "HIGHZ"),
-            }
-        if target.startswith("anritsu.spectrum."):
-            field = target.rsplit(".", 1)[1]
-            defaults = self._settings.anritsu.safety.defaults
-            return {
-                "id": self._new_node_id("configure-anritsu"),
-                "type": "configure_anritsu",
-                "start_frequency": value if field == "start_frequency" else defaults.get("start_frequency", "1 MHz"),
-                "stop_frequency": value if field == "stop_frequency" else defaults.get("stop_frequency", "10 MHz"),
-                "reference_level": value if field == "reference_level" else defaults.get("reference_level", "0 dBm"),
-                "points": int(defaults.get("sweep_points", 1001)),
-            }
+            # A single-point native axis uses the same selected-field provider
+            # as a multi-point sweep; it never invents a carrier baseline.
+            return self._sweep_node_from_generator(definition, [{"value": value}])
+        if target.startswith("anritsu."):
+            return self._sweep_node_from_generator(definition, [{"value": value}])
         if target.startswith("moke_box."):
             channel = int(target.split(".")[1].removeprefix("vout"))
-            profile = self._settings.moke_box.voltage_control
-            return self._moke_control_sequence(channel, {
-                "id": self._new_node_id("moke-voltage"), "type": "update_moke_voltage",
-                "channel": channel, "voltage": value,
-            }, profile.minimum, profile.maximum)
-        field = target.rsplit(".", 1)[1]
-        defaults = self._settings.anritsu.safety.defaults
-        return {
-            "id": self._new_node_id("configure-anritsu-sg"),
-            "type": "configure_anritsu_sg",
-            "frequency": value if field == "frequency" else defaults.get("sg_frequency", "1 GHz"),
-            "power": value if field == "power" else defaults.get("sg_power", "-30 dBm"),
-        }
+            from app.recipes.moke_nodes import moke_fixed_node
+            return moke_fixed_node(self._new_node_id("moke-device"),
+                self._new_node_id("moke-voltage"), channel, value)
+        raise ConfigurationError(f"Unsupported fixed parameter {target!r}.")
 
     def _edit_selected_generator(
         self,
@@ -6735,57 +6975,19 @@ class RecipePage(QWidget):
                 "This sweep target cannot be represented by the visual ROI editor.",
             )
             return
-        if target.startswith("keithley."):
-            _device, channel, mode = target.split(".")
-            dialog: SweepGeneratorDialog = KeithleySweepBuilderDialog(
-                self._settings,
-                self,
-                initial_segments=segments,
-                initial_channel=channel,
-                initial_mode=mode,
-            )
-            assert isinstance(dialog, KeithleySweepBuilderDialog)
-            existing_config = next(
-                (child for child in node.children if child.type == "configure_keithley"), None
-            )
-            if existing_config is not None:
-                dialog.compliance.setText(str(existing_config.data.get("compliance", dialog.compliance.text())))
-                dialog.nplc.setText(str(existing_config.data.get("nplc", dialog.nplc.text())))
-                dialog.settle_time.setText(str(existing_config.data.get("settle_time", dialog.settle_time.text())))
-                dialog.sense_mode.setCurrentText(str(existing_config.data.get("sense_mode", dialog.sense_mode.currentText())))
-        else:
-            dialog = SweepGeneratorDialog(definition, self, initial_segments=segments)
+        # Editing ROI owns only the point list. Device configuration and Wait
+        # nodes have their own editors, even in older generated recipes.
+        dialog = SweepGeneratorDialog(definition, self, initial_segments=segments)
         dialog.select_interval(stage_index)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         children = [self._node_to_mapping(child) for child in node.children]
-        if isinstance(dialog, KeithleySweepBuilderDialog):
-            options = dialog.keithley_options()
-            for child in children:
-                if child["type"] == "configure_keithley":
-                    child.update(options)
-            settle_str = str(options.get("settle_time") or options.get("settling_time") or "").strip()
-            if settle_str:
-                wait_child = next((c for c in children if c.get("type") == "wait"), None)
-                if wait_child is not None:
-                    wait_child["duration"] = settle_str
-                else:
-                    try:
-                        qty = parse_quantity(settle_str, DIMENSION_TIME)
-                        if qty.si_value > 0:
-                            children.append({
-                                "id": self._new_node_id("settle-wait"),
-                                "type": "wait",
-                                "duration": settle_str,
-                            })
-                    except Exception:
-                        pass
         replacement = {"id": node.id, "type": "sweep", **node.data}
         for legacy_field in ("start", "stop", "points", "spacing"):
             replacement.pop(legacy_field, None)
         replacement.update(
             {
-                "target": target,
+                "target": dialog.definition["target"],
                 "segments": dialog.segment_data(),
                 "children": children,
             }
@@ -6832,87 +7034,56 @@ class RecipePage(QWidget):
             }, f"{minimum:.12g} V", f"{maximum:.12g} V")
         if target.startswith("keithley."):
             _device, channel, mode = target.split(".")
-            channel_settings = self._settings.keithley.safety.channels[channel]
-            is_current = mode == "current"
-            compliance = (
-                channel_settings.lab_limits.voltage_compliance.max
-                if is_current
-                else channel_settings.lab_limits.current_compliance.max
-            )
+            if keithley_options is None:
+                # A level-only request must preserve the explicit baseline,
+                # including compliance, range, NPLC and OUTPUT state.
+                return {"id": node_id, "type": "sweep", "target": target,
+                        "segments": segments, "children": []}
+            required = {"compliance", "nplc", "settle_time", "sense_mode", "source_range"}
+            if set(keithley_options) != required:
+                raise ConfigurationError("Keithley generator requires explicit compliance, NPLC, settling time, sense mode and source range.")
+            if keithley_options["sense_mode"] != "2wire":
+                raise ConfigurationError("4-wire / remote sense is prohibited; only 2wire is allowed.")
+            points = generate_sweep_points(segments, mode)
+            first_level = f"{points[0].si_value:.17g} {'A' if mode == 'current' else 'V'}"
+            settle_str = str(keithley_options["settle_time"]).strip()
+            settle = parse_quantity(settle_str, DIMENSION_TIME)
+            if not 0 <= settle.si_value <= 3600:
+                raise ConfigurationError("Settling time must be within 0..3600 s.")
             child: dict[str, object] = {
                 "id": self._new_node_id("configure-keithley"),
                 "type": "configure_keithley",
                 "channel": channel,
-                "mode": "current" if is_current else "voltage",
-                "level": "${" + target + "}",
-                "compliance": (keithley_options or {}).get("compliance", compliance),
-                "nplc": (keithley_options or {}).get("nplc", 1.0),
-                "settle_time": (keithley_options or {}).get("settle_time", "100 ms"),
-                "sense_mode": (keithley_options or {}).get("sense_mode", "2wire"),
+                "mode": mode,
+                "level": first_level,
+                **keithley_options,
+            }
+            waits = ([{"id": self._new_node_id("settle-wait"), "type": "wait",
+                       "duration": settle_str}] if settle.si_value > 0 else [])
+            return {
+                "id": self._new_node_id("keithley-control"), "type": "sequence",
+                "children": [child, {"id": node_id, "type": "sweep", "target": target,
+                                     "segments": segments, "children": waits}],
             }
         elif target.startswith("rigol."):
-            _device, channel, field = target.split(".")
-            defaults = self._settings.rigol.safety.channels[channel].defaults
-            child = {
-                "id": self._new_node_id("configure-rigol"),
-                "type": "configure_rigol",
-                "channel": int(channel),
-                "waveform": str(defaults.get("waveform", "SIN")),
-                "frequency": "${" + target + "}" if field == "frequency" else defaults.get("frequency", "1 kHz"),
-                "high_level": "${" + target + "}" if field == "high_level" else defaults.get("high_level", "1 mV"),
-                "low_level": "${" + target + "}" if field == "low_level" else defaults.get("low_level", "-1 mV"),
-                "output_load": defaults.get("output_load_setting", "HIGHZ"),
-            }
-        elif target.startswith("anritsu.spectrum."):
-            field = target.rsplit(".", 1)[1]
-            defaults = self._settings.anritsu.safety.defaults
-            child = {
-                "id": self._new_node_id("configure-anritsu"),
-                "type": "configure_anritsu",
-                "start_frequency": "${" + target + "}" if field == "start_frequency" else defaults.get("start_frequency", "1 MHz"),
-                "stop_frequency": "${" + target + "}" if field == "stop_frequency" else defaults.get("stop_frequency", "10 MHz"),
-                "reference_level": "${" + target + "}" if field == "reference_level" else defaults.get("reference_level", "0 dBm"),
-                "points": int(defaults.get("sweep_points", 1001)),
-            }
+            # The compiler applies the ROI through update_rigol_frequency or
+            # update_rigol_levels, preserving the explicitly configured carrier.
+            return {"id": node_id, "type": "sweep", "target": target,
+                    "segments": segments, "children": []}
+        elif target.startswith("anritsu."):
+            return {"id": node_id, "type": "sweep", "target": target,
+                    "segments": segments, "children": []}
         else:
-            field = target.rsplit(".", 1)[1]
-            defaults = self._settings.anritsu.safety.defaults
-            child = {
-                "id": self._new_node_id("configure-anritsu-sg"),
-                "type": "configure_anritsu_sg",
-                "frequency": "${" + target + "}" if field == "frequency" else defaults.get("sg_frequency", "1 GHz"),
-                "power": "${" + target + "}" if field == "power" else defaults.get("sg_power", "-30 dBm"),
-            }
-        children: list[dict[str, object]] = [child]
-        if target.startswith("keithley."):
-            settle_str = str(
-                (keithley_options or {}).get("settle_time")
-                or (keithley_options or {}).get("settling_time")
-                or "100 ms"
-            ).strip()
-            if settle_str:
-                try:
-                    qty = parse_quantity(settle_str, DIMENSION_TIME)
-                    if qty.si_value > 0:
-                        children.append({
-                            "id": self._new_node_id("settle-wait"),
-                            "type": "wait",
-                            "duration": settle_str,
-                        })
-                except Exception:
-                    pass
-        return {
-            "id": node_id,
-            "type": "sweep",
-            "target": target,
-            "segments": segments,
-            "children": children,
-        }
+            raise ConfigurationError(f"Unsupported sweep parameter {target!r}.")
 
     def _moke_control_sequence(self, channel, node, minimum, maximum):
-        """Keep explicit configuration and arming before generated DAC updates."""
-        if channel != self._settings.moke_box.voltage_control.channel:
-            raise ConfigurationError("Select the qualified MOKE electromagnet output channel.")
+        """Sweeps own preparation; fixed manual actions keep their explicit plan."""
+        from app.safety.moke_box import control_profile_from_settings
+        control_profile_from_settings(self._settings,
+            simulation=(self._settings.moke_box.endpoint or "").startswith("SIM::MOKE"), channel=channel)
+        if node.get("type") == "sweep":
+            from app.recipes.moke_nodes import moke_device_node
+            return moke_device_node(self._new_node_id("moke-control"), channel, [node])
         return {
             "id": self._new_node_id("moke-control"), "type": "sequence",
             "device_module": "moke_box", "label": f"MOKE Box · VOUT {channel}",
@@ -7014,15 +7185,24 @@ class RecipePage(QWidget):
         self, mapping: dict[str, object]
     ) -> dict[str, object]:
         clone = deepcopy(mapping)
-        clone["id"] = self._new_node_id(str(clone.get("type", "node")))
-        for branch in ("children", "else"):
-            raw_children = clone.get(branch)
-            if isinstance(raw_children, list):
-                clone[branch] = [
-                    self._clone_node_mapping(child)
-                    for child in raw_children
-                    if isinstance(child, dict)
-                ]
+        nodes = []
+        pending = [clone]
+        identifiers = {}
+        while pending:
+            current = pending.pop()
+            nodes.append(current)
+            old_id = current.get("id")
+            current["id"] = self._new_node_id(str(current.get("type", "node")))
+            if isinstance(old_id, str):
+                identifiers[old_id] = current["id"]
+            for branch in ("children", "else"):
+                children = current.get(branch)
+                if isinstance(children, list):
+                    pending.extend(child for child in children if isinstance(child, dict))
+        for current in nodes:
+            managed = current.get("managed_acquisition_id")
+            if isinstance(managed, str) and managed in identifiers:
+                current["managed_acquisition_id"] = identifiers[managed]
         return clone
 
     def _move_selected_sibling(self, delta: int) -> None:
@@ -7077,8 +7257,9 @@ class RecipePage(QWidget):
         )
         self.execution_mode_hint.setText(
             (
-                "DRY RUN: configurations, setpoints and Anritsu RAW/processed spectra "
-                "run normally; every source OUTPUT remains confirmed OFF."
+                "DRY RUN: Keithley/Rigol/Anritsu settings and spectra execute with outputs OFF. "
+                "MOKE VOUT writes are skipped; Kepco power is unverified. "
+                "SIMULATION mode still produces simulated data."
             )
             if dry_run
             else (
@@ -7092,6 +7273,7 @@ class RecipePage(QWidget):
             self._preflight_thread.requestInterruption()
         if self._plan is not None:
             self._plan = None
+            self._refresh_semantic_tree()
             self.run_button.setEnabled(False)
             self.plan_preflight_changed.emit(None)
             self.summary.setText(

@@ -20,6 +20,7 @@ from tests.helpers import simulation_settings
 from app.ui.measurement_tree.model import MeasurementTreeModel
 from app.ui.recipes.elab_dialog import ElabUploadEditorDialog
 from app.ui.recipes.page import RecipePage
+from app.ui.shell.main_window import MainWindow
 
 
 class TestElabSweepBlockModelsAndCompiler(unittest.TestCase):
@@ -362,8 +363,6 @@ class TestMainWindowElabBlockExecution(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_main_window_wires_elab_context_and_passes_recipe_override_on_run_finish(self) -> None:
-        from app.ui.shell.main_window import MainWindow
-
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             # Verify context wiring between MainWindow, ElabPage and RecipePage

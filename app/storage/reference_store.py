@@ -77,10 +77,7 @@ class ReferenceHdf5Store:
     @classmethod
     def load(cls, path: str | Path) -> ReferenceSpectrum:
         target = Path(path)
-        points = Hdf5RunReader.points(target)
-        if len(points) != 1:
-            raise ExecutionError("A reference file must contain exactly one checkpoint.")
-        metadata = points[0].metadata
+        metadata = Hdf5RunReader.single_point(target).metadata
         if metadata.get("reference_schema") != cls.SCHEMA:
             raise ExecutionError("The selected HDF5 file is not a Lab Control reference artefact.")
         stored = Hdf5RunReader.spectrum(target, 0)
@@ -111,6 +108,7 @@ class ReferenceHdf5Store:
                 rbw_auto=cls._optional_bool(metadata.get("rbw_auto")),
                 rbw_hz=cls._optional_float(metadata.get("rbw_hz")),
                 vbw_mode=str(metadata.get("vbw_mode", "")),
+                vbw_filter_mode=metadata.get("vbw_filter_mode"),
                 vbw_hz=cls._optional_float(metadata.get("vbw_hz")),
                 detector=str(metadata.get("detector", "")),
                 attenuation_auto=cls._optional_bool(metadata.get("attenuation_auto")),
@@ -144,6 +142,7 @@ class ReferenceHdf5Store:
             "rbw_auto": reference.rbw_auto,
             "rbw_hz": reference.rbw_hz,
             "vbw_mode": reference.vbw_mode,
+            "vbw_filter_mode": reference.vbw_filter_mode,
             "vbw_hz": reference.vbw_hz,
             "detector": reference.detector,
             "attenuation_auto": reference.attenuation_auto,

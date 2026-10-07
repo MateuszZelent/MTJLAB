@@ -153,6 +153,8 @@ class MokeBoxPage(QWidget):
         self._pending_operation: str | None = None
         self.vout_values: dict[int, QLabel] = {}
         self._last_vouts: dict[int, float] = {}
+        self._vout_recorded_at: dict[int, datetime] = {}
+        self._metadata_hall_reading: MokeHallVoltageReading | None = None
         self.field_values: dict[str, QLabel] = {}
         self._live_timer = QTimer(self)
         self._live_timer.setInterval(1_000)
@@ -298,6 +300,7 @@ class MokeBoxPage(QWidget):
     def _show_confirmed_voltage(self, channel: int, voltage: float) -> None:
         if channel in self.vout_values and math.isfinite(voltage):
             self._last_vouts[channel] = voltage
+            self._vout_recorded_at[channel] = datetime.now(timezone.utc)
             self.vout_values[channel].setText(f"{voltage:+.6f} V")
 
     def _field_profile_changed(self, profile):
@@ -669,8 +672,7 @@ class MokeBoxPage(QWidget):
             for channel, value in result.items():
                 if channel in self.vout_values:
                     numeric = float(value)
-                    self._last_vouts[int(channel)] = numeric
-                    self.vout_values[channel].setText(f"{numeric:+.6f} V")
+                    self._show_confirmed_voltage(int(channel), numeric)
             self.status.emit("MOKE Box: eight VOUT channels validated")
         elif operation == "read_hall_voltage" and isinstance(result, MokeHallVoltageReading):
             self._show_hall_reading(result)
@@ -680,6 +682,7 @@ class MokeBoxPage(QWidget):
             self._set_measurement_controls(True)
 
     def _show_hall_reading(self, result: MokeHallVoltageReading) -> None:
+        self._metadata_hall_reading = result
         self.field_values["hall1_field"].setText("Hall calibration required")
         self.field_values["hall1_voltage"].setText(f"{result.voltage_v:+.6f} V")
         self.field_values["hall1_stddev"].setText(f"{result.stddev_v:.6g} V")
@@ -715,6 +718,7 @@ class MokeBoxPage(QWidget):
             *,
             source: str,
             dimension: str | None,
+            recorded_at_utc: datetime | None,
         ) -> None:
             if not math.isfinite(float(value)):
                 return
@@ -727,6 +731,7 @@ class MokeBoxPage(QWidget):
                     unit=unit,
                     value_si=float(value),
                     source=source,
+                    recorded_at_utc=recorded_at_utc,
                 )
             )
 
@@ -737,10 +742,11 @@ class MokeBoxPage(QWidget):
                 "V",
                 value,
                 dimension=DIMENSION_VOLTAGE,
-                source="last confirmed MOKE VOUT readback",
+                source="MOKE VOUT readback received by application",
+                recorded_at_utc=self._vout_recorded_at.get(channel),
             )
-        if self._history:
-            reading = self._history[-1]
+        if self._metadata_hall_reading is not None:
+            reading = self._metadata_hall_reading
             add(
                 "moke_box.hall1.voltage_v",
                 "MOKE Hall 1 · voltage",
@@ -748,6 +754,7 @@ class MokeBoxPage(QWidget):
                 reading.voltage_v,
                 dimension=DIMENSION_VOLTAGE,
                 source="last confirmed MOKE Hall readback",
+                recorded_at_utc=reading.timestamp_utc,
             )
             add(
                 "moke_box.hall1.stddev_v",
@@ -756,6 +763,7 @@ class MokeBoxPage(QWidget):
                 reading.stddev_v,
                 dimension=DIMENSION_VOLTAGE,
                 source="last confirmed MOKE Hall readback",
+                recorded_at_utc=reading.timestamp_utc,
             )
         return tuple(values)
 
@@ -869,9 +877,19 @@ class MokeBoxPage(QWidget):
         self.status.emit(f"MOKE Box {operation} failed: {error}")
 
     def _state_changed(self, state: str) -> None:
+        state = state.lower()
         available = state == "verified" or (
             state == "unknown" and self.field_workflow._connected and not self.field_workflow.busy
         )
+        if state in {"fault", "disconnected"} or (state == "unknown" and not available):
+            self._last_vouts.clear()
+            self._vout_recorded_at.clear()
+            self._metadata_hall_reading = None
+            for label in self.vout_values.values():
+                label.setText("— V")
+            for label in self.field_values.values():
+                label.setText("—")
+            self.field_timestamp.setText("No current readback")
         self._set_measurement_controls(available and self._pending_operation is None)
         if state == "verified" and self._pending_operation is None:
             self.field_status.setText("Ready. Start with one Hall-voltage sample.")

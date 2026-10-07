@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from unittest.mock import patch
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from app.recipes.semantic_tree import normalize_recipe_tree
 from app.ui.execution import RunMonitorPage
 from app.ui.shell import MainWindow
 from tests.helpers import simulation_settings
+from tests.shell_test_isolation import isolated_shell_persistence, shell_qt_application  # noqa: F401
 
 
 class GuiGapProbe(QObject):
@@ -138,8 +140,8 @@ root:
               type: update_keithley_compliance
               channel: B
               mode: current
-              level: "${keithley.B.current}"
               compliance: "${keithley.B.compliance_voltage}"
+            - {id: stored-combination, type: checkpoint}
 finally: []
 """
 
@@ -178,6 +180,9 @@ def build_simulated_window(
     source: Path, *, seed: int, spectrum_points: int | None = None
 ) -> MainWindow:
     window = MainWindow(".config/settings.yml", simulation=True)
+    # This qualification deliberately captures 1000 x 10001 bins. Its eager
+    # reader needs a larger explicit budget than an ordinary station run.
+    window._settings.storage["validation_memory_budget_bytes"] = 2 * 1024**3
     window._simulation_seed = seed
     recipe = load_recipe(source)
     if spectrum_points is not None:
@@ -197,6 +202,8 @@ def build_simulated_window(
 def start_and_wait_for_run(window: MainWindow, *, expected_points: int) -> Path:
     plan = window._characterization_plan
     monitor: RunMonitorPage = window.run_monitor
+    failures = []
+    window._run_controller.failed.connect(failures.append)
     semantic_tree = window.recipe_page.semantic_tree_snapshot(plan.recipe_source, plan)
     monitor.run_started(
         len(plan.actions),
@@ -211,14 +218,16 @@ def start_and_wait_for_run(window: MainWindow, *, expected_points: int) -> Path:
         plan,
         simulation=True,
         execution_mode=ExecutionMode.DRY_RUN.value,
-        output_dir_override=str(Path(".tmp-characterization")),
+        output_dir_override=str(window._repository.path.parent / "responsiveness"),
         file_stem_override="responsiveness",
     )
     deadline = time.monotonic() + 900.0
-    while window._run_controller.running and time.monotonic() < deadline:
-        QApplication.processEvents()
-        time.sleep(0.005)
+    with patch("app.ui.shell.main_window.QMessageBox.critical"):
+        while window._run_controller.running and time.monotonic() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.005)
     assert not window._run_controller.running, "simulated run did not finish"
+    assert not failures, failures
     for _ in range(4):
         QApplication.processEvents()
     assert monitor._stored_points == expected_points
@@ -324,6 +333,23 @@ def test_wait_semantic_projection_preserves_duration_while_running() -> None:
         page.deleteLater()
         app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
+
+
+@pytest.mark.parametrize("kind,policy,expected", [
+    ("update_moke_voltage", "qualified_ramp", "RAMPING"),
+    ("ramp_keithley_to_zero", "qualified_ramp", "RAMPING"),
+    ("update_keithley_level", "direct_setpoint", "SETTING PARAMETER"),
+])
+def test_current_operation_displays_the_executed_transition(kind, policy, expected):
+    app = QApplication.instance() or QApplication([])
+    page = RunMonitorPage()
+    try:
+        page._update_current_operation({"kind": kind, "transition_policy": policy}, state="RUNNING")
+        assert page.current_operation_phase.text() == expected
+    finally:
+        page.close()
+        page.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def test_semantic_execution_renders_one_tree_without_legacy_overlap() -> None:

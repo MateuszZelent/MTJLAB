@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="317.573" timestamp="2026-10-06T00:14:05.480894+02:00" hostname="Minishark"><testcase classname="tests.test_execution_ui_responsiveness" name="test_execution_tree_keeps_qt_event_loop_live_for_1000_points" time="313.429"><failure message="assert 0.40302659990265965 &lt; 0.35&#10; +  where 0.40302659990265965 = &lt;tests.test_execution_ui_responsiveness.GuiGapProbe(0x2147953d8f0) at 0x000002147EE14900&gt;.maximum_gap_s">tests\test_execution_ui_responsiveness.py:497: in test_execution_tree_keeps_qt_event_loop_live_for_1000_points
+    assert probe.maximum_gap_s &lt; 0.350
+E   assert 0.40302659990265965 &lt; 0.35
+E    +  where 0.40302659990265965 = &lt;tests.test_execution_ui_responsiveness.GuiGapProbe(0x2147953d8f0) at 0x000002147EE14900&gt;.maximum_gap_s</failure></testcase></testsuite></testsuites>

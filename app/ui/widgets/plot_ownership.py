@@ -3,7 +3,34 @@
 from __future__ import annotations
 
 import pyqtgraph as pg
-from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import QObject, QTimer
+from PySide6.QtWidgets import QGraphicsView, QWidget
+
+
+class _PlotRefreshScheduler(QObject):
+    """Coalesce scene changes instead of repainting during each scene callback."""
+
+    def __init__(self, plot: pg.PlotWidget, interval_ms: int) -> None:
+        super().__init__(plot)
+        self.plot = plot
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(interval_ms)
+        self.timer.timeout.connect(self.refresh)
+        plot.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.NoViewportUpdate)
+        plot.scene().changed.connect(self.request)
+
+    def request(self, *_args) -> None:
+        if not self.timer.isActive():
+            self.timer.start()
+
+    def refresh(self) -> None:
+        self.plot.viewport().update()
+
+
+def coalesce_plot_refresh(plot: pg.PlotWidget, interval_ms: int = 33) -> None:
+    if not hasattr(plot, "_station_refresh_scheduler"):
+        plot._station_refresh_scheduler = _PlotRefreshScheduler(plot, interval_ms)
 
 
 def own_viewbox_menu(view: pg.ViewBox, owner: QWidget) -> None:

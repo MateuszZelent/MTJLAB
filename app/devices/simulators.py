@@ -125,6 +125,10 @@ class _BaseSimulator:
         if self.closed:
             raise DeviceError("The simulated VISA session is closed.")
 
+    def ensure_remote(self) -> None:
+        self._assert_open()
+        self.commands.append("VISA REN ASSERT_ADDRESS")
+
     def write(self, command: str) -> None:
         self._assert_open()
         self.commands.append(command)
@@ -192,6 +196,13 @@ class RigolSimulator(_BaseSimulator):
         self.coupling = {"FREQ": False, "PHASE": False, "AMPL": False}
         self.tracking = "OFF"
         self.programmed_scpi: dict[str, str] = {}
+        for channel in (1, 2):
+            for suffix, value in {
+                "FUNC:ARB:MODE": "FREQ", "FUNC:SQU:DCYC": "50",
+                "FUNC:RAMP:SYMM": "50", "FUNC:PULS:WIDT": "0.0001",
+                "FUNC:PULS:TRAN": "1e-8", "FUNC:PULS:TRAN:TRA": "1e-8",
+            }.items():
+                self.programmed_scpi[f":SOUR{channel}:{suffix}"] = value
         self.counter_state = "OFF"
         self.counter_coupling = "AC"
         self.counter_gate = "USER1"
@@ -486,8 +497,8 @@ class KeithleySimulator(_BaseSimulator):
         self.level = {"smua": 0.0, "smub": 0.0}
         self.output = {"smua": False, "smub": False}
         self.resistance_ohm = {"smua": 10.0, "smub": 10.0}
-        self.limit_voltage = {"smua": float("inf"), "smub": float("inf")}
-        self.limit_current = {"smua": float("inf"), "smub": float("inf")}
+        self.limit_voltage = {"smua": 0.1, "smub": 0.1}
+        self.limit_current = {"smua": 0.1, "smub": 0.1}
         self.noise_fraction = 0.0
         self._measurement_index = {"smua": 0, "smub": 0}
         self.programmed: dict[str, str] = {}
@@ -539,6 +550,10 @@ class KeithleySimulator(_BaseSimulator):
         )
         if assignment:
             field, value = assignment.groups()
+            if field not in self.programmed and field not in {"smua.source.output", "smub.source.output"}:
+                raise DeviceError(f"Keithley simulator: unsupported assignment {command!r}.")
+            value = self._validated_assignment(field, value.strip())
+            command = f"{field} = {value}"
             self.programmed[field] = value
             if re.search(r"\.range[iv]$", field):
                 ranges = KEITHLEY_2602A_CURRENT_RANGES if field.endswith("i") else KEITHLEY_2602A_VOLTAGE_RANGES
@@ -552,13 +567,18 @@ class KeithleySimulator(_BaseSimulator):
                         self.programmed[f"{smu}.source.range{suffix}"] = str(selected_keithley_range(max(level, ranges[0]), ranges))
         mode = re.match(r"^(smu[ab])\.source\.func\s*=\s*\1\.(OUTPUT_DCAMPS|OUTPUT_DCVOLTS)$", command)
         if mode:
-            self.mode[mode.group(1)] = "current" if mode.group(2) == "OUTPUT_DCAMPS" else "voltage"
+            smu = mode.group(1)
+            self.mode[smu] = "current" if mode.group(2) == "OUTPUT_DCAMPS" else "voltage"
+            suffix = "i" if self.mode[smu] == "current" else "v"
+            self.level[smu] = float(self.programmed[f"{smu}.source.level{suffix}"])
             return
         level = re.match(
-            rf"^(smu[ab])\.source\.level[iv]\s*=\s*({_SCPI_NUMBER})$", command
+            rf"^(smu[ab])\.source\.level([iv])\s*=\s*({_SCPI_NUMBER})$", command
         )
         if level:
-            self.level[level.group(1)] = float(level.group(2))
+            smu, suffix, value = level.groups()
+            if suffix == ("i" if self.mode[smu] == "current" else "v"):
+                self.level[smu] = float(value)
             return
         limit = re.match(
             rf"^(smu[ab])\.source\.limit([vi])\s*=\s*({_SCPI_NUMBER})$", command
@@ -573,9 +593,53 @@ class KeithleySimulator(_BaseSimulator):
         output = re.match(r"^(smu[ab])\.source\.output\s*=\s*\1\.(OUTPUT_ON|OUTPUT_OFF)$", command)
         if output:
             self.output[output.group(1)] = output.group(2) == "OUTPUT_ON"
+            return
+        if assignment:
+            return
+        raise DeviceError(f"Keithley simulator: unsupported write {command!r}.")
+
+    @staticmethod
+    def _validated_assignment(field: str, value: str) -> str:
+        """Validate the supported TSP subset before changing any model state."""
+        smu, suffix = field.split(".", 1)
+        enums = {
+            "source.func": ("OUTPUT_DCAMPS", "OUTPUT_DCVOLTS"),
+            "source.output": ("OUTPUT_OFF", "OUTPUT_ON"),
+            "source.offmode": ("OUTPUT_NORMAL", "OUTPUT_HIGH_Z"),
+            "sense": ("SENSE_LOCAL", "SENSE_REMOTE"),
+        }
+        choices = enums.get(suffix)
+        if ".autorange" in field:
+            choices = ("AUTORANGE_OFF", "AUTORANGE_ON")
+        if choices is not None:
+            if value in {f"{smu}.{choice}" for choice in choices}:
+                return value
+            # Numeric values are supported only for enums whose 0/1 mapping
+            # is already part of this simulator's readback contract.
+            if suffix != "source.offmode" and value in {"0", "1"}:
+                return f"{smu}.{choices[int(value)]}"
+            raise DeviceError(f"Keithley simulator: invalid enum for {field}: {value!r}.")
+        if suffix == "measure.delay" and value == f"{smu}.DELAY_AUTO":
+            return value
+        if re.fullmatch(_SCPI_NUMBER, value) is None:
+            raise DeviceError(f"Keithley simulator: invalid numeric value for {field}: {value!r}.")
+        number = float(value)
+        if not math.isfinite(number):
+            raise DeviceError(f"Keithley simulator: non-finite value for {field}.")
+        if suffix == "source.highc" and number not in {0, 1}:
+            raise DeviceError("Keithley simulator: highc must be 0 or 1.")
+        if (".range" in field or suffix in {"measure.nplc", "measure.delayfactor"}) and number <= 0:
+            raise DeviceError(f"Keithley simulator: {field} must be positive.")
+        if suffix in {"source.delay", "measure.delay", "source.limitv", "source.limiti"} and number < 0:
+            raise DeviceError(f"Keithley simulator: {field} must be non-negative.")
+        if re.search(r"\.(?:range|level|limit)[iv]$", field):
+            ranges = KEITHLEY_2602A_CURRENT_RANGES if field.endswith("i") else KEITHLEY_2602A_VOLTAGE_RANGES
+            if abs(number) > ranges[-1]:
+                raise DeviceError(f"Keithley simulator: {field} exceeds the hardware range.")
+        return value
 
     def _query(self, command: str) -> str:
-        if command.startswith("print(") and "," in command and all(re.fullmatch(r"smu[ab]\.(source|measure)\.range[iv]", f.strip()) for f in command[6:-1].split(",")):
+        if command.startswith("print(") and command.endswith(")") and "," in command and all(re.fullmatch(r"smu[ab]\.(source|measure)\.range[iv]", f.strip()) for f in command[6:-1].split(",")):
             return "\t".join(self._query(f"print({field.strip()})") for field in command[6:-1].split(","))
         if command == "*IDN?":
             return "KEITHLEY INSTRUMENTS,2602A,SIM000001,sim-1.0"
@@ -606,9 +670,9 @@ class KeithleySimulator(_BaseSimulator):
         )
         if equality:
             return "1" if self.programmed.get(equality.group(2)) == equality.group(3) else "0"
-        level = re.match(r"^print\((smu[ab])\.source\.level[iv]\)$", command)
+        level = re.match(r"^print\((smu[ab])\.source\.level([iv])\)$", command)
         if level:
-            return f"{self.level[level.group(1)]:.12g}"
+            return self.programmed[f"{level.group(1)}.source.level{level.group(2)}"]
         readback = re.match(
             r"^print\((smu[ab]\.(?:(?:source|measure)\.[A-Za-z0-9_]+|sense))\)$",
             command,
@@ -691,6 +755,10 @@ class AnritsuSimulator(_BaseSimulator):
         self.vbw_hz: float | None = 1e3
         self.vbw_mode = "VID"
         self.average_count = 10
+        self.trace_write_mode = "WRIT"
+        self.remote_language = "SCPI"
+        self.trace_format = "ASC,0"
+        self.byte_order = "SWAP"
         self.detector = "NORM"
         self.attenuation_auto = True
         self.attenuation_db = 10.0
@@ -699,6 +767,9 @@ class AnritsuSimulator(_BaseSimulator):
         self.sweep_time_s = 0.1
 
     def _write(self, command: str) -> None:
+        if command.upper().startswith("TRAC1:TYPE") and self.remote_language != "SCPI":
+            self.error_queue.append('-113,"Undefined header;TRAC1:TYPE"')
+            return
         mode = re.match(r"^INST\s+(SPECT|SG)$", command, re.IGNORECASE)
         if mode:
             self.instrument_mode = mode.group(1).upper()
@@ -771,9 +842,21 @@ class AnritsuSimulator(_BaseSimulator):
         if avg_count:
             self.average_count = int(avg_count.group(1))
             return
-        if re.match(r"^(?:TRAC\d*:TYPE|TRAC:TYPE\s+\d+,)\s*(?:WRIT|VIEW)$", command, re.IGNORECASE):
+        trace_mode = re.match(r"^(?:TRAC(?:1)?:TYPE)\s+(WRIT|VIEW|BLAN)$", command, re.IGNORECASE)
+        if trace_mode:
+            self.trace_write_mode = trace_mode.group(1).upper()
             return
-        if re.match(r"^FORM(?::BORD)?\s+", command, re.IGNORECASE):
+        indexed_trace_mode = re.fullmatch(r"TRAC:TYPE\s+1,\s*(WRIT|VIEW)", command, re.IGNORECASE)
+        if indexed_trace_mode:
+            self.trace_write_mode = indexed_trace_mode.group(1).upper()
+            return
+        trace_format = re.fullmatch(r"FORM\s+(ASC(?:,0)?|REAL,32)", command, re.IGNORECASE)
+        if trace_format:
+            self.trace_format = "ASC,0" if trace_format.group(1).upper().startswith("ASC") else "REAL,32"
+            return
+        byte_order = re.fullmatch(r"FORM:BORD\s+(SWAP|NORM)", command, re.IGNORECASE)
+        if byte_order:
+            self.byte_order = byte_order.group(1).upper()
             return
         detector = re.match(
             r"^DET\s+(NORM|POS|SAMP|NEG|RMS|QPE|CAV|CRMS|NRM)$",
@@ -834,18 +917,23 @@ class AnritsuSimulator(_BaseSimulator):
             self.continuous_sweep = True
             self.trace_frame += 1
             return
-        if command.upper() == "*WAI":
+        if command.upper() in {"*WAI", "*CLS", "ABOR"}:
             return
+        raise DeviceError(f"Anritsu simulator: unsupported write {command!r}.")
 
     def _query(self, command: str) -> str:
         if command == "*IDN?":
             return "ANRITSU,MS2830A,SIM000001,sim-1.0"
-        if command == "*OPT?":
-            return "041,008,020"
+        if command == "SYST:LANG?":
+            return self.remote_language
+        if command == "SYST:HARD:OPT:CAT?" and self.remote_language == "SCPI":
+            return '4,041,ON,"6 GHz",008,ON,"Preamplifier",020,ON,"Signal generator",021,OFF,"6 GHz generator"'
         if command == "INIT:SWP?":
             return "0"
         if command == "FORM?":
-            return "ASC,0"
+            return self.trace_format
+        if command == "FORM:BORD?":
+            return self.byte_order
         if command == "INST?":
             return self.instrument_mode
         if command == "FREQ?":
@@ -881,16 +969,14 @@ class AnritsuSimulator(_BaseSimulator):
             return f"{(self.start_hz + self.stop_hz) / 2:.12g}"
         if command == "FREQ:SPAN?":
             return f"{self.stop_hz - self.start_hz:.12g}"
-        if re.match(r"^TRAC:TYPE\?", command, re.IGNORECASE):
-            return "WRIT"
+        if re.fullmatch(r"TRAC:TYPE\?", command, re.IGNORECASE):
+            return self.trace_write_mode
         if command == "DET?":
             return self.detector
         if command == "POW:ATT?":
             return f"{self.attenuation_db:.12g}"
         if command == "SWE:TIME?":
             return f"{self.sweep_time_s:.12g}"
-        if command == "TRAC:TYPE?":
-            return "WRIT"
         if command == "INIT:CONT?":
             return "1" if self.continuous_sweep else "0"
         if command == "FREQ:STAR?":
@@ -901,7 +987,7 @@ class AnritsuSimulator(_BaseSimulator):
             return str(self.points)
         if command == "DISP:WIND:TRAC:Y:RLEV?":
             return f"{self.reference_level:.12g}"
-        if command.startswith("TRAC? "):
+        if re.fullmatch(r"TRAC\?\s+TRAC1", command, re.IGNORECASE):
             if self.continuous_sweep:
                 self.trace_frame += 1
             center = (self.start_hz + self.stop_hz) / 2

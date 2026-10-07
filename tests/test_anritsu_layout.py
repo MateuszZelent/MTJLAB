@@ -78,3 +78,30 @@ def test_anritsu_forms_render_without_overlap(size, theme):
         page.close()
         page.deleteLater()
         application.processEvents()
+
+
+def test_abort_button_stops_only_receiver_not_signal_generator(tmp_path):
+    from PySide6.QtGui import QFont
+
+    application = QApplication.instance() or QApplication([])
+    application.setFont(QFont("Segoe UI", 9))
+    controller = MagicMock()
+    controller.is_connected = True
+    controller.visa_address = "SIM::ANRITSU"
+    settings = SettingsRepository(SETTINGS_TEMPLATE).load().settings
+    page = AnritsuPage(controller, settings, single_sweep_available=True)
+    try:
+        page.resize(1500, 900)
+        page.show()
+        application.processEvents()
+        controller.call.reset_mock()
+        page.abort_button.setEnabled(True)
+        assert page.abort_button.isVisible()
+        assert page.abort_button.width() > 0 and page.abort_button.height() > 0
+        page.abort_button.click()
+        controller.call.assert_called_once_with("abort_acquisition")
+        assert page.grab().save(str(tmp_path / "anritsu-abort-button.png"))
+    finally:
+        page.close()
+        page.deleteLater()
+        application.processEvents()

@@ -33,6 +33,7 @@ def settings_for(channel="A", auto=False):
         raw["devices"]["keithley"]["safety"]["channels"][ch]["defaults"]["source_autorange"] = (
             auto if ch == channel else False
         )
+    raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]["measured_current_trip"]["min"] = "-2 mA"
     return StationSettings.model_validate(raw)
 
 

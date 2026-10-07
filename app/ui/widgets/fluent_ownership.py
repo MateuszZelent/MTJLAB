@@ -1,7 +1,9 @@
 """Keep Fluent helper objects and routing inside their owning widget lifetime."""
 
 from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import QCoreApplication
 from qfluentwidgets import PopUpAniStackedWidget, SmoothScrollBar, qrouter
+from shiboken6 import isValid
 import weakref
 
 
@@ -17,7 +19,11 @@ def bind_fluent_router_lifetime(stack: PopUpAniStackedWidget) -> None:
             return
         qrouter.history[:] = [item for item in qrouter.history if item.stacked is not owned]
         qrouter.stackHistories.pop(owned, None)
-        qrouter.emptyChanged.emit(not bool(qrouter.history))
+        # QApplication shutdown can destroy the global router before the
+        # remaining stacks. Its Python history still needs clearing, but its
+        # C++ signal source (and possibly its receivers) no longer exists.
+        if isValid(qrouter) and not QCoreApplication.closingDown():
+            qrouter.emptyChanged.emit(not bool(qrouter.history))
 
     stack.destroyed.connect(forget_stack)
     stack.setProperty("stationRouterLifetimeBound", True)

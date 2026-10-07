@@ -113,6 +113,9 @@ class KeithleySourceRequest:
     measure_voltage_range_si: float | None = None
     measure_current_autorange: bool = True
     measure_current_range_si: float | None = None
+    # None denotes an explicitly authored complete baseline. A tuple denotes
+    # a patch against an already verified source configuration.
+    changed_fields: tuple[str, ...] | None = None
 
 
 def coupled_measurement_suffix(mode: str) -> str | None:
@@ -189,6 +192,8 @@ def validate_source_range(request: KeithleySourceRequest) -> None:
 
 
 def validate_keithley_source(channel: KeithleyChannelSettings, request: KeithleySourceRequest) -> None:
+    if request.sense_mode != "2wire" or channel.sense_mode != "2wire":
+        raise SafetyViolation("Keithley 4-wire / remote sense is prohibited. Only 2wire (local sense) is allowed.")
     for name, value in (
         ("source level", request.level_si),
         ("compliance", request.compliance_si),
@@ -217,8 +222,6 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
         raise SafetyViolation("NPLC must use 0.001 PLC increments.")
     if request.settle_time_s < 0:
         raise SafetyViolation("Settling time cannot be negative.")
-    if request.sense_mode not in {"2wire", "4wire"}:
-        raise SafetyViolation("Keithley sense mode must be 2wire or 4wire.")
     limits = channel.lab_limits
     if request.mode == "current":
         if limits.source_current.enabled:

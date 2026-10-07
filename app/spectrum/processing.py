@@ -20,24 +20,34 @@ class LinearPowerAverager:
 
     def add(self, trace_dbm: Sequence[float]) -> int:
         arr = np.asarray(trace_dbm, dtype=float)
+        if arr.ndim != 1:
+            raise ValueError("A spectrum must be a one-dimensional sequence.")
         if arr.size < 2:
             raise ValueError("A spectrum must contain at least two points.")
         if not np.all(np.isfinite(arr)):
             raise ValueError("A spectrum contains NaN or infinity.")
-        linear = 10.0 ** (arr / 10.0)
-        if self._sum_mw is None:
-            self._sum_mw = linear.copy()
-        elif linear.size != self._sum_mw.size:
+        if self._sum_mw is not None and arr.shape != self._sum_mw.shape:
             raise ValueError("All spectra must contain the same number of points.")
-        else:
-            self._sum_mw += linear
+        with np.errstate(over="ignore", under="ignore"):
+            linear = 10.0 ** (arr / 10.0)
+        if not np.all(np.isfinite(linear) & (linear > 0)):
+            raise ValueError("Spectrum power cannot be represented as finite positive mW.")
+        # Commit only after validation: a failed addition must leave both the
+        # accumulated power and the sample count unchanged.
+        with np.errstate(over="ignore"):
+            candidate = linear if self._sum_mw is None else self._sum_mw + linear
+        if not np.all(np.isfinite(candidate)):
+            raise ValueError("Accumulated spectrum power exceeds the numeric mW range.")
+        self._sum_mw = candidate
         self.count += 1
         return self.count
 
     def result(self) -> tuple[float, ...]:
         if self.count == 0 or self._sum_mw is None:
             raise ValueError("At least one spectrum is required for averaging.")
-        dbm = 10.0 * np.log10(np.maximum(self._sum_mw / self.count, 1e-300))
+        # Subtract the logarithm of the count to avoid underflow when dividing
+        # representable subnormal powers; do not silently clamp the result.
+        dbm = 10.0 * (np.log10(self._sum_mw) - math.log10(self.count))
         return tuple(dbm.tolist())
 
 
@@ -69,29 +79,50 @@ def apply_reference_operation(
 
     sig = np.asarray(signal_dbm, dtype=float)
     ref = np.asarray(reference_dbm, dtype=float)
-    if sig.size != ref.size or sig.size < 2:
+    if sig.ndim != 1 or ref.ndim != 1:
+        raise ValueError("Signal and reference spectra must be one-dimensional.")
+    if sig.shape != ref.shape or sig.size < 2:
         raise ValueError("Signal and reference spectra must have identical point counts.")
     if not (np.all(np.isfinite(sig)) and np.all(np.isfinite(ref))):
         raise ValueError("Signal and reference spectra must contain finite values.")
     operation = operation.lower()
-    if operation == "difference_db":
-        return tuple((sig - ref).tolist()), "dB"
-    sig_mw = 10.0 ** (sig / 10.0)
-    ref_mw = 10.0 ** (ref / 10.0)
-    if operation == "ratio_linear":
-        return tuple((sig_mw / ref_mw).tolist()), "ratio"
-    if operation == "add_power":
-        res = 10.0 * np.log10(np.maximum(sig_mw + ref_mw, 1e-300))
-        return tuple(res.tolist()), "dBm"
+    # Work in log power until a linear result is required. Converting both
+    # inputs first can overflow even when their ratio/product is representable.
+    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+        if operation == "difference_db":
+            res, unit = sig - ref, "dB"
+        elif operation == "ratio_linear":
+            res, unit = np.power(10.0, sig / 10.0 - ref / 10.0), "ratio"
+        elif operation == "multiply_linear":
+            res, unit = np.power(10.0, sig / 10.0 + ref / 10.0), "mW²"
+        elif operation == "add_power":
+            high = np.maximum(sig, ref)
+            ratio = np.power(10.0, -np.abs(sig / 10.0 - ref / 10.0))
+            res, unit = high + (10.0 / math.log(10.0)) * np.log1p(ratio), "dBm"
+        elif operation in {"subtract_power", "subtract_power_signed"}:
+            high = np.maximum(sig, ref)
+            # expm1 preserves small residuals between nearly equal inputs.
+            fraction = -np.expm1(-np.abs(sig - ref) * (math.log(10.0) / 10.0))
+            residual_dbm = high + 10.0 * np.log10(fraction)
+            if operation == "subtract_power":
+                res, unit = np.where(sig > ref, residual_dbm, np.nan), "dBm"
+            else:
+                # dBm -> W: subtract 30 dB before exponentiation.
+                res = np.sign(sig - ref) * np.power(10.0, (residual_dbm - 30.0) / 10.0)
+                res = np.where(sig == ref, 0.0, res)
+                unit = "W"
+        else:
+            raise ValueError(f"Unsupported reference operation: {operation}.")
+    valid = np.isfinite(res)
     if operation == "subtract_power":
-        diff = sig_mw - ref_mw
-        res = np.where(diff > 0, 10.0 * np.log10(np.maximum(diff, 1e-300)), np.nan)
-        return tuple(res.tolist()), "dBm"
-    if operation == "multiply_linear":
-        return tuple((sig_mw * ref_mw).tolist()), "mW²"
-    if operation == "subtract_power_signed":
-        return tuple(((sig_mw - ref_mw) * 1e-3).tolist()), "W"
-    raise ValueError(f"Unsupported reference operation: {operation}.")
+        valid |= (sig <= ref) & np.isnan(res)
+    elif operation in {"ratio_linear", "multiply_linear"}:
+        valid &= res > 0
+    elif operation == "subtract_power_signed":
+        valid &= (res != 0) | (sig == ref)
+    if not np.all(valid):
+        raise ValueError(f"Reference operation {operation} exceeds the numeric range of {unit}.")
+    return tuple(res.tolist()), unit
 
 
 def frequency_grids_match(left: Sequence[float], right: Sequence[float], *, relative: float = 1e-9) -> bool:

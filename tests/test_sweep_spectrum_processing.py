@@ -212,7 +212,10 @@ def test_imported_reference_verified_against_instrument_and_archived(tmp_path, k
     from app.engine.estimation import PlanEstimator
 
     plan = RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
-    assert PlanEstimator(simulation_settings()).estimate(plan).spectrum_values == 4 * 101
+    from app.engine.policy import ExecutionPolicy
+
+    attempts = 1 + ExecutionPolicy.from_settings(simulation_settings()).retry_count
+    assert PlanEstimator(simulation_settings()).estimate(plan).spectrum_values == (2 * attempts + 2) * 101
 
 
 def test_changed_asset_fails_before_recipe_actions(tmp_path, monkeypatch):
@@ -284,8 +287,8 @@ def test_identical_reconfiguration_can_reuse_reference(tmp_path):
 def test_unqualified_log_residual_keeps_raw_then_fails_cleanly(tmp_path, monkeypatch):
     original = AnritsuAdapter.acquire_single_sweep
 
-    def constant(self, trace_name):
-        trace = original(self, trace_name)
+    def constant(self, trace_name, **kwargs):
+        trace = original(self, trace_name, **kwargs)
         return replace(trace, powers_dbm=tuple([-60.0] * len(trace.powers_dbm)))
 
     monkeypatch.setattr(AnritsuAdapter, "acquire_single_sweep", constant)
@@ -297,16 +300,16 @@ def test_unqualified_log_residual_keeps_raw_then_fails_cleanly(tmp_path, monkeyp
 
 
 def test_readback_change_during_block_preserves_raw_but_rejects_mean(tmp_path, monkeypatch):
-    original = AnritsuAdapter.read_advanced_spectrum_configuration
+    original = AnritsuAdapter.read_acquisition_configuration
     calls = 0
 
     def changed(self):
         nonlocal calls
         calls += 1
-        snapshot = original(self)
-        return replace(snapshot, attenuation_db=snapshot.attenuation_db + (2 if calls > 1 else 0))
+        full, snapshot = original(self)
+        return full, replace(snapshot, attenuation_db=snapshot.attenuation_db + (2 if calls > 1 else 0))
 
-    monkeypatch.setattr(AnritsuAdapter, "read_advanced_spectrum_configuration", changed)
+    monkeypatch.setattr(AnritsuAdapter, "read_acquisition_configuration", changed)
     path = tmp_path / "readback-changed.h5"
     result, acquired = execute(path)
     assert "settings changed during" in result.error and len(acquired) == 3

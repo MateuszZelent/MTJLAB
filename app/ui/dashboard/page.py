@@ -49,6 +49,7 @@ from qfluentwidgets import (
 )
 
 from app.ui.dashboard.device_card import DeviceCard
+from app.ui.dashboard.storage_probe import StorageReadinessProbe
 from app.ui.dashboard.discovery_surfaces import SavedInstrumentsView, TcpDiscoveryResultsView
 from app.ui.dashboard.visa_results import VisaResultState, VisaResultsView
 from app.ui.discovery_worker import MokeIdentificationWorker, TcpDiscoveryWorker, VisaDiscoveryWorker
@@ -74,6 +75,8 @@ class StationDashboardController(QObject):
     ) -> None:
         super().__init__(parent)
         self._settings = settings
+        self._storage_probe = StorageReadinessProbe(self)
+        self._storage_probe.changed.connect(self._refresh_readiness)
         self._discovery_enabled = discovery_enabled
         self._discovery_worker: VisaDiscoveryWorker | None = None
         self._tcp_discovery_worker: TcpDiscoveryWorker | None = None
@@ -392,6 +395,7 @@ class StationDashboardController(QObject):
         """Request cooperative cancellation; never destroy a running thread."""
         if wait_ms < 0:
             raise ValueError("Discovery shutdown wait must be non-negative.")
+        self._storage_probe.close()
         workers = tuple(worker for worker in (
             self._discovery_worker, self._tcp_discovery_worker, self._moke_identification_worker,
         ) if worker is not None and worker.isRunning())
@@ -468,6 +472,7 @@ class StationDashboardController(QObject):
             self.tcp_controls.setColumnStretch(3, 2)
 
     def update_settings(self, settings: StationSettings) -> None:
+        self._storage_probe.set_path(settings.storage.get("output_directory", "./measurements"))
         previous_resources = {
             name: self._device_resource(self._settings, name)
             for name in self._DEVICE_KEYS
@@ -570,7 +575,7 @@ class StationDashboardController(QObject):
         self._refresh_readiness()
 
     def _refresh_readiness(self) -> None:
-        readiness = self.evaluate_readiness()
+        readiness = self.evaluate_readiness(display_only=True)
         icon = {
             ReadinessLevel.PASS: "✓",
             ReadinessLevel.WARNING: "△",
@@ -589,6 +594,7 @@ class StationDashboardController(QObject):
         self,
         plan: ExecutionPlan | None = None,
         estimate: PlanEstimate | None = None,
+        *, display_only: bool = False,
     ) -> StationReadiness:
         return evaluate_station_readiness(
             self._settings,
@@ -598,6 +604,7 @@ class StationDashboardController(QObject):
             device_errors=self._device_errors,
             plan=self._compiled_plan if plan is None else plan,
             estimate=self._plan_estimate if estimate is None else estimate,
+            storage_probe_result=self._storage_probe.result if display_only else None,
         )
 
     def _scan_visa(self) -> None:

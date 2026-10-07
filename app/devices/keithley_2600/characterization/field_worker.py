@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.devices.keithley_2600.characterization.output_state import require_output_off
+
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import threading
@@ -28,7 +30,7 @@ def restore_field_policies(device, originals: dict[str, str]) -> tuple[bool, boo
     for channel in ("A", "B"):
         try:
             device.set_output(channel, False)
-            device.confirm_output_off(channel)
+            require_output_off(device, channel)
         except Exception as exc:
             errors.append(f"{channel} OUTPUT OFF: {exc}")
     if errors:
@@ -82,7 +84,7 @@ class FieldSeriesWorker(QThread):
                 ):
                     raise SafetyViolation("Both channels require a known compliance policy.")
             for channel in ("A", "B"):
-                self.device.confirm_output_off(channel)
+                require_output_off(self.device, channel)
                 if self.device.compliance_policy(channel) != self.expected_policies[channel]:
                     raise SafetyViolation("Policy changed since confirmation; series blocked.")
             store = FieldSeriesStore(self.directory, self.config, {
@@ -138,7 +140,7 @@ class FieldSeriesWorker(QThread):
                 restore_errors = []
                 for channel in ("A", "B"):
                     try:
-                        self.device.confirm_output_off(channel)
+                        require_output_off(self.device, channel)
                     except Exception as exc:
                         restore_errors.append(f"{channel} OUTPUT OFF: {exc}")
                 off, restored = not restore_errors, True

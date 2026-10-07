@@ -6,6 +6,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from tests.test_spectrum_correction_controller import wait_until
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import h5py
@@ -66,8 +68,10 @@ class ResultsBrowserTests(unittest.TestCase):
             page = ResultsPage(temporary)
             try:
                 page.runs.setCurrentItem(page.runs.topLevelItem(0))
+                wait_until(self.application, lambda: page._result_task is None)
                 self.application.processEvents()
-                self.assertEqual(page.points.topLevelItemCount(), 2)
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
+                self.assertEqual(page.points.model().rowCount(), 2)
                 self.assertIn(
                     "Results",
                     [
@@ -76,20 +80,23 @@ class ResultsBrowserTests(unittest.TestCase):
                     ],
                 )
 
-                page.points.setCurrentItem(page.points.topLevelItem(0))
+                page.points.setCurrentIndex(page.points.model().index(0, 0))
                 self.application.processEvents()
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
                 variant = page.spectrum_tab.spectrum_variant_combo
                 self.assertGreaterEqual(variant.findData("processed"), 0)
                 self.assertGreaterEqual(variant.findData("reference"), 0)
 
                 variant.setCurrentIndex(variant.findData("processed"))
                 self.application.processEvents()
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
                 self.assertEqual(
                     page.spectrum_plot.trace_point_count("Processed spectrum"),
                     3,
                 )
                 variant.setCurrentIndex(variant.findData("reference"))
                 self.application.processEvents()
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
                 self.assertEqual(
                     page.spectrum_plot.trace_point_count("Reference spectrum"),
                     3,
@@ -104,9 +111,11 @@ class ResultsBrowserTests(unittest.TestCase):
                 point_item = checkpoint_group.child(0)
                 page.experiment_tree.setCurrentItem(point_item)
                 self.application.processEvents()
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
                 self.assertTrue(page.sweep_tree.show_spectrum_button.isEnabled())
                 page.sweep_tree.show_spectrum_button.click()
                 self.application.processEvents()
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
                 self.assertEqual(
                     page.spectrum_plot.trace_point_count("Stored spectrum"), 3
                 )
@@ -117,6 +126,7 @@ class ResultsBrowserTests(unittest.TestCase):
                 )
                 page.experiment_tree.setCurrentItem(processed_item)
                 self.application.processEvents()
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
                 self.assertEqual(
                     page.spectrum_plot.trace_point_count("Processed spectrum"),
                     3,
@@ -128,6 +138,7 @@ class ResultsBrowserTests(unittest.TestCase):
                 )
                 page.experiment_tree.setCurrentItem(references_group.child(0))
                 self.application.processEvents()
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
                 self.assertEqual(
                     page.spectrum_plot.trace_point_count("Reference spectrum"),
                     3,
@@ -137,18 +148,22 @@ class ResultsBrowserTests(unittest.TestCase):
                 self.assertEqual(filters.parameter_set_combo.count(), 3)
                 filters.parameter_set_combo.setCurrentIndex(1)
                 self.application.processEvents()
-                self.assertEqual(page.points.topLevelItemCount(), 1)
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
+                self.assertEqual(page.points.model().rowCount(), 1)
                 filters.clear_parameter_filter()
                 self.application.processEvents()
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
                 filters.filter_parameter_combo.setCurrentIndex(
                     filters.filter_parameter_combo.findData("source.level_v")
                 )
                 self.application.processEvents()
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
                 filters.filter_value_combo.setCurrentIndex(
                     filters.filter_value_combo.findData(1.0)
                 )
                 self.application.processEvents()
-                self.assertEqual(page.points.topLevelItemCount(), 1)
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
+                self.assertEqual(page.points.model().rowCount(), 1)
                 self.assertIn("1 of 2", filters.filter_summary.text())
             finally:
                 page.close()
@@ -322,9 +337,11 @@ class ResultsBrowserTests(unittest.TestCase):
             page = ResultsPage(temporary)
             try:
                 page.runs.setCurrentItem(page.runs.topLevelItem(0))
+                wait_until(self.application, lambda: page._result_task is None)
                 self.application.processEvents()
-                self.assertEqual(page.points.topLevelItemCount(), 2)
-                self.assertEqual(page.points.currentItem().text(0), "0")
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
+                self.assertEqual(page.points.model().rowCount(), 2)
+                self.assertEqual(page.points.currentIndex().siblingAtColumn(0).data(), "0")
                 self.assertEqual(
                     page.spectrum_plot.trace_point_count("Spectrum (dBm)"), 3
                 )
@@ -332,7 +349,8 @@ class ResultsBrowserTests(unittest.TestCase):
 
                 page.spectrum_tab.next_button.click()
                 self.application.processEvents()
-                self.assertEqual(page.points.currentItem().text(0), "1")
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
+                self.assertEqual(page.points.currentIndex().siblingAtColumn(0).data(), "1")
                 self.assertIn("2 / 2", page.spectrum_tab.position_label.text())
                 self.assertFalse(page.spectrum_tab.next_button.isEnabled())
 
@@ -341,13 +359,15 @@ class ResultsBrowserTests(unittest.TestCase):
                 self.assertGreaterEqual(parameter_index, 0)
                 filters.filter_parameter_combo.setCurrentIndex(parameter_index)
                 self.application.processEvents()
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
                 self.assertIn("100 mA", filters.filter_value_combo.itemText(1))
                 filters.filter_value_combo.setCurrentIndex(
                     filters.filter_value_combo.findData(0.1)
                 )
                 self.application.processEvents()
-                self.assertEqual(page.points.topLevelItemCount(), 1)
-                self.assertEqual(page.points.topLevelItem(0).text(0), "0")
+                wait_until(self.application, lambda: not page.spectrum_tab._read_tasks and page.spectrum_tab._filter_task is None)
+                self.assertEqual(page.points.model().rowCount(), 1)
+                self.assertEqual(page.points.model().index(0, 0).data(), "0")
             finally:
                 page.close()
 
@@ -587,8 +607,8 @@ class ResultsBrowserTests(unittest.TestCase):
                 "  type: sequence\n"
                 "  children:\n"
                 "    - id: meas-point\n"
-                "      type: action\n"
-                "      name: measure\n"
+                "      type: wait\n"
+                "      duration: 3 s\n"
                 "finally: []\n"
             )
             w = Hdf5RunWriter(
@@ -609,6 +629,9 @@ class ResultsBrowserTests(unittest.TestCase):
 
                 # Tree model has roots
                 self.assertGreater(len(panel.tree_model.tree.roots), 0)
+                self.assertIn("seq-main", panel.tree_model.tree.by_id)
+                self.assertIn("meas-point", panel.tree_model.tree.by_id)
+                self.assertEqual(panel.tree_model.tree.source_text, source.strip())
 
                 # Segmented switcher toggles between views
                 self.assertEqual(panel.view_switch.items["tree"].text(), "Sweep structure")

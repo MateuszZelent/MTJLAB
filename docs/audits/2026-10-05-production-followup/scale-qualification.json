@@ -1,0 +1,23 @@
+{
+  "simulation": true,
+  "simulated_dut_resistance_ohm": 0.1,
+  "dimensions": [
+    11,
+    17,
+    7
+  ],
+  "points": 1309,
+  "bins": 10001,
+  "compile_s": 0.8656655000522733,
+  "run_and_close_s": 194.80115110008046,
+  "wait_policy_s": 3,
+  "waits_recorded": 1309,
+  "actual_waits_bypassed_for_scale_test": true,
+  "hdf5_bytes": 656027500,
+  "estimated_archive_upper_bytes": 2606072877,
+  "estimated_public_import_upper_bytes": 925058880,
+  "estimated_nominal_duration_s": 4995.20308999984,
+  "hdf5_sha256": "85528a4505db952cf356ba0b3dbaf97ba9d7f8abc7ac6c93f8a2f448ef0ab4ff",
+  "pythat_valid": true,
+  "pythat_version": "0.2.14"
+}

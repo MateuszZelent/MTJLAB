@@ -8,14 +8,9 @@ from pathlib import Path
 import tempfile
 from typing import Mapping
 
-from app.engine.compiler import ExecutionPlan
+from app.engine.compiler import ExecutionPlan, action_can_energize
 from app.engine.estimation import PlanEstimate
 from app.settings.models import StationSettings
-
-_ENERGIZING_OUTPUT_ACTIONS = frozenset(
-    {"set_rigol_output", "set_keithley_output", "set_anritsu_sg_output"}
-)
-
 
 class ReadinessLevel(StrEnum):
     PASS = "pass"
@@ -65,8 +60,13 @@ def evaluate_station_readiness(
     device_errors: Mapping[str, str] | None = None,
     plan: ExecutionPlan | None = None,
     estimate: PlanEstimate | None = None,
+    storage_probe_result: tuple[bool, str] | None = None,
 ) -> StationReadiness:
-    """Build a deterministic, presentation-independent readiness checklist."""
+    """Build readiness; callers may supply cached storage evidence for display.
+
+    Preflight callers omit ``storage_probe_result`` to perform a fresh probe.
+    Cached display evidence is never authorization to begin a run.
+    """
 
     items: list[ReadinessItem] = []
     items.append(
@@ -126,8 +126,9 @@ def evaluate_station_readiness(
             detail = f"Assigned to {resource}; not required by the current plan"
         items.append(ReadinessItem(f"device.{device}", configured.display_name, detail, level))
 
-    storage_ok, storage_detail = _probe_output_directory(
-        settings.storage.get("output_directory", "./measurements")
+    storage_ok, storage_detail = (
+        storage_probe_result if storage_probe_result is not None
+        else _probe_output_directory(settings.storage.get("output_directory", "./measurements"))
     )
     items.append(
         ReadinessItem(
@@ -166,14 +167,10 @@ def evaluate_station_readiness(
                 ReadinessLevel.WARNING if estimate.warnings else ReadinessLevel.PASS,
             )
         )
-        energized = any(
-            action.kind in _ENERGIZING_OUTPUT_ACTIONS
-            and bool(action.payload.get("enabled"))
-            for action in plan.actions
-        )
+        energized = any(action_can_energize(action) for action in plan.actions)
         has_legacy_dut_limits = bool(plan.recipe_dut_limits)
         if not energized:
-            dut_detail = "Plan contains no OUTPUT ON action"
+            dut_detail = "Plan contains no OUTPUT ON or MOKE DAC update action"
             dut_level = ReadinessLevel.PASS
         elif has_legacy_dut_limits:
             dut_detail = (

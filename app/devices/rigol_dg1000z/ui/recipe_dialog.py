@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import math
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
@@ -27,6 +28,7 @@ from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
 from app.ui.recipes import SweepGeneratorDialog
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
+from app.ui.recipes.configuration_comparison import ConfigurationReview, ConfigurationComparisonRow
 
 
 class RigolNodeEditorDialog(FluentRecipeDialog):
@@ -42,12 +44,24 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         parameter_actions: list[dict[str, object]] | None = None,
         channel: int = 1,
         output_policy: str = "unchanged",
+        carrier_only: bool = False,
+        programmed_fields: set[str] | None = None,
+        current_snapshot_resolver=None,
     ) -> None:
         super().__init__(parent)
         self.setProperty("stationSurface", "page")
         snapshot = snapshot or RigolConfigurationSnapshot(channel=channel)
         self._settings = settings
-        self._snapshot_resolver = snapshot_resolver
+        self._carrier_only = carrier_only
+        self._programmed_fields = None if programmed_fields is None else set(programmed_fields)
+        self._review_baselines = {}
+        for number in (1, 2):
+            try:
+                resolver = current_snapshot_resolver or snapshot_resolver
+                current = resolver(number) if resolver else None
+            except Exception:
+                current = None
+            self._review_baselines[number] = current
         self._working_segments: dict[str, list[dict[str, object]]] = {}
         self.plan_mode = True
         self.hardware_actions_enabled = False
@@ -58,6 +72,8 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         heading = BodyLabel("Rigol DG1032Z · Carrier and output")
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
+        self.review = ConfigurationReview(surface)
+        layout.addWidget(self.review)
         description = BodyLabel(
             "The complete carrier snapshot is stored in the recipe. Select one of "
             "Frequency, HighL or LowL as a local ROI axis when required."
@@ -66,6 +82,8 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         description.setObjectName("recipeHint")
         layout.addWidget(description)
         content = QSplitter(Qt.Orientation.Horizontal)
+        self.content_splitter = content
+        content.setChildrenCollapsible(False)
         content.setParent(surface)
         carrier = CardWidget(surface)
         form = QFormLayout(carrier)
@@ -167,6 +185,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             ("carrier.offset", "Offset"),
         ):
             selector = ComboBox(actions_frame)
+            selector.addItem("Unchanged", userData="unchanged")
             selector.addItem("Set fixed", userData="set")
             selector.addItem("Sweep — ROI required", userData="sweep")
             selector.currentIndexChanged.connect(self._selection_changed)
@@ -179,7 +198,8 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         actions_layout.addRow(self.open_roi_button)
         self.output_policy = ComboBox(actions_frame)
         self.output_policy.addItem(
-            "Keep OUTPUT OFF (safe default)", userData="unchanged"
+            "No OUTPUT ON after configuration" if carrier_only else "Leave OUTPUT unchanged",
+            userData="unchanged",
         )
         self.output_policy.addItem(
             "OUTPUT ON for this block · OFF on exit", userData="on"
@@ -194,16 +214,25 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         output_index = self.output_policy.findData(output_policy)
         self.output_policy.setCurrentIndex(output_index if output_index >= 0 else 0)
         actions_layout.addRow("Output", self.output_policy)
-        content.addWidget(actions_frame)
+        actions_scroll = ScrollArea(surface)
+        actions_scroll.setWidgetResizable(True)
+        actions_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        actions_scroll.setWidget(actions_frame)
+        content.addWidget(actions_scroll)
         content.setStretchFactor(0, 3)
         content.setStretchFactor(1, 2)
         layout.addWidget(content, 1)
-        note = BodyLabel(
-            "Plan editing is offline. Hardware sweep/modulation/burst stay manual-only; "
-            "recipe axes use validated point updates with readback. Continuous mode never "
+        note = BodyLabel("Plan editing is offline. " + (
+            "Configuration forces this channel OUTPUT OFF. "
+            "Basic recipe configuration requires VPP units and modulation, hardware sweep, "
+            "burst, harmonics and summing OFF; conflicting front-panel settings block execution. "
+            if carrier_only else
+            "Only selected parameters are updated; other settings come from the preceding "
+            "explicit configuration in this recipe. OUTPUT follows the selected policy. "
+            "Recipe axes use validated point updates with readback. Continuous mode never "
             "adopts an external device state: the same recipe must have configured and "
             "confirmed this channel OUTPUT ON first."
-        )
+        ))
         note.setWordWrap(True)
         note.setObjectName("recipeHint")
         layout.addWidget(note)
@@ -215,7 +244,9 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         footer.addWidget(self.apply_button)
         self.apply_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
-        self.channel.currentIndexChanged.connect(self._channel_changed)
+        # Retargeting must preserve the authored values and ROI actions.
+        # ConfigurationReview observes channel changes and compares them to
+        # the destination baseline without importing its device-page draft.
         self.waveform.currentTextChanged.connect(self._waveform_changed)
         self.time_mode.currentTextChanged.connect(self._dynamic_controls_changed)
         self.level_mode.currentTextChanged.connect(self._dynamic_controls_changed)
@@ -229,39 +260,180 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.load_plan_actions(parameter_actions or [])
         self._selection_changed()
         self._waveform_changed(self.waveform.currentText())
+        # The compiler takes these settings from an explicit preceding baseline,
+        # not from the informational snapshot stored in a parameter-update node.
+        baseline_controls = (
+            self.waveform, self.output_load, self.phase, self.duty, self.symmetry,
+            self.pulse_width, self.pulse_leading, self.pulse_trailing,
+        )
+        output_controls = (
+            self.output_polarity, self.output_mode, self.gate_polarity,
+            self.sync_enabled, self.sync_polarity, self.sync_delay,
+        )
+        for widget in output_controls + (() if carrier_only else baseline_controls):
+            widget.setEnabled(False)
+            widget.setToolTip("Not programmed by this node. Configure explicitly in the recipe baseline.")
+        if carrier_only:
+            for selector in self.parameter_selectors.values():
+                selector.setEnabled(False)
+            self.open_roi_button.setEnabled(False)
+            self.output_policy.setEnabled(False)
+        self._initial_configuration_values = self._configuration_values()
+        self.review.bind(self, self._comparison_rows)
 
-    def _channel_changed(self, _index: int) -> None:
-        if self._snapshot_resolver is None:
+    def _configuration_values(self):
+        def voltage(text):
+            try:
+                return parse_quantity(text, DIMENSION_VOLTAGE).si_value
+            except (ValueError, ConfigurationError):
+                return text
+
+        high, low = voltage(self.high_level.text()), voltage(self.low_level.text())
+        if self.waveform.currentText() == "DC":
+            high = low = voltage(self.offset.text())
+        elif self.level_mode.currentText() == "Amplitude / Offset":
+            amplitude, offset = voltage(self.vpp.text()), voltage(self.offset.text())
+            if isinstance(amplitude, (int, float)) and isinstance(offset, (int, float)):
+                high, low = offset + amplitude / 2, offset - amplitude / 2
+            else:
+                high = low = (amplitude, offset)
+        return {
+            "channel": self.selected_channel(), "waveform": self.waveform.currentText(),
+            "frequency": (self.time_mode.currentText(), self.frequency.text(), self.period.text()),
+            "high_level": high, "low_level": low,
+            "output_load": self.output_load.text(), "phase_deg": self.phase.text(),
+            "square_duty_percent": self.duty.text(), "ramp_symmetry_percent": self.symmetry.text(),
+            "pulse_width": self.pulse_width.text(), "pulse_leading": self.pulse_leading.text(),
+            "pulse_trailing": self.pulse_trailing.text(),
+        }
+
+    def programmed_configuration_fields(self) -> set[str]:
+        values = self._configuration_values()
+        if self._programmed_fields is None:
+            return set(values)
+        return self._programmed_fields | {
+            key for key, value in values.items()
+            if value != self._initial_configuration_values[key]
+        }
+
+    def _comparison_rows(self):
+        baseline = self._review_baselines.get(self.selected_channel())
+        fields = {
+            "waveform": self.waveform.currentText(), "frequency": self.frequency.text(),
+            "high_level": self.high_level.text(), "low_level": self.low_level.text(),
+            "output_load": self.output_load.text(), "phase_deg": self.phase.text(),
+        }
+        if self.time_mode.currentText() == "Period":
+            try:
+                fields["frequency"] = self._effective_frequency()
+            except (ValueError, ConfigurationError):
+                fields["frequency"] = "Invalid period"
+        if self.waveform.currentText() == "DC":
+            fields["high_level"] = fields["low_level"] = self.offset.text()
+        elif self.level_mode.currentText() == "Amplitude / Offset":
+            try:
+                amplitude = parse_quantity(self.vpp.text(), DIMENSION_VOLTAGE).si_value
+                offset = parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value
+                fields["high_level"] = f"{offset + amplitude / 2:.12g} V"
+                fields["low_level"] = f"{offset - amplitude / 2:.12g} V"
+            except (ValueError, ConfigurationError):
+                fields["high_level"] = fields["low_level"] = "Invalid levels"
+        if self.waveform.currentText() in {"DC", "NOIS"}:
+            fields.pop("frequency")
+            fields.pop("phase_deg")
+        if self.waveform.currentText() == "DC":
+            fields.pop("low_level")  # DC has one physical offset, not two endpoints.
+        if self.waveform.currentText() == "SQU":
+            fields["square_duty_percent"] = self.duty.text()
+        elif self.waveform.currentText() == "RAMP":
+            fields["ramp_symmetry_percent"] = self.symmetry.text()
+        elif self.waveform.currentText() == "PULS":
+            fields.update(pulse_width=self.pulse_width.text(), pulse_leading=self.pulse_leading.text(),
+                          pulse_trailing=self.pulse_trailing.text())
+        if not self._carrier_only:
+            fields.update(output_polarity=self.output_polarity.currentText(),
+                          output_mode=self.output_mode.currentText(),
+                          gate_polarity=self.gate_polarity.currentText(),
+                          sync_enabled=self.sync_enabled.isChecked(),
+                          sync_polarity=self.sync_polarity.currentText(), sync_delay=self.sync_delay.text())
+        field_actions = {}
+        for key, selector in self.parameter_selectors.items():
+            if self.actions_form.isRowVisible(selector) and selector.currentData() != "unchanged":
+                field = key.removeprefix("carrier.")
+                for affected in (("high_level", "low_level") if field in ("amplitude", "offset") else (field,)):
+                    action = "Sweep" if selector.currentData() == "sweep" else "Set"
+                    if field_actions.get(affected) != "Sweep":
+                        field_actions[affected] = action
+        programmed = self.programmed_configuration_fields()
+        rows = [ConfigurationComparisonRow(
+            key, key.replace("_", " ").capitalize(), getattr(baseline, key, None), value,
+            ("Set" if key in programmed else "Preserve") if self._carrier_only
+            else field_actions.get(key, "Preserve"),
+        ) for key, value in fields.items()]
+        if not self._carrier_only and self.waveform.currentText() != "DC" and self.level_mode.currentText() == "Amplitude / Offset":
+            selected = {
+                name: self.parameter_selectors[f"carrier.{name}"].currentData()
+                for name in ("amplitude", "offset")
+            }
+            active = [name for name, action in selected.items() if action != "unchanged"]
+            if len(active) == 1:
+                name = active[0]
+                value = self.vpp.text() if name == "amplitude" else self.offset.text()
+                current = None
+                if baseline is not None:
+                    try:
+                        high = parse_quantity(baseline.high_level, DIMENSION_VOLTAGE).si_value
+                        low = parse_quantity(baseline.low_level, DIMENSION_VOLTAGE).si_value
+                        current = f"{high - low if name == 'amplitude' else (high + low) / 2:.12g} V"
+                    except (ValueError, ConfigurationError):
+                        pass
+                requested = f"ROI {name}" if selected[name] == "sweep" else f"({value})"
+                formulas = (
+                    {"high_level": f"Previous recipe offset + {requested} / 2",
+                     "low_level": f"Previous recipe offset - {requested} / 2"}
+                    if name == "amplitude" else
+                    {"high_level": f"{requested} + previous recipe amplitude / 2",
+                     "low_level": f"{requested} - previous recipe amplitude / 2"}
+                )
+                rows = [ConfigurationComparisonRow(row.key, row.label, row.current, formulas[row.key], "Derived")
+                        if row.key in formulas else row for row in rows]
+                rows.append(ConfigurationComparisonRow(
+                    name, "Amplitude (Vpp)" if name == "amplitude" else "Offset",
+                    current, value, "Sweep" if selected[name] == "sweep" else "Set",
+                ))
+        policy = self.output_policy.currentData()
+        if self._carrier_only:
+            rows.append(ConfigurationComparisonRow("output_enabled", "OUTPUT during configuration", None, "OFF; no automatic ON", "Set"))
+        elif policy == "continue":
+            rows.append(ConfigurationComparisonRow("output_enabled", "OUTPUT before live updates", None, "ON confirmed by this recipe", "Require"))
+        else:
+            transitions = {
+                "unchanged": "Preserved",
+                "off": "OFF",
+                "on": "ON for block → OFF on exit",
+                "on_keep": "ON; remains ON",
+            }
+            rows.append(ConfigurationComparisonRow("output_enabled", "OUTPUT transitions", None, transitions[policy], "Preserve" if policy == "unchanged" else "Set"))
+        if self._carrier_only:
+            for key, label, planned in (
+                ("modulation_enabled", "Modulation", False),
+                ("frequency_sweep_enabled", "Hardware frequency sweep", False),
+                ("burst_enabled", "Burst", False),
+                ("harmonics_enabled", "Harmonics", False),
+                ("waveform_sum_enabled", "Waveform summing", False),
+                ("voltage_unit", "Amplitude unit", "VPP"),
+            ):
+                rows.append(ConfigurationComparisonRow(key, label, None, planned, "Require"))
+        return rows
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if not hasattr(self, "content_splitter"):
             return
-        snapshot = self._snapshot_resolver(self.selected_channel())
-        if isinstance(snapshot, RigolConfigurationSnapshot):
-            self._load_snapshot(snapshot)
-
-    def _load_snapshot(self, snapshot: RigolConfigurationSnapshot) -> None:
-        """Reload fields from the selected device channel without touching hardware."""
-
-        self.waveform.setCurrentText(snapshot.waveform)
-        self.time_mode.setCurrentText(snapshot.time_mode)
-        self.frequency.setText(snapshot.frequency)
-        self.level_mode.setCurrentText(snapshot.level_mode)
-        self.high_level.setText(snapshot.high_level)
-        self.low_level.setText(snapshot.low_level)
-        self.output_load.setText(snapshot.output_load)
-        self.phase.setText(snapshot.phase_deg)
-        self.duty.setText(snapshot.square_duty_percent)
-        self.symmetry.setText(snapshot.ramp_symmetry_percent)
-        self.pulse_width.setText(snapshot.pulse_width)
-        self.pulse_leading.setText(snapshot.pulse_leading)
-        self.pulse_trailing.setText(snapshot.pulse_trailing)
-        self.output_polarity.setCurrentText(snapshot.output_polarity)
-        self.output_mode.setCurrentText(snapshot.output_mode)
-        self.gate_polarity.setCurrentText(snapshot.gate_polarity)
-        self.sync_enabled.setChecked(snapshot.sync_enabled)
-        self.sync_polarity.setCurrentText(snapshot.sync_polarity)
-        self.sync_delay.setText(snapshot.sync_delay)
-        self._sync_period_from_frequency()
-        self._sync_vpp_offset_from_levels()
-        self._waveform_changed(snapshot.waveform)
+        orientation = Qt.Orientation.Vertical if self.width() < 980 else Qt.Orientation.Horizontal
+        if self.content_splitter.orientation() != orientation:
+            self.content_splitter.setOrientation(orientation)
+            self.content_splitter.setSizes([360, 240])
 
     def _sync_dc_level(self) -> None:
         if self.waveform.currentText() == "DC":
@@ -316,7 +488,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.vpp.setText(self._format_voltage(high - low, preferred_unit=preferred))
         self.offset.setText(self._format_voltage((high + low) / 2, preferred_unit=preferred))
 
-    def _sync_levels_from_vpp_offset(self) -> None:
+    def _sync_levels_from_vpp_offset(self, *, strict: bool = False) -> None:
         try:
             offset = parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value
             amplitude = (
@@ -324,10 +496,14 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
                 if self.waveform.currentText() == "DC"
                 else parse_quantity(self.vpp.text(), DIMENSION_VOLTAGE).si_value
             )
-        except Exception:
+            if amplitude < 0:
+                raise ConfigurationError("Rigol amplitude must not be negative.")
+            offset = quantize_rigol_voltage(offset)
+            amplitude = quantize_rigol_voltage(amplitude)
+        except (ConfigurationError, ValueError):
+            if strict:
+                raise
             return
-        offset = quantize_rigol_voltage(offset)
-        amplitude = quantize_rigol_voltage(amplitude)
         preferred = (
             "mV"
             if (
@@ -397,9 +573,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         if is_dc:
             self._sync_dc_level()
         for selector in self.parameter_selectors.values():
-            selector.setEnabled(not is_dc)
-            if is_dc:
-                selector.setCurrentIndex(selector.findData("set"))
+            selector.setEnabled(not self._carrier_only)
         self.actions_form.setRowVisible(
             self.parameter_selectors["carrier.frequency"], has_time
         )
@@ -413,11 +587,11 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             self.parameter_selectors["carrier.amplitude"], not is_dc and not high_low_mode
         )
         self.actions_form.setRowVisible(
-            self.parameter_selectors["carrier.offset"], not is_dc and not high_low_mode
+            self.parameter_selectors["carrier.offset"], is_dc or not high_low_mode
         )
         for parameter_id, selector in self.parameter_selectors.items():
             if not self.actions_form.isRowVisible(selector):
-                selector.setCurrentIndex(selector.findData("set"))
+                selector.setCurrentIndex(selector.findData("unchanged"))
 
     def selected_channel(self) -> int:
         return int(self.channel.currentData())
@@ -425,11 +599,22 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
     def selected_output_policy(self) -> str:
         return str(self.output_policy.currentData())
 
+    def _effective_frequency(self) -> str:
+        if self.time_mode.currentText() != "Period" or self.waveform.currentText() in {"DC", "NOIS"}:
+            return self.frequency.text().strip()
+        period = parse_quantity(self.period.text(), DIMENSION_TIME).si_value
+        if not math.isfinite(period) or period <= 0:
+            raise ConfigurationError("Rigol period must be finite and greater than zero.")
+        frequency = 1 / period
+        if not math.isfinite(frequency):
+            raise ConfigurationError("Rigol period produces a non-finite frequency.")
+        return f"{frequency:.12g} Hz"
+
     def configuration_snapshot(self) -> RigolConfigurationSnapshot:
         if self.waveform.currentText() == "DC":
             high_level = self.offset.text().strip()
         elif self.level_mode.currentText() == "Amplitude / Offset":
-            self._sync_levels_from_vpp_offset()
+            self._sync_levels_from_vpp_offset(strict=True)
             high_level = self.high_level.text().strip()
         else:
             high_level = self.high_level.text().strip()
@@ -442,7 +627,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             channel=self.selected_channel(),
             waveform=self.waveform.currentText(),
             time_mode=self.time_mode.currentText(),
-            frequency=self.frequency.text().strip(),
+            frequency=self._effective_frequency(),
             level_mode=self.level_mode.currentText(),
             high_level=high_level,
             low_level=low_level,
@@ -463,10 +648,10 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
 
     def planned_parameter_actions(self) -> list[dict[str, object]]:
         if self.level_mode.currentText() == "Amplitude / Offset":
-            self._sync_levels_from_vpp_offset()
+            self._sync_levels_from_vpp_offset(strict=True)
         high_level = self.high_level.text().strip()
         values = {
-            "carrier.frequency": self.frequency.text().strip(),
+            "carrier.frequency": self._effective_frequency(),
             "carrier.high_level": high_level,
             "carrier.low_level": (
                 high_level
@@ -479,6 +664,8 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         result: list[dict[str, object]] = []
         for parameter_id, selector in self.parameter_selectors.items():
             if self.actions_form.isRowVisible(selector) is False:
+                continue
+            if selector.currentData() == "unchanged":
                 continue
             action: dict[str, object] = {
                 "parameter_id": parameter_id,
@@ -494,6 +681,44 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         return result
 
     def load_plan_actions(self, actions: list[dict[str, object]]) -> None:
+        editors = {
+            "carrier.frequency": self.frequency,
+            "carrier.high_level": self.high_level,
+            "carrier.low_level": self.low_level,
+            "carrier.amplitude": self.vpp,
+            "carrier.offset": self.offset,
+        }
+        values = {
+            str(action.get("parameter_id")): str(action["value"])
+            for action in actions
+            if action.get("mode") in {"set", "sweep"} and "value" in action
+            and str(action.get("parameter_id")) in editors
+        }
+        endpoints = bool(values.keys() & {"carrier.high_level", "carrier.low_level"})
+        amplitude_offset = bool(values.keys() & {"carrier.amplitude", "carrier.offset"})
+        if endpoints and amplitude_offset:
+            raise ConfigurationError("Use either High/Low or Amplitude/Offset actions in one Rigol node.")
+        if endpoints:
+            self.level_mode.setCurrentText("High Level / Low Level")
+        elif amplitude_offset:
+            self.level_mode.setCurrentText("Amplitude / Offset")
+        # Restore one complete set before deriving its alternate representation.
+        # Intermediate textChanged callbacks must not overwrite another authored value.
+        blockers = [QSignalBlocker(editor) for editor in editors.values()]
+        try:
+            for parameter_id, value in values.items():
+                editors[parameter_id].setText(value)
+        finally:
+            for blocker in blockers:
+                blocker.unblock()
+        if endpoints:
+            self._sync_vpp_offset_from_levels()
+        elif amplitude_offset:
+            self._sync_levels_from_vpp_offset()
+        self._sync_period_from_frequency()
+        self._working_segments.clear()
+        for selector in self.parameter_selectors.values():
+            selector.setCurrentIndex(selector.findData("unchanged"))
         for action in actions:
             parameter_id = str(action.get("parameter_id", ""))
             selector = self.parameter_selectors.get(parameter_id)
@@ -521,7 +746,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
 
     def _selection_changed(self, *_args: object) -> None:
         self.open_roi_button.setEnabled(
-            self._selected_sweep_parameter() is not None
+            not self._carrier_only and self._selected_sweep_parameter() is not None
         )
 
     def _open_roi(self) -> None:
@@ -557,9 +782,15 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             self._working_segments[parameter_id] = dialog.segment_data()
 
     def accept(self) -> None:
+        try:
+            snapshot = self.configuration_snapshot()
+            actions = self.planned_parameter_actions()
+        except (ConfigurationError, ValueError) as exc:
+            QMessageBox.warning(self, "Rigol configuration", str(exc))
+            return
         sweeps = [
             action
-            for action in self.planned_parameter_actions()
+            for action in actions
             if action["mode"] == "sweep"
         ]
         if len(sweeps) > 1:
@@ -572,7 +803,6 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
                 self, "Rigol node", "Define ROI for the selected sweep parameter."
             )
             return
-        snapshot = self.configuration_snapshot()
         if self._settings is not None:
             try:
                 config = RigolChannelConfig(

@@ -71,6 +71,15 @@ class _ManagedVisaSession:
         if self._traffic_callback is not None:
             self._traffic_callback(message)
 
+    def ensure_remote(self) -> None:
+        """Address this GPIB instrument in Remote without locking its Local key."""
+        try:
+            self._session.control_ren(pyvisa.constants.RENLineOperation.asrt_address)
+            self._emit("VISA REN ASSERT_ADDRESS OK (Remote, Local key remains available)")
+        except Exception as exc:
+            self._emit(f"VISA REN ASSERT_ADDRESS ERROR: {exc}")
+            raise DeviceError(f"Could not enter GPIB Remote mode: {exc}") from exc
+
     @staticmethod
     def _display_response(response: str) -> str:
         if len(response) <= 1000:
@@ -246,11 +255,20 @@ class FakeVisaSession:
     write_termination: str | None = None
     closed: bool = False
     _keithley_sim: object = field(default=None, init=False, repr=False)
+    _anritsu_form: str = field(default="ASC,0", init=False, repr=False)
+
+    def ensure_remote(self) -> None:
+        if self.closed:
+            raise DeviceError("The fake VISA session is closed.")
+        self.writes.append("VISA REN ASSERT_ADDRESS")
 
     def write(self, command: str) -> None:
         if self.closed:
             raise DeviceError("The fake VISA session is closed.")
         self.writes.append(command)
+        if command.startswith("FORM "):
+            value = command[5:].strip().upper()
+            self._anritsu_form = "ASC,0" if value == "ASC" else value
         if re.match(r"^smu[ab]\.", command):
             self._keithley_state()._write(command)
 
@@ -266,6 +284,12 @@ class FakeVisaSession:
         self.writes.append(command)
         response = self.responses.get(command)
         if response is None:
+            if command == "SYST:LANG?":
+                return "SCPI"
+            if command == "FORM?":
+                return self._anritsu_form
+            if command == "SYST:ERR?":
+                return '0,"No error"'
             if command.startswith("print(") and "," in command and all(re.fullmatch(r"smu[ab]\.(source|measure)\.range[iv]", f.strip()) for f in command[6:-1].split(",")):
                 return "\t".join(self.query(f"print({field.strip()})") for field in command[6:-1].split(","))
             if re.fullmatch(
@@ -362,6 +386,8 @@ class FakeVisaSession:
             # these exact responses with a value or raising callable.
             if command == ":COUP?":
                 return "FREQ:OFF,PHASE:OFF,AMPL:OFF"
+            if command == ":COUN?":
+                return "OFF"
             if re.match(
                 r"^:SOUR\d+:(?:TRACK|MOD|SWE:STAT|BURS:STAT|HARM|SUM)\?$",
                 command,
@@ -378,6 +404,12 @@ class FakeVisaSession:
                     if match:
                         return match.group(1)
                 if field in ("OUTP", "OUTP1", "OUTP2"):
+                    return "0"
+                # Explicit initial output-path state for the fake Rigol.
+                # Assigned values above and injected responses take priority.
+                if re.fullmatch(r"OUTP[12]:(?:POL|MODE|GAT:POL|SYNC:POL)", field):
+                    return "NORM"
+                if re.fullmatch(r"OUTP[12]:SYNC(?::DEL)?", field):
                     return "0"
             raise DeviceError(f"No fake VISA response is configured for {command!r}.")
         return response(command) if callable(response) else response

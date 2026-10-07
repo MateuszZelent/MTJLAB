@@ -70,7 +70,7 @@ def parse_processing(value):
     if not isinstance(value, dict) or set(value) - {"filters", "parameters"}:
         raise ValueError("Spectrum processing supports only filters and parameters.")
     filters = value.get("filters", [])
-    if not isinstance(filters, list) or any(
+    if not isinstance(filters, (list, tuple)) or any(
         not isinstance(item, str) or item not in FILTERS for item in filters
     ):
         raise ValueError("Choose Narrow peaks, EMI lines or Denoise as spectrum filters.")
@@ -91,7 +91,7 @@ def parse_processing(value):
             raw["narrow_max_width"], DIMENSION_FREQUENCY
         ).si_value
     bands = raw.get("protected_bands", [])
-    if not isinstance(bands, list) or any(
+    if not isinstance(bands, (list, tuple)) or any(
         not isinstance(band, (list, tuple)) or len(band) != 2 for band in bands
     ):
         raise ValueError("Protected bands must be pairs of explicit frequencies.")

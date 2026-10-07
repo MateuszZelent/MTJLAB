@@ -145,7 +145,7 @@ class SimulatorTests(unittest.TestCase):
         )
         keithley.connect()
         keithley.configure_source(
-            KeithleySourceRequest("A", "current", 100e-6, 0.1)
+            KeithleySourceRequest("A", "current", 100e-6, 0.1, source_range_si=1e-3)
         )
 
         actual = keithley.update_source_level(
@@ -170,7 +170,7 @@ class SimulatorTests(unittest.TestCase):
         rigol.configure_output(
             RigolOutputConfig(1, output_load="HIGHZ", polarity="INV", sync_enabled=True, sync_delay_s=0.001)
         )
-        keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01))
         anritsu.configure_spectrum(SpectrumConfig(1e6, 2e6, 0, 101))
         trace = anritsu.fetch_trace()
         self.assertEqual(len(trace.powers_dbm), 101)
@@ -283,7 +283,7 @@ class SimulatorTests(unittest.TestCase):
             session_factory=SimulatedVisaFactory("keithley", keithley_resistance_ohm=67.0),
         )
         keithley.connect()
-        keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01))
         keithley.set_output("B", True)
 
         measurement = keithley.measure("B")
@@ -308,16 +308,16 @@ class SimulatorTests(unittest.TestCase):
         )
         keithley.connect()
         keithley.configure_source(
-            KeithleySourceRequest("A", "current", 0.0005, 0.067)
+            KeithleySourceRequest("A", "current", 0.0005, 0.067, source_range_si=0.01)
         )
         keithley.set_output("A", True)
         safe_a = keithley.measure("A")
         self.assertFalse(safe_a.compliance_detected)
         keithley.configure_source(
-            KeithleySourceRequest("A", "current", 0.001, 0.067)
+            KeithleySourceRequest("A", "current", 0.001, 0.067, source_range_si=0.01)
         )
         keithley.configure_source(
-            KeithleySourceRequest("B", "voltage", 0.05, 0.003)
+            KeithleySourceRequest("B", "voltage", 0.001, 0.0004, source_range_si=0.1)
         )
         keithley.set_output("A", True)
         keithley.set_output("B", True)
@@ -351,8 +351,8 @@ class SimulatorTests(unittest.TestCase):
             session_factory=SimulatedVisaFactory("keithley"),
         )
         keithley.connect()
-        keithley.configure_source(KeithleySourceRequest("A", "current", 0.0005, 0.067))
-        keithley.configure_source(KeithleySourceRequest("B", "voltage", 0.05, 0.003))
+        keithley.configure_source(KeithleySourceRequest("A", "current", 0.0005, 0.067, source_range_si=0.01))
+        keithley.configure_source(KeithleySourceRequest("B", "voltage", 0.001, 0.0004, source_range_si=0.1))
         session = keithley._session
         assert session is not None
         session.commands.clear()  # type: ignore[attr-defined]
@@ -382,7 +382,7 @@ class SimulatorTests(unittest.TestCase):
             session_factory=SimulatedVisaFactory("keithley"),
         )
         keithley.connect()
-        keithley.configure_source(KeithleySourceRequest("A", "current", 0.0005, 0.067))
+        keithley.configure_source(KeithleySourceRequest("A", "current", 0.0005, 0.067, source_range_si=0.01))
 
         with self.assertRaisesRegex(SafetyViolation, "Configure a safe Keithley source"):
             keithley.set_output_group(("A", "B"), True)
@@ -401,8 +401,8 @@ class SimulatorTests(unittest.TestCase):
             session_factory=SimulatedVisaFactory("keithley"),
         )
         keithley.connect()
-        keithley.configure_source(KeithleySourceRequest("A", "current", 0.0005, 0.067))
-        keithley.configure_source(KeithleySourceRequest("B", "voltage", 0.05, 0.003))
+        keithley.configure_source(KeithleySourceRequest("A", "current", 0.0005, 0.067, source_range_si=0.01))
+        keithley.configure_source(KeithleySourceRequest("B", "voltage", 0.001, 0.0004, source_range_si=0.1))
         keithley.set_output("A", True)
 
         self.assertEqual(
@@ -423,7 +423,7 @@ class SimulatorTests(unittest.TestCase):
             ),
         )
         keithley.connect()
-        keithley.configure_source(KeithleySourceRequest("A", "current", 0.001, 0.067))
+        keithley.configure_source(KeithleySourceRequest("A", "current", 0.001, 0.067, source_range_si=0.01))
         keithley.set_output("A", True)
         keithley.measure("A")
 
@@ -449,10 +449,10 @@ class SimulatorTests(unittest.TestCase):
         )
         keithley.connect()
         keithley.configure_source(
-            KeithleySourceRequest("A", "voltage", 0.05, 0.001)
+            KeithleySourceRequest("A", "voltage", 0.05, 0.001, source_range_si=0.1)
         )
         keithley.configure_source(
-            KeithleySourceRequest("B", "current", 0.001, 0.067)
+            KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)
         )
         keithley.set_output("A", True)
         keithley.set_output("B", True)
@@ -488,7 +488,7 @@ class SimulatorTests(unittest.TestCase):
         )
         keithley.connect()
         keithley.configure_source(
-            KeithleySourceRequest("B", "current", 0.001, 0.067)
+            KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)
         )
         keithley.set_output("B", True)
         warning = keithley.measure("B")
@@ -550,7 +550,7 @@ class SimulatorTests(unittest.TestCase):
             session_factory=SimulatedVisaFactory("keithley", keithley_resistance_ohm=67.0),
         )
         identity = keithley.connect()
-        keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01))
         keithley.set_output("B", True)
         measurement = keithley.measure("B")
 
@@ -574,7 +574,7 @@ class SimulatorTests(unittest.TestCase):
             session_factory=SimulatedVisaFactory("keithley", keithley_resistance_ohm=1_000.0),
         )
         keithley.connect()
-        keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01))
         keithley.set_output("B", True)
 
         measurement = keithley.measure("B")
@@ -597,7 +597,7 @@ class SimulatorTests(unittest.TestCase):
         keithley.connect()
 
         with self.assertRaisesRegex(DeviceError, "901,simulated source error"):
-            keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+            keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01))
 
     def test_disabled_device_cannot_open_a_session(self) -> None:
         raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
@@ -653,7 +653,7 @@ class SimulatorTests(unittest.TestCase):
                 PlanAction(
                     "keithley-config",
                     "configure_keithley",
-                    {"request": KeithleySourceRequest("B", "current", 0.001, 0.067)},
+                    {"request": KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)},
                     {},
                 ),
                 PlanAction(

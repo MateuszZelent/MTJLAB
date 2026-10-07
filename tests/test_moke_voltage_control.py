@@ -52,6 +52,63 @@ def mutations(transport):
             if MokeFrame.decode(raw).record_type == MokeCommandType.SET_VOUT]
 
 
+def test_initial_voltage_outside_profile_has_exact_diagnostics_and_no_writes():
+    from app.devices.moke_box.protocol import set_vout, encode_voltage
+    adapter, transport, profile = controlled_adapter(minimum=-0.1, maximum=0.1, minimum_settling_s=0)
+    transport.send(set_vout(2, 0.2))
+    transport.sent.clear()
+    plan = plan_for(profile, targets=(0,), minimum=-0.1, maximum=0.1)
+    adapter.configure_voltage_plan(plan)
+    adapter.arm_voltage_plan(plan)
+    with pytest.raises(DeviceError) as error:
+        adapter.ramp_vout(2, 0)
+    message = str(error.value)
+    expected = decode_voltage(*encode_voltage(0.2))
+    assert f"VOUT 2 readback {expected:+.9g} V" in message
+    assert "approved range [-0.1, +0.1] V" in message
+    assert "requested target +0 V" in message
+    assert "Ramp was not started" in message
+    assert not mutations(transport)
+
+
+def test_repeated_stop_confirms_fresh_zero_without_rewriting_it():
+    adapter, transport, profile = controlled_adapter(minimum_settling_s=0)
+    plan = plan_for(profile, targets=(0.2,))
+    adapter.configure_voltage_plan(plan)
+    adapter.arm_voltage_plan(plan)
+    adapter.ramp_vout(2, 0.2)
+    assert adapter.stop_vout(2).safe_target_confirmed
+    transport.sent.clear()
+    result = adapter.stop_vout(2)
+    assert result.safe_target_confirmed and result.actual_v == 0
+    assert transport.sent  # Fresh readback; cached zero is never sufficient.
+    assert not mutations(transport)
+    assert not adapter._armed
+
+
+def test_repeated_stop_corrects_external_change_after_confirmed_zero():
+    from app.devices.moke_box.protocol import set_vout
+    adapter, transport, _ = controlled_adapter(minimum_settling_s=0)
+    assert adapter.stop_vout(2).safe_target_confirmed
+    transport.send(set_vout(2, 0.2))  # Another actor changes the DAC after shutdown.
+    transport.sent.clear()
+    result = adapter.stop_vout(2)
+    assert result.safe_target_confirmed and result.actual_v == 0
+    assert len(mutations(transport)) > 1
+    assert all(frame.channel == 2 for frame in mutations(transport))
+
+
+def test_repeated_stop_readback_failure_does_not_reuse_cached_zero(monkeypatch):
+    adapter, _, _ = controlled_adapter(minimum_settling_s=0)
+    assert adapter.stop_vout(2).safe_target_confirmed
+    def failed_readback():
+        raise TimeoutError("injected shutdown readback failure")
+    monkeypatch.setattr(adapter, "_read_vouts_from_transport", failed_readback)
+    with pytest.raises(DeviceError):
+        adapter.stop_vout(2)
+    assert not adapter._safe_target_confirmed
+
+
 @pytest.mark.parametrize("initial", [0.4, -0.4])
 def test_dac_zero_ramps_monotonically_with_physical_step_and_slew_limits(initial):
     adapter, transport, profile = controlled_adapter(simulation=False, minimum_settling_s=0)

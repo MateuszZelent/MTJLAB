@@ -8,17 +8,17 @@ actions and explicit sweep nodes become the same axis/loop/setpoint shape.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from itertools import product
+import math
 from types import MappingProxyType
-from typing import Mapping, Protocol, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
-from app.domain.errors import ConfigurationError
+from app.domain.errors import ConfigurationError, ExecutionError, SafetyViolation
 from app.domain.quantities import Quantity, QuantityError, parse_quantity
 from app.recipes.models import Recipe, RecipeNode
 from app.recipes.parameter_registry import parameter_descriptor
-from app.recipes.sweep_points import generate_sweep_stage_points
+from app.recipes.sweep_points import estimate_sweep_point_count, generate_sweep_stage_points
 
 
 class SweepBindingDraft:
@@ -72,6 +72,15 @@ class SweepAxisBinding:
     stages: tuple[SweepStageSpec, ...]
     points: tuple[Quantity, ...]
 
+    def stage_index_at(self, point_index: int) -> int:
+        """Identify the occurrence, including return paths and repeated values."""
+        offset = 0
+        for stage in self.stages:
+            offset += len(stage.points)
+            if point_index < offset:
+                return stage.stage_index
+        raise IndexError(point_index)
+
 
 @dataclass(frozen=True, slots=True)
 class AxisPointContext:
@@ -82,6 +91,41 @@ class AxisPointContext:
     value_si: float
     active_setpoints_si: Mapping[str, float]
     loop_path: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AxisContextSequence(Sequence[AxisPointContext]):
+    """Immutable Cartesian view; never allocates a dictionary per combination."""
+
+    axes: tuple[SweepAxisBinding, ...]
+
+    def __len__(self) -> int:
+        return math.prod(len(axis.points) for axis in self.axes)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return tuple(self[position] for position in range(*index.indices(len(self))))
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        positions = []
+        remainder = index
+        for axis in reversed(self.axes):
+            remainder, position = divmod(remainder, len(axis.points))
+            positions.append(position)
+        positions.reverse()
+        own = self.axes[-1]
+        point_index = positions[-1]
+        values = {
+            axis.target: axis.points[position].si_value
+            for axis, position in zip(self.axes, positions, strict=True)
+        }
+        return AxisPointContext(
+            own.axis_id, point_index, len(own.points), own.stage_index_at(point_index),
+            own.points[point_index].si_value, MappingProxyType(values),
+            tuple(axis.source_node_id for axis in self.axes),
+        )
 
 
 class SemanticNodeKind(StrEnum):
@@ -116,7 +160,7 @@ class SemanticMeasurementTree:
     children_by_id: Mapping[str, tuple[str, ...]] = field(
         default_factory=lambda: MappingProxyType({})
     )
-    point_contexts: Mapping[str, tuple[AxisPointContext, ...]] = field(
+    point_contexts: Mapping[str, Sequence[AxisPointContext]] = field(
         default_factory=lambda: MappingProxyType({})
     )
     source_text: str = ""
@@ -126,6 +170,26 @@ class SemanticMeasurementTree:
             return self.by_id[semantic_id]
         except KeyError as exc:
             raise ConfigurationError(f"Unknown semantic node {semantic_id!r}.") from exc
+
+    def editor_projection(self) -> SemanticMeasurementTree:
+        """Keep editor rows stable without regenerating any sweep axes or points."""
+        group_id = "__finally__.automatic_safeguards"
+        group = self.by_id.get(group_id)
+        if group is None or not group.children:
+            return self
+        group = replace(group, children=())
+        final = replace(self.require("__finally__"), children=tuple(
+            group if child.semantic_id == group_id else child
+            for child in self.require("__finally__").children))
+        removed = set(self.children_by_id[group_id])
+        nodes = {key: value for key, value in self.by_id.items() if key not in removed}
+        nodes.update({group_id: group, "__finally__": final})
+        children = {key: value for key, value in self.children_by_id.items() if key not in removed}
+        children[group_id] = ()
+        return replace(self, roots=tuple(final if root.semantic_id == "__finally__" else root for root in self.roots),
+                       by_id=MappingProxyType(nodes), children_by_id=MappingProxyType(children),
+                       parent_by_id=MappingProxyType({key: value for key, value in self.parent_by_id.items()
+                                                     if key not in removed}))
 
 
 class AxisBindingResolver(Protocol):
@@ -243,7 +307,8 @@ def _binding_for_legacy(
 
 
 def _typed_binding(
-    draft: SweepBindingDraft, axis_id: str, source_node_id: str
+    draft: SweepBindingDraft, axis_id: str, source_node_id: str, max_points: int,
+    cancellation_requested: Callable[[], bool] | None = None,
 ) -> SweepAxisBinding:
     for field_name in ("owner_node_id", "device_module", "endpoint", "parameter_id", "target", "dimension"):
         _as_nonempty(getattr(draft, field_name), f"sweep binding {field_name}")
@@ -261,11 +326,24 @@ def _typed_binding(
             f"Sweep target {draft.target!r} belongs to {descriptor.device_module!r}, "
             f"not {draft.device_module!r}."
         )
+    parameter_id = draft.parameter_id
+    if draft.device_module == "anritsu" and parameter_id.startswith("sg."):
+        parameter_id = "signal_generator." + parameter_id.removeprefix("sg.")
+    if draft.device_module in {"rigol", "keithley", "anritsu"} and (
+        draft.endpoint != _endpoint_for_target(draft.target)
+        or parameter_id != _canonical_parameter_id(draft.target)
+    ):
+        raise ConfigurationError(
+            f"{draft.device_module.capitalize()} sweep binding endpoint/parameter does not match target {draft.target!r}."
+        )
     stages_raw = tuple(draft.stages)
     if not stages_raw:
         raise ConfigurationError(f"Sweep axis {axis_id!r} must contain at least one stage.")
+    count = estimate_sweep_point_count(stages_raw, draft.dimension)
+    if count > max_points:
+        raise SafetyViolation(f"Sweep axis {axis_id!r} expands to {count} points; limit is {max_points}.")
     try:
-        generated_stages = generate_sweep_stage_points(stages_raw, draft.dimension)
+        generated_stages = generate_sweep_stage_points(stages_raw, draft.dimension, cancellation_requested=cancellation_requested)
     except (ConfigurationError, QuantityError, TypeError, ValueError) as exc:
         raise ConfigurationError(f"Invalid stages for sweep axis {axis_id!r}: {exc}") from exc
     stages: list[SweepStageSpec] = []
@@ -380,6 +458,7 @@ def _canonical_parameter_id(target: str) -> str:
         return "output.voltage"
     if len(parts) >= 3 and parts[0] == "keithley":
         return {
+            "level": "source.level",
             "current": "source.level",
             "voltage": "source.level",
             "compliance_voltage": "source.compliance",
@@ -391,6 +470,8 @@ def _canonical_parameter_id(target: str) -> str:
             "frequency": "carrier.frequency",
             "high_level": "carrier.high_level",
             "low_level": "carrier.low_level",
+            "amplitude": "carrier.amplitude",
+            "offset": "carrier.offset",
         }.get(parts[-1], parts[-1])
     if parts[:2] == ["anritsu", "sg"]:
         return f"signal_generator.{parts[-1]}"
@@ -409,7 +490,22 @@ def _endpoint_for_target(target: str) -> str:
 
 
 def _label(node: RecipeNode) -> str:
+    if node.type == "set_moke_voltage":
+        return f"Set MOKE VOUT {node.data.get('channel', '?')} · {node.data.get('voltage', '?')}"
+    if node.type == "stop_moke_voltage":
+        channel = node.data.get("channel")
+        scope = f"VOUT {channel}" if channel is not None else "all VOUT channels used by this run"
+        return f"MOKE {scope} · Return to 0 V and disarm"
+    if node.type == "final_state":
+        device = node.data.get("device")
+        channel = node.data.get("channel", "?")
+        endpoint = f"MOKE VOUT {channel}" if device == "moke_box" else f"{str(device).title()} {channel}"
+        return f"{endpoint} · state after success"
     operation = node.data.get("operation")
+    if node.type == "if":
+        return f"If · {node.data.get('left', '?')} {node.data.get('operator', '?')} {node.data.get('right', '?')}"
+    if node.type == "repeat":
+        return f"Repeat · {node.data.get('count', '?')} times"
     if node.type == "sequence" and not node.data.get("device_module"):
         return "Measurement sequence"
     if node.type.startswith("configure_") or node.data.get("device_module"):
@@ -477,14 +573,49 @@ def _mapping(data: Mapping[str, object]) -> Mapping[str, object]:
     return MappingProxyType(dict(data))
 
 
+def axis_update_matches(child: RecipeNode, binding: SweepAxisBinding, compiled_kind: str) -> bool:
+    """Only fold the exact authored reference update represented by Set ROI.
+
+    A literal update or an operation affecting another channel/field remains
+    an independent, visible instruction, even when its action kind matches.
+    """
+    if child.type != compiled_kind:
+        return False
+    field_name = {
+        "update_keithley_level": "level", "update_keithley_compliance": "compliance",
+        "update_rigol_frequency": "frequency", "update_moke_voltage": "voltage",
+        "wait": "duration",
+    }.get(compiled_kind)
+    if compiled_kind == "update_rigol_levels":
+        field_name = binding.target.rsplit(".", 1)[-1]
+    if compiled_kind == "update_anritsu_sg":
+        field_name = "power" if binding.target.endswith("power") else "frequency"
+    if field_name is None or child.data.get(field_name) != "${" + binding.target + "}":
+        return False
+    identity_fields = {"channel", "mode", "disabled"}
+    if set(child.data) - identity_fields - {field_name}:
+        return False
+    if binding.device_module in {"keithley", "rigol", "moke_box"}:
+        channel = str(child.data.get("channel", ""))
+        expected = binding.endpoint.removeprefix("vout")
+        if channel.upper() != expected.upper():
+            return False
+    return True
+
+
 def normalize_recipe_tree(
     recipe: Recipe,
     resolvers: Mapping[str, AxisBindingResolver],
+    *, max_points: int = 100_000,
+    cancellation_requested: Callable[[], bool] | None = None,
+    safe_shutdown_actions: tuple[str, ...] | None = None,
+    show_safeguard_steps: bool = True,
 ) -> SemanticMeasurementTree:
     """Return one immutable semantic snapshot for a schema-version-1 recipe."""
 
     recipe_nodes = _all_recipe_nodes(recipe)
     built_ids: set[str] = set()
+    allocated_axis_values = 0
 
     def add_id(semantic_id: str) -> None:
         if semantic_id in built_ids:
@@ -492,12 +623,20 @@ def normalize_recipe_tree(
         built_ids.add(semantic_id)
 
     def make_axis(node: RecipeNode, draft: SweepBindingDraft) -> SemanticTreeNode:
+        nonlocal allocated_axis_values
+        try:
+            count = estimate_sweep_point_count(draft.stages, draft.dimension)
+        except (QuantityError, TypeError, KeyError, ValueError) as exc:
+            raise ConfigurationError(f"Invalid stages/dimension for sweep axis {node.id}: {exc}") from exc
+        if allocated_axis_values + count > 2 * max_points:
+            raise SafetyViolation("Total sweep-axis vectors exceed the preflight allocation budget.")
+        allocated_axis_values += count
         axis_id = _axis_id(node, draft) if node.type != "sweep" else _axis_id(node)
         # Explicit nodes use their source ID. Legacy nodes derive a stable ID
         # from the owner and parameter, as this is independent of list order.
         if node.type != "sweep":
             axis_id = f"{draft.owner_node_id}.axis.{draft.parameter_id.replace('.', '-').replace('/', '-') }"
-        binding = _typed_binding(draft, axis_id, node.id)
+        binding = _typed_binding(draft, axis_id, node.id, max_points, cancellation_requested)
         add_id(axis_id)
         roi_id = f"{axis_id}.set-roi-value"
         loop_id = f"{axis_id}.loop"
@@ -528,7 +667,7 @@ def normalize_recipe_tree(
         body_children = tuple(
             convert(child)
             for child in node.children
-            if child.type not in represented_kinds
+            if not any(axis_update_matches(child, binding, kind) for kind in represented_kinds)
         )
         body = SemanticTreeNode(
             loop_id,
@@ -549,7 +688,29 @@ def normalize_recipe_tree(
             (body,),
         )
 
-    def convert(node: RecipeNode, force_kind: SemanticNodeKind | None = None) -> SemanticTreeNode:
+    def convert_children(node: RecipeNode, *, inactive: bool = False) -> tuple[SemanticTreeNode, ...]:
+        children = []
+        for branch_name, branch in (("Then", node.children), ("Else", node.else_children)):
+            for child in branch:
+                converted = convert(child, inactive=inactive)
+                if node.type == "if":
+                    converted = replace(
+                        converted, label=f"{branch_name} · {converted.label}",
+                        data=_mapping({**converted.data, "conditional_branch": branch_name.lower()}),
+                    )
+                children.append(converted)
+        return tuple(children)
+
+    def convert(node: RecipeNode, force_kind: SemanticNodeKind | None = None, *, inactive: bool = False) -> SemanticTreeNode:
+        if cancellation_requested is not None and cancellation_requested():
+            raise ExecutionError("Recipe normalization was cancelled.")
+        if inactive or node.data.get("disabled") is True:
+            # Keep disabled authoring rows visible without expanding vectors
+            # or treating their targets as active physical instructions.
+            add_id(node.id)
+            data = dict(node.data, type=node.type, disabled=True)
+            children = convert_children(node, inactive=True)
+            return SemanticTreeNode(node.id, SemanticNodeKind.SEQUENCE, node.id, _label(node), _mapping(data), None, children)
         if node.type == "sweep":
             if "binding" in node.data:
                 draft = _binding_for_explicit(node, recipe_nodes, resolvers)
@@ -593,10 +754,13 @@ def normalize_recipe_tree(
                 else SemanticNodeKind.ACTION
             )
         output_nodes: list[SemanticTreeNode] = []
+        output_end_nodes: list[SemanticTreeNode] = []
         if data.get("device_module"):
             output_policy = str(data.get("output_policy", "")).lower()
             device_module = str(data.get("device_module", "")).lower()
-            channel = data.get("channel", "")
+            configuration = data.get("configuration")
+            channel = (configuration.get("channel", data.get("channel", ""))
+                       if isinstance(configuration, Mapping) else data.get("channel", ""))
             if output_policy in {"on", "on_keep"}:
                 output_id = f"{node.id}.output-on"
                 if device_module == "keithley":
@@ -627,6 +791,16 @@ def normalize_recipe_tree(
                         False,
                     )
                 )
+                if output_policy == "on":
+                    # The compiler closes this local block after its entire
+                    # body/axis, not after every individual point.
+                    off_id = f"{node.id}.output-off"
+                    add_id(off_id)
+                    output_end_nodes.append(replace(
+                        output_nodes[-1], semantic_id=off_id,
+                        label=out_label.removesuffix("ON") + "OFF",
+                        data=_mapping({**output_nodes[-1].data, "enabled": False}),
+                    ))
             elif output_policy == "off":
                 output_id = f"{node.id}.output-off"
                 if device_module == "keithley":
@@ -664,47 +838,87 @@ def normalize_recipe_tree(
             children = (*output_nodes, axis)
         else:
             children = tuple(output_nodes)
-            children += tuple(convert(child) for child in node.children)
-            children += tuple(convert(child) for child in node.else_children)
+            children += convert_children(node)
+        children += tuple(output_end_nodes)
         add_id(node.id)
         node_data = dict(data)
         node_data.setdefault("type", node.type)
+        if node.type == "final_state":
+            values = ", ".join(f"{key.replace('_', ' ')} {node.data[key]}" for key in
+                               ("voltage", "level", "frequency", "high_level", "low_level") if key in node.data)
+            node_data["detail"] = f"{values or 'Last planned values'} · {node.data.get('output', '?').upper()}"
+            node_data["completion_only"] = True
         if node.type in {"set_keithley_output", "set_rigol_output", "set_anritsu_sg_output"}:
             node_data["is_output"] = True
             node_data.setdefault("enabled", bool(node.data.get("enabled", False)))
         elif node.type in {"enable_rigol_output", "enable_anritsu_sg_output"}:
             node_data["is_output"] = True
             node_data["enabled"] = True
-        return SemanticTreeNode(node.id, kind, node.id, _label(node), _mapping(node_data), None, children)
+        label = _label(node)
+        if node.type == "stop_moke_voltage" and "channel" not in node.data and moke_channels:
+            label = "MOKE " + ", ".join(f"VOUT {channel}" for channel in sorted(moke_channels)) + " · Return to 0 V and disarm"
+        if node in recipe.finally_nodes and node.type in {"stop_moke_voltage", "ramp_keithley_to_zero", "set_keithley_output", "set_rigol_output"}:
+            device = "moke_box" if "moke" in node.type else "keithley" if "keithley" in node.type else "rigol"
+            if any(final.type == "final_state" and final.data.get("device") == device
+                   and (node.data.get("channel") is None or final.data.get("channel") == node.data.get("channel"))
+                   for final in recipe.finally_nodes):
+                label = "Fault / Stop only · " + label
+                node_data["fault_only"] = True
+        return SemanticTreeNode(node.id, kind, node.id, label, _mapping(node_data), None, children)
 
     # Finally is a first-class semantic branch shared by Builder and Execution.
     # Its generated safety actions are immutable presentation rows; the
     # concrete Run Engine shutdown manifest remains authoritative at runtime.
-    generated_shutdown = (
-        ("keithley.outputs_off", "Keithley A + B · OUTPUT OFF"),
-        ("rigol.outputs_off", "Rigol CH1 + CH2 · OUTPUT OFF"),
-        ("anritsu.rf_off_and_abort", "Anritsu RF · OUTPUT OFF + abort"),
-        ("storage.flush_checkpoint", "Flush measurement checkpoints"),
+    shutdown_labels = {
+        "keithley.outputs_off": "Keithley A + B · OUTPUT OFF",
+        "rigol.outputs_off": "Rigol CH1 + CH2 · OUTPUT OFF",
+        "anritsu.rf_off_and_abort": "Anritsu RF · OUTPUT OFF + abort",
+        "anritsu.abort_acquisition": "Anritsu · abort acquisition",
+        "moke_box.dac_zero_or_unknown": "MOKE Box · DAC safe target",
+        "storage.flush_checkpoint": "Flush measurement checkpoints",
+    }
+    retained = {f"{node.data.get('device')}.{node.data.get('channel')}"
+                for node in recipe.finally_nodes if node.type == "final_state" and node.data.get("output") == "hold"}
+    moke_channels = set()
+    for node in recipe_nodes.values():
+        if "moke" in node.type and type(node.data.get("channel")) is int:
+            moke_channels.add(node.data["channel"])
+        target = str(node.data.get("target", ""))
+        if target.startswith("moke_box.vout"):
+            moke_channels.add(int(target.split(".")[1].removeprefix("vout")))
+    if moke_channels:
+        shutdown_labels["moke_box.dac_zero_or_unknown"] = "MOKE " + "; ".join(
+            f"VOUT {channel}: {'hold after success, zero on fault/Stop' if f'moke_box.{channel}' in retained else 'verify 0 V; ramp to zero if needed'}"
+            for channel in sorted(moke_channels))
+    for device, channels in (("keithley", ("A", "B")), ("rigol", (1, 2))):
+        if any(endpoint.startswith(device + ".") for endpoint in retained):
+            shutdown_labels[f"{device}.outputs_off"] = device.title() + " · " + "; ".join(
+                f"{channel}: {'ON after success, OFF on fault/Stop' if f'{device}.{channel}' in retained else 'OUTPUT OFF'}" for channel in channels)
+    generated_shutdown = tuple(
+        (action, shutdown_labels.get(action, action))
+        for action in (safe_shutdown_actions or ())
     )
     finally_children: list[SemanticTreeNode] = []
     if recipe.finally_nodes:
         finally_children.extend(convert(child) for child in recipe.finally_nodes)
-    else:
+    safeguard_children: list[SemanticTreeNode] = []
+    if generated_shutdown:
         for action_id, label_text in generated_shutdown:
             node_id = f"__finally__.{action_id.replace('.', '_')}"
             add_id(node_id)
             is_output = "output" in label_text.lower() or "rf" in label_text.lower()
-            finally_children.append(
+            safeguard_children.append(
                 SemanticTreeNode(
                     node_id,
-                    SemanticNodeKind.ACTION,
+                    SemanticNodeKind.GENERATED_SAFETY,
                     "__finally__",
                     label_text,
                     _mapping({
                         "action": action_id,
-                        "enabled": False if is_output else None,
+                        "enabled": False if is_output and not any(endpoint.startswith(action_id.split('.')[0] + '.') for endpoint in retained) else None,
                         "is_output": is_output,
                         "guaranteed": True,
+                        "origin": "Automatic engine safeguard; not an added YAML instruction",
                     }),
                     None,
                     (),
@@ -713,17 +927,31 @@ def normalize_recipe_tree(
                 )
             )
 
+    safeguard_id = "__finally__.automatic_safeguards"
+    add_id(safeguard_id)
+    finally_children.append(SemanticTreeNode(
+        safeguard_id, SemanticNodeKind.GENERATED_SAFETY, "__finally__",
+        "Automatic engine safeguards",
+        _mapping({"detail": "Derived from this plan; YAML unchanged" if safe_shutdown_actions is not None
+                  else "Validate to preview safeguards for the devices used by this plan",
+                  "safeguards": tuple(label for _, label in generated_shutdown),
+                  "guaranteed": True}),
+        None, tuple(safeguard_children) if show_safeguard_steps else (), False, False,
+    ))
+
     cleanup_ids = tuple(str(node.id) for node in recipe.finally_nodes)
     generated_ids = tuple(action_id for action_id, _label_text in generated_shutdown)
     finally_root = SemanticTreeNode(
         "__finally__",
         SemanticNodeKind.FINALLY,
         None,
-        "Finally — safe shutdown",
+        "Finally — completion and fault shutdown" if any(node.type == "final_state" for node in recipe.finally_nodes) else "Finally — safe shutdown",
         _mapping({
-            "detail": "Guaranteed safe shutdown",
+            "detail": ("After success: configured final states. Fault / Stop: emergency shutdown. Unspecified outputs use safe shutdown." if any(node.type == "final_state" for node in recipe.finally_nodes) else "Guaranteed safe shutdown" if safe_shutdown_actions is not None
+                       else "Compile recipe to determine automatic shutdown"),
             "operator_cleanup_ids": cleanup_ids,
             "generated_actions": generated_ids,
+            "shutdown_compiled": safe_shutdown_actions is not None,
         }),
         None,
         tuple(finally_children),
@@ -763,39 +991,23 @@ def normalize_recipe_tree(
     for root in roots:
         validate_active(root)
 
-    contexts: dict[str, tuple[AxisPointContext, ...]] = {}
+    contexts: dict[str, Sequence[AxisPointContext]] = {}
 
     def collect_contexts(node: SemanticTreeNode, active: tuple[SweepAxisBinding, ...] = ()) -> None:
         next_active = active
         if node.kind is SemanticNodeKind.SWEEP_AXIS and node.axis is not None:
             axis = node.axis
-            if any(previous.target == axis.target for previous in active):
+            if any(previous.target == axis.target or (
+                previous.device_module == axis.device_module and previous.endpoint == axis.endpoint
+                and previous.parameter_id == axis.parameter_id
+            ) for previous in active):
                 raise ConfigurationError(f"duplicate active sweep binding for target {axis.target!r}.")
-            records: list[AxisPointContext] = []
-            combinations = product(*(previous.points for previous in active), axis.points)
-            for combination in combinations:
-                own = combination[-1]
-                point_index = axis.points.index(own)
-                stage_index = next(
-                    stage.stage_index for stage in axis.stages if own in stage.points
+            records = AxisContextSequence((*active, axis))
+            if len(records) > max_points:
+                raise SafetyViolation(
+                    f"Cartesian sweep {axis.axis_id!r} expands to {len(records)} points; limit is {max_points}."
                 )
-                setpoints = {
-                    previous.target: value.si_value
-                    for previous, value in zip(active, combination[:-1], strict=True)
-                }
-                setpoints[axis.target] = own.si_value
-                records.append(
-                    AxisPointContext(
-                        axis.axis_id,
-                        point_index,
-                        len(axis.points),
-                        stage_index,
-                        own.si_value,
-                        MappingProxyType(setpoints),
-                        tuple(previous.source_node_id for previous in active) + (axis.source_node_id,),
-                    )
-                )
-            contexts[axis.source_node_id] = tuple(records)
+            contexts[axis.source_node_id] = records
             next_active = (*active, axis)
         for child in node.children:
             collect_contexts(child, next_active)

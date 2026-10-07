@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 from app.domain.errors import ConfigurationError, SafetyViolation
 from app.domain.quantities import (
@@ -137,17 +137,17 @@ class RigolChannelLimits(StrictModel):
     burst_period: RangeSettings
     burst_cycles: IntegerRangeSettings
 
+    @field_validator("combined_voltage_limit")
+    @classmethod
+    def normalize_combined_voltage_limit(cls, value: str) -> str:
+        voltage = parse_quantity(value, DIMENSION_VOLTAGE).si_value
+        if not math.isfinite(voltage) or voltage == 0:
+            raise ConfigurationError("combined_voltage_limit must be positive and non-zero")
+        return format_quantity_auto(abs(voltage), DIMENSION_VOLTAGE) if voltage < 0 else value
+
     @model_validator(mode="after")
     def validate_dimensions(self) -> "RigolChannelLimits":
         self.frequency.checked(DIMENSION_FREQUENCY)
-        parsed_qty = parse_quantity(
-            self.combined_voltage_limit, DIMENSION_VOLTAGE
-        )
-        combined_limit = abs(parsed_qty.si_value)
-        if not math.isfinite(combined_limit) or combined_limit == 0:
-            raise ConfigurationError("combined_voltage_limit must be positive and non-zero")
-        if parsed_qty.si_value < 0:
-            self.combined_voltage_limit = format_quantity_auto(combined_limit, DIMENSION_VOLTAGE)
         self.estimated_load_current.checked(DIMENSION_CURRENT)
         self.estimated_load_power.checked(DIMENSION_POWER)
         self.settle_time.checked(DIMENSION_TIME)
@@ -175,8 +175,8 @@ class RigolSafety(StrictModel):
     @model_validator(mode="after")
     def validate_source_resistance(self) -> "RigolSafety":
         val = parse_quantity(self.fixed_source_resistance, DIMENSION_RESISTANCE).si_value
-        if val < 50.0 - 1e-9:
-            raise ValueError("fixed_source_resistance cannot be lower than the DG1032Z hardware 50 Ω internal impedance")
+        if not math.isclose(val, 50.0, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError("fixed_source_resistance must equal the DG1032Z hardware 50 Ω internal impedance")
         if set(self.channels) - {"1", "2"} or not self.channels:
             raise ValueError("Rigol must define channel 1 and/or 2")
         return self
@@ -302,18 +302,22 @@ class KeithleyChannelSettings(StrictModel):
     allowed_source_modes: tuple[Literal["current", "voltage", "measure_only"], ...]
     lab_limits: KeithleyChannelLimits
     defaults: dict[str, Any]
-    sense_mode: Literal["2wire", "4wire"] = "2wire"
+    sense_mode: Literal["2wire"] = "2wire"
 
     @model_validator(mode="before")
     @classmethod
     def _normalize_sense_mode(cls, data: Any) -> Any:
         if isinstance(data, dict):
             data = dict(data)
+            defaults = data.get("defaults")
+            for raw_value in (data.get("sense_mode"), defaults.get("sense_mode") if isinstance(defaults, dict) else None):
+                if raw_value is not None and str(raw_value).lower().replace("-", "").replace(" ", "") != "2wire":
+                    raise ValueError("Keithley 4-wire / remote sense is prohibited; only 2wire is allowed.")
             raw = data.get("sense_mode")
             if raw is None and isinstance(data.get("defaults"), dict):
                 raw = data["defaults"].get("sense_mode")
             if raw is not None:
-                norm = "4wire" if "4" in str(raw) else "2wire"
+                norm = "2wire"
                 data["sense_mode"] = norm
                 if isinstance(data.get("defaults"), dict):
                     data["defaults"] = dict(data["defaults"])
@@ -416,7 +420,10 @@ class AnritsuSafety(StrictModel):
     def validate_optional_ranges(self) -> "AnritsuSafety":
         # Null RF ranges intentionally lock acquisition until a lab owner fills them in.
         self.frequency.checked_if_complete(DIMENSION_FREQUENCY)
+        self.reference_level.checked_if_complete(DIMENSION_DBM)
         if self.acquisition_allowed:
+            if self.reference_level.enabled and self.reference_level.min is None:
+                raise ValueError("Anritsu acquisition requires a complete reference level limit.")
             if self.frequency.enabled and self.frequency.min is None:
                 raise ValueError(
                     "Anritsu acquisition requires a complete frequency limit."

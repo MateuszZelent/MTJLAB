@@ -10,6 +10,7 @@ as dBm.
 from __future__ import annotations
 
 import math
+from itertools import groupby
 from dataclasses import dataclass, replace
 from typing import Sequence
 
@@ -181,8 +182,50 @@ def rolling_noise_floor_dbm(values_dbm: Sequence[float], *, window: int = 51) ->
     width = _odd_window(values.size, window)
     radius = width // 2
     padded = np.pad(values, radius, mode="edge")
-    frames = np.lib.stride_tricks.sliding_window_view(padded, width)
-    return np.percentile(frames, 30.0, axis=1)
+    if width <= 63:
+        frames = np.lib.stride_tricks.sliding_window_view(padded, width)
+        return np.percentile(frames, 30.0, axis=1)
+    # Coordinate-compressed order statistics avoid an N × window temporary
+    # and rescanning a window proportional to N for every frequency bin.
+    levels, ranks = np.unique(padded, return_inverse=True)
+    counts = np.bincount(ranks[:width], minlength=levels.size)
+    tree = [0, *counts.tolist()]
+    for index in range(1, len(tree)):
+        parent = index + (index & -index)
+        if parent < len(tree):
+            tree[parent] += tree[index]
+
+    def update(rank, delta):
+        index = int(rank) + 1
+        while index < len(tree):
+            tree[index] += delta
+            index += index & -index
+
+    highest_bit = 1 << (len(tree).bit_length() - 1)
+
+    def select(rank):
+        index, bit = 0, highest_bit
+        while bit:
+            candidate = index + bit
+            if candidate < len(tree) and tree[candidate] <= rank:
+                rank -= tree[candidate]
+                index = candidate
+            bit >>= 1
+        return levels[index]
+
+    position = (width - 1) * .30
+    lower, upper = math.floor(position), math.ceil(position)
+    fraction = position - lower
+    result = np.empty(values.size, dtype=float)
+    for index in range(values.size):
+        left, right = select(lower), select(upper)
+        difference = right - left
+        result[index] = (right - difference * (1 - fraction) if fraction >= .5
+                         else left + difference * fraction)
+        if index + 1 < values.size:
+            update(ranks[index], -1)
+            update(ranks[index + width], 1)
+    return result
 
 
 def bilateral_denoise_dbm(
@@ -534,25 +577,34 @@ def _fit_peak_shape(
     )
     centers = frequencies[index] + np.linspace(-center_span, center_span, 21)
     best: tuple[float, str, float, float] | None = None
+    normalized = (x[None, None, :] - centers[:, None, None]) / widths[None, :, None]
+    measured_dbm = 10.0 * np.log10(np.maximum(y_mw, 1e-300))
     for model in ("Gaussian", "Lorentzian"):
-        for center in centers:
-            for width in widths:
-                normalized = (x - center) / width
-                shape = (
-                    np.exp(-4.0 * math.log(2.0) * normalized**2)
-                    if model == "Gaussian"
-                    else 1.0 / (1.0 + 4.0 * normalized**2)
-                )
-                design = np.column_stack((np.ones(shape.size), shape))
-                baseline, amplitude = np.linalg.lstsq(design, y_mw, rcond=None)[0]
-                if baseline < 0 or amplitude <= 0:
-                    continue
-                predicted_mw = np.maximum(baseline + amplitude * shape, 1e-300)
-                predicted_dbm = 10.0 * np.log10(predicted_mw)
-                measured_dbm = 10.0 * np.log10(np.maximum(y_mw, 1e-300))
-                rmse = float(np.sqrt(np.mean((predicted_dbm - measured_dbm) ** 2)))
-                if best is None or rmse < best[0]:
-                    best = (rmse, model, float(center), float(width))
+        shape = (
+            np.exp(-4.0 * math.log(2.0) * normalized**2)
+            if model == "Gaussian"
+            else 1.0 / (1.0 + 4.0 * normalized**2)
+        ).reshape(-1, x.size)
+        # Evaluate the same center/width grid with batched SVD. The window is
+        # bounded to 101 samples, independent of the full spectrum length.
+        # Match lstsq(rcond=None)'s singular-value cutoff rather than forming
+        # less stable normal equations for the two regression coefficients.
+        design = np.stack((np.ones_like(shape), shape), axis=-1)
+        inverse = np.linalg.pinv(design, rcond=max(x.size, 2) * np.finfo(float).eps)
+        coefficients = inverse @ y_mw
+        baseline, amplitude = coefficients[:, 0], coefficients[:, 1]
+        eligible = (baseline >= 0) & (amplitude > 0)
+        if not np.any(eligible):
+            continue
+        predicted_mw = np.maximum(baseline[:, None] + amplitude[:, None] * shape, 1e-300)
+        residual = 10.0 * np.log10(predicted_mw) - measured_dbm
+        errors = np.sqrt(np.mean(residual**2, axis=1))
+        errors[~eligible] = np.inf
+        winner = int(np.argmin(errors))
+        rmse = float(errors[winner])
+        if best is None or rmse < best[0]:
+            center_index, width_index = divmod(winner, widths.size)
+            best = (rmse, model, float(centers[center_index]), float(widths[width_index]))
     if best is None:
         return "none", None, None, None
     return best[1], best[2], best[3], best[0]
@@ -692,13 +744,9 @@ def detect_spectrum_peaks(
         )
         if parameters is not None and not _width_allowed(fwhm_hz, parameters):
             continue
-        fit_model, fit_center, fit_width, fit_rmse = (
-            _fit_peak_shape(frequencies, values, int(index), fwhm_hz)
-            if fit and unit == "dBm"
-            else ("not fitted", None, None, None)
-        )
-        effective_center = fit_center if fit_center is not None else center_hz
-        effective_width = fit_width if fit_width is not None else fwhm_hz
+        fit_model, fit_center, fit_width, fit_rmse = "not fitted", None, None, None
+        effective_center = center_hz
+        effective_width = fwhm_hz
         measured.append(
             SpectrumPeak(
                 index=int(index),
@@ -728,7 +776,31 @@ def detect_spectrum_peaks(
     )
     accepted: list[SpectrumPeak] = []
     minimum_distance = max(1, values.size // 500)
-    for peak in measured:
+
+    def ranked_fits():
+        # SNR and prominence determine ranking before fit error. Fit only the
+        # groups needed to fill the requested result count; evaluate a whole
+        # exact tie so RMSE keeps its original tie-breaking semantics.
+        if not fit or unit != "dBm":
+            yield from measured
+            return
+        for _key, group in groupby(measured, key=lambda p: (p.snr_db, p.prominence_db)):
+            fitted = []
+            for peak in group:
+                model, center, width, rmse = _fit_peak_shape(
+                    frequencies, values, peak.index, peak.fwhm_hz
+                )
+                effective_center = center if center is not None else peak.frequency_hz
+                effective_width = width if width is not None else peak.fwhm_hz
+                fitted.append(replace(
+                    peak, frequency_hz=effective_center,
+                    fit_model=model, fit_center_hz=center, fit_fwhm_hz=width, fit_rmse_db=rmse,
+                    q_factor=(effective_center / effective_width if effective_width and effective_width > 0 else None),
+                ))
+            fitted.sort(key=lambda p: p.fit_rmse_db if p.fit_rmse_db is not None else math.inf)
+            yield from fitted
+
+    for peak in ranked_fits():
         if any(
             (parameters is not None and parameters.peak_min_distance_hz > 0
              and abs(peak.frequency_hz - existing.frequency_hz) < parameters.peak_min_distance_hz)

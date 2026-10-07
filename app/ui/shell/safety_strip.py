@@ -46,6 +46,22 @@ class _EmergencyStopButton(PrimaryPushButton):
             self._reserve_caption_width()
 
 
+class _SafetyStatusLabel(BodyLabel):
+    """Keep the complete safety caption visible when the strip distributes space."""
+
+    def _reserve_caption_width(self) -> None:
+        self.setMinimumWidth(self.fontMetrics().horizontalAdvance(self.text()) + 4)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+        super().setText(text)
+        self._reserve_caption_width()
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
+        super().changeEvent(event)
+        if event.type() in {QEvent.Type.FontChange, QEvent.Type.StyleChange}:
+            self._reserve_caption_width()
+
+
 class StationSafetyStrip(QWidget):
     """Display station safety state and immediately request an E-STOP."""
 
@@ -56,9 +72,9 @@ class StationSafetyStrip(QWidget):
         super().__init__(parent)
         self.setObjectName("stationSafetyStrip")
 
-        self.readiness = BodyLabel()
-        self.outputs = BodyLabel()
-        self.mode = BodyLabel()
+        self.readiness = _SafetyStatusLabel()
+        self.outputs = _SafetyStatusLabel()
+        self.mode = _SafetyStatusLabel()
         self.actor = BodyLabel()
         self.estop = _EmergencyStopButton("E-STOP  |  ALL OUTPUTS OFF", self)
         self.estop.setObjectName("stationEmergencyStopButton")
@@ -137,12 +153,12 @@ class StationSafetyStrip(QWidget):
         self._layout.setHorizontalSpacing(6 if mode == "narrow" else 12)
         if mode == "narrow":
             self.estop.setText("E-STOP | ALL OFF")
-            self._layout.addWidget(self.readiness, 0, 0)
-            self._layout.addWidget(self.outputs, 0, 1)
-            self._layout.addWidget(self.estop, 1, 0, 1, 2)
-            self._layout.addWidget(self.save_settings, 2, 0, 1, 2)
-            self._layout.addWidget(self.mode, 3, 0)
-            self._layout.addWidget(self.actor, 3, 1)
+            self._layout.addWidget(self.readiness, 0, 0, 1, 2)
+            self._layout.addWidget(self.outputs, 1, 0, 1, 2)
+            self._layout.addWidget(self.estop, 2, 0, 1, 2)
+            self._layout.addWidget(self.save_settings, 3, 0, 1, 2)
+            self._layout.addWidget(self.mode, 4, 0)
+            self._layout.addWidget(self.actor, 4, 1)
             self._layout.setColumnStretch(0, 1)
             self._layout.setColumnStretch(1, 1)
         elif mode == "compact":

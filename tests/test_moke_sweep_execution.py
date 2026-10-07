@@ -233,6 +233,10 @@ def test_dry_run_never_arms_or_writes_voltage(tmp_path):
     assert result.error is None
     assert writer.status == "completed"
     assert all(point.measurements["moke_box.vout_voltage_v"] == 0 for point, _ in writer.points)
+    assert all(
+        point.metadata["setpoint_evidence_v1"]["moke_box.vout2.voltage"]["applied_si"] is None
+        for point, _ in writer.points
+    )
 
 
 def test_recipe_stop_interrupts_ramp_and_prevents_remaining_points(tmp_path):

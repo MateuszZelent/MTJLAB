@@ -74,18 +74,23 @@ class SweepPointGeneratorTests(unittest.TestCase):
 schema_version: 1
 name: single-point-stage
 root:
-  id: axis
-  type: sweep
-  target: keithley.B.current
-  segments:
-    - {value: 0 A}
+  id: root
+  type: sequence
   children:
-    - {id: checkpoint, type: checkpoint, label: zero}
+    - {id: baseline, type: configure_keithley, channel: B, mode: current, level: 0 A, compliance: 10 mV, source_range: 10 mA}
+    - id: axis
+      type: sweep
+      target: keithley.B.current
+      segments:
+        - {value: 0 A}
+      children:
+        - {id: checkpoint, type: checkpoint, label: zero}
 """
         )
         plan = RecipeCompiler(simulation_settings()).compile(recipe)
         self.assertEqual(plan.total_points, 1)
-        self.assertEqual(plan.actions[0].setpoints_si["keithley.B.current"], 0.0)
+        checkpoint = next(action for action in plan.actions if action.kind == "checkpoint")
+        self.assertEqual(checkpoint.setpoints_si["keithley.B.current"], 0.0)
 
     def test_multiple_intervals_join_into_one_deduplicated_axis(self) -> None:
         points = generate_sweep_points(
@@ -135,6 +140,7 @@ root:
       mode: current
       level: "${keithley.B.current}"
       compliance: 10 mV
+      source_range: 10 mA
     - id: checkpoint
       type: checkpoint
       label: generated

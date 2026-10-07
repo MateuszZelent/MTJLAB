@@ -369,17 +369,19 @@ finally: []
             page.close()
 
     def test_sweep_workspace_distributes_wide_and_narrow_windows_responsively(self) -> None:
+        from app.ui.shell.page_host import FluentPageHost
         page = RecipePage(simulation_settings())
+        host = FluentPageHost(page)
         try:
-            page.resize(1900, 850)
-            page.show()
+            host.resize(1900, 850)
+            host.show()
             self.application.processEvents()
             page._update_workspace_layout(force=True)
             wide = page.workspace_splitter.sizes()
             self.assertGreater(wide[1], wide[0] * 2)
             self.assertGreaterEqual(wide[2], 420)
 
-            page.resize(1050, 720)
+            host.resize(1050, 720)
             self.application.processEvents()
             page._update_workspace_layout(force=True)
             narrow = page.workspace_splitter.sizes()
@@ -395,7 +397,8 @@ finally: []
             self.assertTrue(page.inspector_visibility_action.isChecked())
         finally:
             page._close_discard_confirmed = True
-            page.close()
+            host.close()
+            host.deleteLater()
 
     def test_node_library_is_the_only_add_surface_above_measurement_tree(self) -> None:
         page = RecipePage(simulation_settings())
@@ -477,7 +480,7 @@ root:
             page._close_discard_confirmed = True
             page.close()
 
-    def test_library_click_adds_after_selected_container_not_inside_it(self) -> None:
+    def test_library_click_adds_inside_selected_container(self) -> None:
         page = RecipePage(simulation_settings())
         try:
             page.new_recipe(confirm=False)
@@ -493,9 +496,9 @@ root:
             warning.assert_not_called()
             second_warning.assert_not_called()
             updated = parse_recipe_text(page.editor.toPlainText())
-            self.assertEqual(updated.root.children[-2].id, group.id)
-            self.assertEqual(updated.root.children[-1].type, "wait")
-            self.assertEqual(len(updated.root.children[-2].children), 1)
+            self.assertEqual(updated.root.children[-1].id, group.id)
+            self.assertEqual(updated.root.children[-1].children[-1].type, "wait")
+            self.assertEqual(len(updated.root.children[-1].children), 2)
         finally:
             page._close_discard_confirmed = True
             page.close()
@@ -590,7 +593,7 @@ root:
                 dialog.parameter_labels["source.compliance"].text(),
                 "Current limit (compliance)",
             )
-            self.assertEqual(dialog.source_mode_action.currentData(), "set")
+            self.assertEqual(dialog.source_mode_action.currentData(), "unchanged")
         finally:
             dialog.close()
 
@@ -616,6 +619,7 @@ root:
                     "advanced.rbw",
                     "advanced.vbw_mode",
                     "advanced.vbw",
+                    "advanced.vbw_filter_mode",
                     "advanced.detector",
                     "advanced.attenuation_mode",
                     "advanced.attenuation",
@@ -797,7 +801,7 @@ root:
             "spectrum_acquisition": "type: acquire_spectrum",
             "reference_acquisition": "type: acquire_reference",
             "signal_generator_output": "type: set_anritsu_sg_output\n  enabled: false",
-            "legacy_spectrum_configuration": "type: configure_anritsu",
+            "legacy_spectrum_configuration": "type: configure_anritsu\n  points: 1001",
             "legacy_advanced_configuration": "type: configure_anritsu_advanced",
             "legacy_signal_generator_configuration": "type: configure_anritsu_sg",
         }
@@ -839,6 +843,7 @@ root:
                 {
                     "trace": "TRAC1",
                     "average_count": 7,
+                    "inter_sweep_delay": "0 s",
                     "reference_operation": "ratio_linear",
                     "store_raw": False,
                     "store_processed": True,
@@ -1015,7 +1020,9 @@ root:
 
     def test_roi_plot_uses_active_application_theme_not_windows_theme(self) -> None:
         previous = self.application.property("activeTheme")
+        previous_applied = self.application.property("stationAppliedTheme")
         self.application.setProperty("activeTheme", "light")
+        self.application.setProperty("stationAppliedTheme", "light")
         dialog = SweepGeneratorDialog(
             {
                 "device": "Keithley",
@@ -1036,6 +1043,7 @@ root:
         finally:
             dialog.close()
             self.application.setProperty("activeTheme", previous)
+            self.application.setProperty("stationAppliedTheme", previous_applied)
 
     def test_anritsu_library_device_is_configuration_without_implicit_acquisition(self) -> None:
         page = RecipePage(simulation_settings())
@@ -1538,7 +1546,7 @@ root:
         finally:
             dialog.close()
 
-    def test_rigol_sweep_editor_reloads_selected_channel_snapshot(self) -> None:
+    def test_rigol_sweep_editor_retargets_without_importing_channel_draft(self) -> None:
         snapshots = {
             1: RigolConfigurationSnapshot(channel=1, frequency="1 kHz"),
             2: RigolConfigurationSnapshot(
@@ -1564,12 +1572,15 @@ root:
         try:
             dialog.channel.setCurrentIndex(dialog.channel.findData(2))
             self.application.processEvents()
-            self.assertEqual(requested, [2])
-            self.assertEqual(dialog.waveform.currentText(), "SQU")
-            self.assertEqual(dialog.frequency.text(), "2 kHz")
-            self.assertEqual(dialog.high_level.text(), "4 mV")
-            self.assertEqual(dialog.low_level.text(), "0 mV")
-            self.assertEqual(dialog.duty.text(), "25")
+            # Baselines are for comparison, not replacement of authored values.
+            self.assertEqual(requested, [1, 2])
+            self.assertEqual(dialog.waveform.currentText(), snapshots[1].waveform)
+            self.assertEqual(dialog.frequency.text(), snapshots[1].frequency)
+            self.assertEqual(dialog.high_level.text(), snapshots[1].high_level)
+            self.assertEqual(dialog.low_level.text(), snapshots[1].low_level)
+            self.assertEqual(dialog.duty.text(), snapshots[1].square_duty_percent)
+            rows = {row.key: row for row in dialog.review.table.rows}
+            self.assertEqual(rows["frequency"].current, snapshots[2].frequency)
             self.assertEqual(dialog.configuration_snapshot().channel, 2)
         finally:
             dialog.close()
@@ -1758,7 +1769,8 @@ root:
                 self.assertGreaterEqual(output_policy.findData("continue"), 0)
                 self.assertGreaterEqual(output_policy.findData("off"), 0)
                 self.assertIn(
-                    "safe default",
+                    "Do not enable OUTPUT" if output_policy is keithley.output_policy
+                    else "unchanged" if output_policy is rigol.output_policy else "safe default",
                     output_policy.itemText(output_policy.findData("unchanged")),
                 )
             self.assertEqual(keithley.open_roi_button.text(), "Go to ROI…")
@@ -1868,7 +1880,7 @@ root:
     def test_library_blocks_expose_drag_payload_and_tree_accepts_external_blocks(self) -> None:
         page = RecipePage(simulation_settings())
         try:
-            keithley = page._library_action_buttons[0]
+            keithley = next(button for button in page._library_action_buttons if button.property("dragKind") == "device:keithley")
             self.assertEqual(keithley.property("dragKind"), "device:keithley")
             self.assertEqual(
                 keithley.drag_mime_data().data("application/x-lab-control-sweep-block").data(),
@@ -1886,7 +1898,8 @@ root:
     def test_node_library_filters_actions_and_adds_a_tree_node(self) -> None:
         page = RecipePage(simulation_settings())
         try:
-            self.assertEqual(len(page._library_action_buttons), 25)
+            page._apply_builder_source("schema_version: 1\nname: library\nroot: {id: root, type: sequence, children: []}\n", "isolated library draft")
+            self.assertEqual(len(page._library_action_buttons), 29)
             page.library_search.setText("spectrum analyzer")
             visible = [button.text() for button in page._library_action_buttons if not button.isHidden()]
             self.assertEqual(
@@ -1894,7 +1907,9 @@ root:
                 ["Anritsu configuration", "Anritsu SG OFF"],
             )
             page.library_search.clear()
-            page._library_add_basic("wait")
+            with patch("app.ui.recipes.page.QMessageBox.warning") as warning:
+                page._library_add_basic("wait")
+                warning.assert_not_called()
             recipe = parse_recipe_text(page.editor.toPlainText())
             self.assertEqual(recipe.root.children[-1].type, "wait")
         finally:
@@ -2044,7 +2059,7 @@ root:
             page._close_discard_confirmed = True
             page.close()
 
-    def test_generator_creates_a_segmented_sweep_with_device_configuration(self) -> None:
+    def test_generator_creates_a_segmented_sweep_without_hidden_configuration(self) -> None:
         page = RecipePage(simulation_settings())
         try:
             definition = {
@@ -2061,7 +2076,7 @@ root:
                 ],
             )
             self.assertEqual(node["target"], "keithley.B.current")
-            self.assertEqual(node["children"][0]["level"], "${keithley.B.current}")
+            self.assertEqual(node["children"], [])
             source = page.editor.toPlainText()
             from app.recipes import add_recipe_node
 
@@ -2271,6 +2286,18 @@ root:
     def test_keithley_library_dialog_combines_source_parameters_and_point_preview(self) -> None:
         dialog = KeithleySweepBuilderDialog(simulation_settings())
         try:
+            dialog.resize(1180, 720)
+            dialog.show()
+            QApplication.processEvents()
+            dialog.parameter_scroll.ensureWidgetVisible(dialog.source_range)
+            QApplication.processEvents()
+            self.assertTrue(dialog.source_range.isVisible())
+            self.assertGreater(dialog.source_range.width(), 100)
+            self.assertGreater(dialog.source_range.height(), 0)
+            self.assertTrue(dialog.rect().contains(dialog.source_range.mapTo(dialog, dialog.source_range.rect().center())))
+            self.assertFalse(dialog.grab().isNull())
+            dialog.source_range.setText("10 mA")
+            self.assertEqual(dialog.keithley_options()["source_range"], "10 mA")
             self.assertEqual(dialog.channel.currentText(), "B")
             self.assertEqual(dialog.mode.currentText(), "current")
             self.assertEqual(dialog.definition["target"], "keithley.B.current")
@@ -2279,10 +2306,11 @@ root:
             dialog.channel.setCurrentText("A")
             dialog.mode.setCurrentText("voltage")
             self.assertEqual(dialog.definition["target"], "keithley.A.voltage")
+            self.assertEqual(dialog.source_range.text(), "")
         finally:
             dialog.close()
 
-    def test_fixed_value_dialog_creates_a_keithley_configuration_not_an_axis(self) -> None:
+    def test_fixed_value_dialog_creates_a_keithley_selected_level_axis(self) -> None:
         page = RecipePage(simulation_settings())
         dialog = FixedValueDialog(
             {
@@ -2296,10 +2324,10 @@ root:
         try:
             dialog.value.setText("1 mA")
             node = page._fixed_node_from_dialog(dialog.definition, dialog)
-            self.assertEqual(node["type"], "configure_keithley")
-            self.assertEqual(node["channel"], "B")
-            self.assertEqual(node["level"], "1 mA")
-            self.assertNotIn("segments", node)
+            self.assertEqual(node["type"], "sweep")
+            self.assertEqual(node["target"], "keithley.B.current")
+            self.assertEqual(node["segments"], [{"value": "1 mA"}])
+            self.assertEqual(node["children"], [])
         finally:
             dialog.close()
             page._close_discard_confirmed = True
@@ -2318,7 +2346,7 @@ root:
                 ],
             )
             dialog.device.setCurrentText("Rigol")
-            self.assertEqual(dialog.fields.count(), 6)
+            self.assertEqual(dialog.fields.count(), 10)
             dialog.device.setCurrentText("Anritsu SG")
             self.assertEqual(dialog.fields.count(), 2)
             dialog.device.setCurrentText("Anritsu Spectrum")
@@ -2364,7 +2392,7 @@ finally: []
         self.assertIsNone(selected_id)
         self.assertEqual(parsed.finally_nodes, ())
 
-    def test_spectrum_parameter_generator_builds_anritsu_configuration_child(self) -> None:
+    def test_spectrum_parameter_generator_builds_selected_native_axis(self) -> None:
         page = RecipePage(simulation_settings())
         try:
             definition = {
@@ -2377,10 +2405,8 @@ finally: []
                 definition,
                 [{"start": "-20 dBm", "stop": "0 dBm", "points": 3, "spacing": "linear"}],
             )
-            self.assertEqual(node["children"][0]["type"], "configure_anritsu")
-            self.assertEqual(
-                node["children"][0]["reference_level"], "${anritsu.spectrum.reference_level}"
-            )
+            self.assertEqual(node["children"], [])
+            self.assertEqual(node["target"], "anritsu.spectrum.reference_level")
         finally:
             page._close_discard_confirmed = True
             page.close()

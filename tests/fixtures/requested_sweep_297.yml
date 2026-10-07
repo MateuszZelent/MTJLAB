@@ -1,0 +1,113 @@
+# 297 points: VOUT0 (3) x Keithley B (3) x Keithley A (33).
+# Analyzer settings remain those selected on the instrument. Each acquisition
+# verifies and records their fingerprint. Select the desired spectrum first.
+# Initial SMU settings below are explicit copies of this station's stored
+# defaults (2026-10-05). Review compliance/ranges for the connected sample.
+# Only current setpoints change inside the nested sweep.
+schema_version: 1
+name: MOKE 30-50 mV x B 25-35 mA x A 0-1.6 mA, Avg 32
+root:
+  id: measurement
+  type: sequence
+  children:
+  - {id: initial-a-off, type: set_keithley_output, channel: A, enabled: false}
+  - {id: initial-b-off, type: set_keithley_output, channel: B, enabled: false}
+    # MOKE "off": return qualified VOUT0 to 0 V and disarm voltage control.
+  - {id: initial-moke-safe, type: stop_moke_voltage}
+  - {id: baseline-settle, type: wait, duration: 5 s}
+  - id: reference-outputs-off
+    type: acquire_reference
+    purpose: reference
+    trace: TRAC1
+    average_count: 32
+  - id: background-outputs-off-30s
+    type: acquire_reference
+    purpose: background
+    trace: TRAC1
+    average_count: 30
+    minimum_duration: 30 s
+  - id: initial-a-current-settings
+    type: configure_keithley
+    channel: A
+    mode: current
+    level: 0 mA
+    compliance: 670 mV
+    nplc: 1.0
+    settle_time: 100 ms
+    sense_mode: 2wire
+    source_autorange: false
+    source_range: 10 mA
+    measure_voltage_autorange: true
+    measure_current_autorange: true
+  - id: initial-b-current-settings
+    type: configure_keithley
+    channel: B
+    mode: current
+    level: 25 mA
+    compliance: 700 mV
+    nplc: 1.0
+    settle_time: 100 ms
+    sense_mode: 2wire
+    source_autorange: false
+    source_range: 1 A
+    measure_voltage_autorange: true
+    measure_current_autorange: true
+  - {id: prepare-field, type: configure_moke_box, channel: 0, minimum_voltage: 
+      30 mV, maximum_voltage: 50 mV}
+  - {id: arm-field, type: arm_moke_voltage}
+  - {id: initial-field, type: update_moke_voltage, channel: 0, voltage: 30 mV}
+  - {id: enable-b, type: set_keithley_output, channel: B, enabled: true}
+  - {id: enable-a, type: set_keithley_output, channel: A, enabled: true}
+  - id: field-sweep
+    type: sweep
+    target: moke_box.vout0.voltage
+    segments:
+    - start: 30 mV
+      stop: 50 mV
+      spacing: linear
+      points: 3
+    children:
+    - id: current-b-sweep
+      type: sweep
+      target: keithley.B.current
+      segments:
+      - start: 25 mA
+        stop: 35 mA
+        spacing: linear
+        points: 3
+      children:
+      - id: current-a-sweep
+        type: sweep
+        target: keithley.A.current
+        segments:
+        - start: 0 mA
+          stop: 1.6 mA
+          spacing: linear
+          points: 33
+        children:
+        - id: settle-current
+          type: wait
+          duration: 5 s
+        - id: read-a
+          type: measure_keithley
+          channel: A
+        - id: read-b
+          type: measure_keithley
+          channel: B
+        - id: read-field-monitor
+          type: measure_moke_hall
+          checkpoint: false
+        - id: spectrum-avg32
+          type: acquire_spectrum
+          trace: TRAC1
+          average_count: 32
+          inter_sweep_delay: 0 s
+          reference_operation: none
+          store_raw: true
+          store_processed: false
+finally:
+- {id: final-a-zero, type: ramp_keithley_to_zero, channel: A, deadline: 10 s}
+- {id: final-a-off, type: set_keithley_output, channel: A, enabled: false}
+- {id: final-b-zero, type: ramp_keithley_to_zero, channel: B, deadline: 60 s}
+- {id: final-b-off, type: set_keithley_output, channel: B, enabled: false}
+- {id: final-moke-safe, type: stop_moke_voltage}

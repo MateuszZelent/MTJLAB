@@ -20,7 +20,9 @@ if TYPE_CHECKING:
 from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
 from app.domain.models import MeasurementPoint
 from app.recipes.models import legacy_dut_limits_policy
-from app.storage.thatec_schema_mapper import ThatecSchemaMapper, ThatecSweepAxis
+from app.storage.thatec_schema_mapper import (
+    SCALAR_CHECKPOINT_ROLES, SETPOINT_EVIDENCE_ROLES, ThatecSchemaMapper, ThatecSweepAxis,
+)
 
 
 def _spectrum_compression(point_count: int) -> dict[str, object]:
@@ -197,7 +199,7 @@ class ThatecHdf5Writer:
             definition = dict(self._definition[row_name].asstr()[()])
             role = definition.get("lab control role")
             key = definition.get("lab control key")
-            if role in {"setpoint", "measurement"} and key:
+            if role in SCALAR_CHECKPOINT_ROLES and key:
                 self._scalar_rows[(role, key)] = row_name
             elif role == "spectrum":
                 self._spectrum_row = row_name
@@ -237,6 +239,19 @@ class ThatecHdf5Writer:
     ) -> None:
         """Append one aligned public checkpoint and remember its rollback boundary."""
 
+        if trace is not None:
+            self._validate_uniform_grid(trace)
+            if len(trace.powers_dbm) != len(trace.frequencies_hz):
+                raise ValueError("Spectrum frequency and power lengths differ.")
+            if self._trace_points is not None and len(trace.powers_dbm) != self._trace_points:
+                raise ValueError("thaTEC spectrum point count changed during one run")
+        if processed_values is not None:
+            if trace is None or not processed_unit:
+                raise ValueError("Processed thaTEC spectrum requires raw trace and unit.")
+            if len(processed_values) != len(trace.powers_dbm):
+                raise ValueError("thaTEC processed spectrum point count changed during one run")
+            if self._processed_unit is not None and processed_unit != self._processed_unit:
+                raise ValueError("Processed spectrum units cannot change within one run.")
         self._last_scalar_rows = []
         self._last_spectrum_appended = False
         self._last_processed_spectrum_appended = False
@@ -244,6 +259,9 @@ class ThatecHdf5Writer:
         self._last_checkpoint_axis_appended = False
         self._last_created = []
         self._pending_rollback = True
+        self._rollback_checkpoint_count = self._checkpoint_count
+        self._rollback_next_row = self._next_row
+        self._rollback_log_shape = self._log.shape
         self._append_checkpoint_axis(point)
         values = {
             **{
@@ -253,6 +271,12 @@ class ThatecHdf5Writer:
             },
             **{("measurement", key): value for key, value in point.measurements.items()},
         }
+        evidence = point.metadata.get("setpoint_evidence_v1", {})
+        for key, confirmation in evidence.items():
+            for role in SETPOINT_EVIDENCE_ROLES:
+                value = confirmation.get(f"{role}_si")
+                if value is not None:
+                    values[(role, key)] = float(value)
         for role_key in sorted(values):
             if role_key not in self._scalar_rows:
                 self._create_scalar_row(*role_key)
@@ -260,14 +284,14 @@ class ThatecHdf5Writer:
         timestamp = point.timestamp_utc.timestamp()
         for role_key, row_name in tuple(self._scalar_rows.items()):
             value = values.get(role_key, math.nan)
-            self._append_scalar(row_name, float(value), timestamp)
             self._last_scalar_rows.append(row_name)
+            self._append_scalar(row_name, float(value), timestamp)
 
         if trace is not None and self._spectrum_row is None:
             self._create_spectrum_row(trace)
         if self._spectrum_row is not None:
-            self._append_spectrum(trace)
             self._last_spectrum_appended = True
+            self._append_spectrum(trace)
         if processed_values is not None and self._processed_spectrum_row is None:
             if trace is None or not processed_unit:
                 raise ValueError("Processed thaTEC spectrum requires raw trace and unit.")
@@ -279,8 +303,8 @@ class ThatecHdf5Writer:
         if self._processed_spectrum_row is not None:
             if processed_values is not None and processed_unit != self._processed_unit:
                 raise ValueError("Processed spectrum units cannot change within one run.")
-            self._append_processed_spectrum(trace, processed_values)
             self._last_processed_spectrum_appended = True
+            self._append_processed_spectrum(trace, processed_values)
 
         self._checkpoint_count += 1
         self._last_checkpoint_incremented = True
@@ -302,15 +326,16 @@ class ThatecHdf5Writer:
         if not self._pending_rollback:
             return
         del had_trace  # The transaction record is more precise than the caller hint.
+        count = self._rollback_checkpoint_count
         for row_name in self._last_scalar_rows:
             row = self._file[f"measurement/{row_name}"]
-            row["data"].resize((max(0, len(row["data"]) - 1),))
-            row["timestamp"].resize((max(0, len(row["timestamp"]) - 1),))
+            row["data"].resize((count,))
+            row["timestamp"].resize((count,))
         if self._last_spectrum_appended and self._spectrum_row is not None:
             row = self._file[f"measurement/{self._spectrum_row}"]
-            row["data"].resize((max(0, row["data"].shape[0] - 1), self._trace_points))
-            row["timestamp"].resize((max(0, len(row["timestamp"]) - 1),))
-            row["scale"].resize((max(0, len(row["scale"]) - 4),))
+            row["data"].resize((count, self._trace_points))
+            row["timestamp"].resize((count,))
+            row["scale"].resize((count * 4,))
         if (
             self._last_processed_spectrum_appended
             and self._processed_spectrum_row is not None
@@ -318,14 +343,15 @@ class ThatecHdf5Writer:
             row = self._file[f"measurement/{self._processed_spectrum_row}"]
             row["data"].resize(
                 (
-                    max(0, row["data"].shape[0] - 1),
+                    count,
                     self._processed_trace_points,
                 )
             )
-            row["timestamp"].resize((max(0, len(row["timestamp"]) - 1),))
-            row["scale"].resize((max(0, len(row["scale"]) - 4),))
-        if self._last_checkpoint_incremented:
-            self._checkpoint_count = max(0, self._checkpoint_count - 1)
+            row["timestamp"].resize((count,))
+            row["scale"].resize((count * 4,))
+        self._checkpoint_count = count
+        self._next_row = self._rollback_next_row
+        self._log.resize(self._rollback_log_shape)
 
         if self._dynamic_checkpoint_axis and self._last_checkpoint_axis_appended:
             row = self._file["measurement/row_00"]
@@ -366,6 +392,8 @@ class ThatecHdf5Writer:
 
     def _create_scalar_row(self, role: str, key: str) -> None:
         row_name = self._allocate_row()
+        role_key = (role, key)
+        self._last_created.append((row_name, role_key))
         device, label, unit = self._describe_quantity(role, key)
         control_name = f"{label} ({unit})" if unit else label
         self._definition.create_dataset(
@@ -397,9 +425,7 @@ class ThatecHdf5Writer:
         )
         if self._checkpoint_count:
             timestamps[:] = self._np.nan
-        role_key = (role, key)
         self._scalar_rows[role_key] = row_name
-        self._last_created.append((row_name, role_key))
         self._rebuild_tree_view()
 
     def _append_scalar(self, row_name: str, value: float, timestamp: float) -> None:
@@ -414,6 +440,7 @@ class ThatecHdf5Writer:
         self._trace_points = len(trace.powers_dbm)
         row_name = self._allocate_row()
         self._spectrum_row = row_name
+        self._last_created.append((row_name, None))
         self._definition.create_dataset(
             row_name,
             data=self._table(
@@ -475,7 +502,6 @@ class ThatecHdf5Writer:
             ),
             dtype=self._text,
         )
-        self._last_created.append((row_name, None))
         self._rebuild_tree_view()
 
     def _append_spectrum(self, trace: SpectrumTrace | None) -> None:
@@ -513,6 +539,7 @@ class ThatecHdf5Writer:
         self._processed_unit = unit
         row_name = self._allocate_row()
         self._processed_spectrum_row = row_name
+        self._last_created.append((row_name, ("__spectrum__", "processed")))
         if operation == "difference_db":
             label = "Spectrum raw-reference"
         elif operation.startswith("display_"):
@@ -591,7 +618,6 @@ class ThatecHdf5Writer:
             ),
             dtype=self._text,
         )
-        self._last_created.append((row_name, ("__spectrum__", "processed")))
         self._rebuild_tree_view()
 
     def _append_processed_spectrum(
@@ -713,6 +739,7 @@ class ThatecHdf5Writer:
     def _append_checkpoint_axis(self, point: MeasurementPoint) -> None:
         if not self._dynamic_checkpoint_axis:
             return
+        self._last_checkpoint_axis_appended = True
         row = self._file["measurement/row_00"]
         index = self._checkpoint_count
         if row["data"].shape[0] <= index:
@@ -720,7 +747,6 @@ class ThatecHdf5Writer:
             row["timestamp"].resize((index + 1,))
         row["data"][index] = float(index)
         row["timestamp"][index] = point.timestamp_utc.timestamp()
-        self._last_checkpoint_axis_appended = True
 
     def _allocate_row(self) -> str:
         row_name = f"row_{self._next_row:02d}"
@@ -728,18 +754,22 @@ class ThatecHdf5Writer:
         return row_name
 
     def _validate_uniform_grid(self, trace: SpectrumTrace) -> None:
-        grid_id = id(trace.frequencies_hz)
-        if getattr(self, "_last_validated_grid_id", None) == grid_id:
+        grid = trace.frequencies_hz
+        if isinstance(grid, tuple) and getattr(self, "_last_validated_grid", None) is grid:
             return
+        if len(grid) < 2 or not self._np.all(self._np.isfinite(grid)):
+            raise ValueError("Spectrum frequency grid requires at least two finite values.")
         if len(trace.frequencies_hz) > 1:
             diffs = self._np.diff(trace.frequencies_hz)
             step = self._frequency_step(trace)
+            if step <= 0:
+                raise ValueError("Spectrum frequency grid must be strictly increasing.")
             if not self._np.allclose(diffs, step, rtol=1e-4, atol=1e-3):
                 raise ValueError(
                     "thaTEC format requires uniform frequency grid; "
                     "non-uniform spectrum axis cannot be represented as affine (f0, df)."
                 )
-        self._last_validated_grid_id = grid_id
+        self._last_validated_grid = grid if isinstance(grid, tuple) else None
 
     @staticmethod
     def _frequency_step(trace: SpectrumTrace) -> float:
@@ -759,29 +789,14 @@ class ThatecHdf5Writer:
             "lakeshore_gaussmeter": "Lake Shore 475",
             "moke_box": "MOKE Box",
         }.get(device_key, "Lab Control")
-        leaf = parts[-1].lower()
-        unit = ""
-        unit_tokens = (
-            (("frequency", "_hz"), "Hz"),
-            (("current", "_a"), "A"),
-            (("voltage", "high_level", "low_level", "offset", "_v"), "V"),
-            (("power", "_w"), "W"),
-            (("resistance", "impedance", "_ohm"), "Ω"),
-            (("duration", "settling", "_s"), "s"),
-            (("dbm", "reference_level"), "dBm"),
-            (("field", "peak", "_t"), "T"),
-            (("period", "width", "_s"), "s"),
-            (("duty", "percent"), "%"),
-            (("nplc",), "PLC"),
-        )
-        for tokens, candidate in unit_tokens:
-            if any(token in leaf for token in tokens):
-                unit = candidate
-                break
+        from app.recipes.parameter_registry import persisted_quantity_unit
+
+        unit = persisted_quantity_unit(key)
         display_parts = parts[1:] if len(parts) > 1 else [key]
         path = " ".join(display_parts).replace("_", " ")
         path = re.sub(r"\s+(?:v|a|w|ohm|hz|s|dbm)$", "", path, flags=re.IGNORECASE)
-        prefix = "Setpoint" if role == "setpoint" else "Measured"
+        prefix = {"setpoint": "Setpoint", "measurement": "Measured",
+                  "requested": "Requested", "applied": "Applied", "readback": "Readback"}[role]
         return device, f"{prefix} {path}", unit
 
     def _append_log(self, message: str) -> None:

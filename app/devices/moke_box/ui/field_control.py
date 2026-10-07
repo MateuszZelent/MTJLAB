@@ -70,10 +70,13 @@ class MokeFieldWorker(QObject):
 
     @Slot()
     def run(self):
-        moke = self.leases["moke_box"]
-        interrupts = tuple(lease.interruption_event for lease in self.leases.values())
-        cancel = WorkflowCancellation((self.cancel, *interrupts))
+        moke = None
+        errors = []
+        result = None
         try:
+            moke = self.leases["moke_box"]
+            interrupts = tuple(lease.interruption_event for lease in self.leases.values())
+            cancel = WorkflowCancellation((self.cancel, *interrupts))
             if self.kind == "calibration":
                 result = MokeCalibrationRunner(
                     moke, self.leases["lakeshore_gaussmeter"], self.directory,
@@ -94,26 +97,85 @@ class MokeFieldWorker(QObject):
                 with moke.io_timeout(profile.ramp_timeout_s + 5):
                     result = moke.ramp_vout(plan.channel, plan.targets_v[0], cancel=cancel,
                                            progress=self.voltage_progress.emit, live_targets=self.live_targets)
-            self.succeeded.emit(result)
         except Exception as exc:  # noqa: BLE001 - report failure after attempting qualified cleanup
-            if self.kind == "calibration":
-                # Runner owns cleanup after mutation. Failed preflight must leave DAC untouched.
-                self.failed.emit(str(exc))
-            else:
+            errors.append(str(exc))
+            # Calibration runner owns cleanup after mutation; failed calibration
+            # preflight must leave DAC untouched.
+            if self.kind != "calibration" and moke is not None:
                 try:
                     moke.emergency_off()
-                except Exception:  # noqa: BLE001 - report the primary workflow failure
-                    self.failed.emit(f"{exc}; emergency shutdown also failed")
-                else:
-                    self.failed.emit(str(exc))
+                except Exception as cleanup_error:  # noqa: BLE001 - preserve both failures
+                    errors.append(f"Emergency shutdown also failed: {cleanup_error}")
         finally:
             if self.live_targets is not None:
-                self.live_targets.close()
+                try:
+                    self.live_targets.close()
+                except Exception as exc:  # noqa: BLE001 - still release every instrument
+                    errors.append(f"Live target stream could not be closed: {exc}")
             for lease in reversed(tuple(self.leases.values())):
                 try:
                     lease.release()
                 except Exception as exc:  # noqa: BLE001 - report release failure and retain controller reservation
-                    self.failed.emit(f"Instrument reservation could not be released: {exc}")
+                    errors.append(f"Instrument reservation could not be released: {exc}")
+        try:
+            if errors:
+                self.failed.emit("; ".join(errors))
+            else:
+                self.succeeded.emit(result)
+        finally:
+            self.finished.emit()
+
+
+class CalibrationCatalogWorker(QObject):
+    completed = Signal(object)
+    finished = Signal()
+
+    def __init__(self, directory, profile, operation="catalog", identity=None, reviewed=False):
+        super().__init__()
+        self.directory, self.profile = directory, profile
+        self.operation, self.identity, self.reviewed = operation, identity, reviewed
+
+    @Slot()
+    def run(self):
+        if self.operation != "catalog":
+            result, error = None, None
+            try:
+                repository = MokeCalibrationRepository(self.directory)
+                if self.operation == "activate":
+                    result = repository.activate(self.identity, profile_fingerprint=self.profile.fingerprint,
+                                                 simulation=self.profile.simulation, reviewed=self.reviewed)
+                elif self.operation == "load":
+                    result = repository.load(self.identity)
+                    if (result.context.profile_fingerprint != self.profile.fingerprint
+                            or result.context.simulation != self.profile.simulation):
+                        raise ConfigurationError("Calibration does not match the connected output profile.")
+                else:
+                    raise ConfigurationError("Unsupported calibration repository operation.")
+            except Exception as exc:
+                error = str(exc)
+            try:
+                self.completed.emit((self.operation, result, error))
+            finally:
+                self.finished.emit()
+            return
+        models, rejected, active = [], [], None
+        try:
+            repository = MokeCalibrationRepository(self.directory)
+            active = repository.active(profile_fingerprint=self.profile.fingerprint,
+                                       simulation=self.profile.simulation)
+            for identity in repository.list_ids():
+                try:
+                    model = repository.load(identity)
+                    if (model.context.profile_fingerprint == self.profile.fingerprint
+                            and model.context.simulation == self.profile.simulation):
+                        models.append(model)
+                except ConfigurationError as exc:
+                    rejected.append(f"{identity[:10]}: {exc}")
+        except Exception as exc:
+            rejected.append(str(exc))
+        try:
+            self.completed.emit(("catalog", (tuple(models), tuple(rejected), active), None))
+        finally:
             self.finished.emit()
 
 
@@ -250,6 +312,11 @@ class MokeFieldWorkflow(QObject):
         self._reference_identity = None
         self._simulation = False
         self._thread: QThread | None = None
+        self._catalog_thread = None
+        self._catalog_worker = None
+        self._catalog_result = None
+        self._catalog_context = None
+        self._catalog_refresh_pending = False
         self._worker = None
         self._running_kind = None
         self._cancel = Event()
@@ -1101,9 +1168,13 @@ class MokeFieldWorkflow(QObject):
             for key in sorted(controllers):
                 leases[key] = controllers[key].acquire_run_lease()
         except (ConfigurationError, ValueError, RuntimeError) as exc:
+            errors = [str(exc)]
             for lease in reversed(tuple(leases.values())):
-                lease.release()
-            self._failed(str(exc))
+                try:
+                    lease.release()
+                except Exception as cleanup_error:  # noqa: BLE001 - attempt all releases
+                    errors.append(f"Instrument reservation could not be released: {cleanup_error}")
+            self._failed("; ".join(errors))
             return
         self._cancel = Event()
         self._manual_plan = self._calibration_request = None
@@ -1153,6 +1224,10 @@ class MokeFieldWorkflow(QObject):
         self._disable_live()
         if self.busy:
             self.stop()
+            return False
+        if self._catalog_thread is not None:
+            self._catalog_refresh_pending = False
+            self.calibration_status.setText("Waiting for calibration file verification to finish…")
             return False
         return True
 
@@ -1237,40 +1312,82 @@ class MokeFieldWorkflow(QObject):
         self.status.emit("MOKE field workflow completed")
 
     def _activate(self):
-        if self._review_model is None or self._profile is None:
+        if self.busy or self._catalog_thread is not None or self._review_model is None or self._profile is None:
             return
-        try:
-            self._active_model = MokeCalibrationRepository(self._settings.moke_box.calibration_directory).activate(
-                self._review_model.calibration_id, profile_fingerprint=self._profile.fingerprint,
-                simulation=self._profile.simulation, reviewed=self.reviewed.isChecked())
-            self.calibration_changed.emit(self._active_model)
-            self.calibration_status.setText("Reviewed calibration activated for this output profile.")
-            self._disable_live()
-            self._manual_envelope = None
-            self._manual_plan = None
-            self.voltage_history.clear()
-            self._target_changed()
-        except (ConfigurationError, ValueError, OSError) as exc:
-            self._failed(str(exc))
+        self._disable_live()
+        self._manual_envelope = self._manual_plan = None
+        self._start_catalog_job("activate", self._review_model.calibration_id, self.reviewed.isChecked())
 
     def _list_saved_models(self):
+        if self._profile is None:
+            self.saved_models.clear()
+            return
+        if self._catalog_thread is not None:
+            self._catalog_refresh_pending = True
+            return
+        self._start_catalog_job("catalog")
+
+    def _start_catalog_job(self, operation, identity=None, reviewed=False):
+        if self._catalog_thread is not None or self._profile is None:
+            return
+        if operation in {"load", "activate"}:
+            self.calibration_status.setText(
+                "Verifying calibration files before activation…" if operation == "activate"
+                else "Loading and verifying calibration for review…")
+        directory = self._settings.moke_box.calibration_directory
+        self._catalog_context = (directory, self._profile)
+        self._catalog_result = None
+        self._catalog_thread = QThread(self)
+        self._catalog_worker = CalibrationCatalogWorker(directory, self._profile, operation, identity, reviewed)
+        self._catalog_worker.moveToThread(self._catalog_thread)
+        self._catalog_thread.started.connect(self._catalog_worker.run)
+        self._catalog_worker.completed.connect(self._catalog_completed)
+        self._catalog_worker.finished.connect(self._catalog_thread.quit)
+        self._catalog_worker.finished.connect(self._catalog_worker.deleteLater)
+        self._catalog_thread.finished.connect(self._catalog_finished)
+        self._refresh_controls()
+        self._catalog_thread.start()
+
+    def _catalog_completed(self, result):
+        self._catalog_result = result
+
+    def _catalog_finished(self):
+        thread = self._catalog_thread
+        self._catalog_thread = self._catalog_worker = None
+        result, self._catalog_result = self._catalog_result, None
+        context = (self._settings.moke_box.calibration_directory, self._profile)
+        if thread is not None:
+            thread.deleteLater()
+        if result is not None and context == self._catalog_context and self._profile is not None:
+            operation, value, error = result
+            if error is not None:
+                self._failed(error)
+            elif operation == "catalog":
+                self._apply_catalog_result(value)
+            elif operation == "load":
+                self._apply_review_model(value)
+            elif operation == "activate":
+                self._active_model = value
+                self.calibration_changed.emit(value)
+                self.calibration_status.setText("Reviewed calibration activated for this output profile.")
+                self.voltage_history.clear()
+                self._target_changed()
+        refresh, self._catalog_refresh_pending = self._catalog_refresh_pending, False
+        self._refresh_controls()
+        if refresh:
+            self._list_saved_models()
+
+    def _apply_catalog_result(self, result):
+        models, rejected, active = result
         selected = self.saved_models.currentData()
         self.saved_models.clear()
-        if self._profile is None:
-            return
-        repository = MokeCalibrationRepository(self._settings.moke_box.calibration_directory)
-        rejected = []
-        for identity in repository.list_ids():
-            try:
-                model = repository.load(identity)
-            except ConfigurationError as exc:
-                rejected.append(f"{identity[:10]}: {exc}")
-                continue
-            if model.context.profile_fingerprint == self._profile.fingerprint and model.context.simulation == self._profile.simulation:
-                self.saved_models.addItem(f"{model.created_utc[:19]} · {identity[:10]}", userData=identity)
+        for model in models:
+            self.saved_models.addItem(f"{model.created_utc[:19]} · {model.calibration_id[:10]}", userData=model.calibration_id)
         index = self.saved_models.findData(selected)
         if index >= 0:
             self.saved_models.setCurrentIndex(index)
+        self._active_model = active
+        self.show_field_preview(self._voltage(self.target))
         if rejected:
             message = f"Rejected {len(rejected)} saved calibration(s). {rejected[0]}"
             self.calibration_status.setText(message)
@@ -1278,25 +1395,21 @@ class MokeFieldWorkflow(QObject):
 
     def _load_model(self):
         identity = self.saved_models.currentData()
-        if not identity or self.busy:
+        if not identity or self.busy or self._catalog_thread is not None:
             return
         self._review_model = None
         self.reviewed.setChecked(False)
-        self._refresh_controls()
-        try:
-            model = MokeCalibrationRepository(self._settings.moke_box.calibration_directory).load(identity)
-            if self._profile is None or model.context.profile_fingerprint != self._profile.fingerprint:
-                raise ConfigurationError("Calibration does not match the connected output profile.")
-            self._review_model = model
-            self.reviewed.setChecked(False)
-            self.up_curve.setData(model.ascending.voltage_v, model.ascending.field_t)
-            self.down_curve.setData(model.descending.voltage_v, model.descending.field_t)
-            self.review_summary.setText(
-                f"Saved calibration: {model.created_utc}\nProbe: {model.context.probe_id}\n"
-                f"Raw run: {model.raw_run_id}\nModel: {model.calibration_id}")
-            self._refresh_controls()
-        except (ValueError, RuntimeError, OSError) as exc:
-            self._failed(str(exc))
+        self._start_catalog_job("load", identity)
+
+    def _apply_review_model(self, model):
+        self._review_model = model
+        self.reviewed.setChecked(False)
+        self.up_curve.setData(model.ascending.voltage_v, model.ascending.field_t)
+        self.down_curve.setData(model.descending.voltage_v, model.descending.field_t)
+        self.review_summary.setText(
+            f"Saved calibration: {model.created_utc}\nProbe: {model.context.probe_id}\n"
+            f"Raw run: {model.raw_run_id}\nModel: {model.calibration_id}")
+        self.calibration_status.setText("Calibration verified and loaded for review.")
 
     def show_field_preview(self, voltage_v):
         self.field_basis.setText(f"Voltage draft (DAC quantized): {voltage_v:+.6g} V")
@@ -1365,8 +1478,6 @@ class MokeFieldWorkflow(QObject):
                     self.manual_status.setText(self._control_disabled_reason())
                 self._active_model = None
                 try:
-                    self._active_model = MokeCalibrationRepository(self._settings.moke_box.calibration_directory).active(
-                        profile_fingerprint=profile.fingerprint, simulation=profile.simulation)
                     self._list_saved_models()
                     self.show_field_preview(self._voltage(self.target))
                 except (ConfigurationError, ValueError) as exc:
@@ -1431,7 +1542,11 @@ class MokeFieldWorkflow(QObject):
             return
         ready = self._connected and self._profile is not None and not self.busy and not self._external_controlled
         manual_ready = ready and self._manual_profile() is not None and self._selected_channel() in self._initialized_voltage_channels
-        self.live_control_switch.setEnabled(manual_ready or (self.busy and self.live_control_switch.isChecked()))
+        # Starting Live validates the current draft. Once enabled, keep the
+        # switch usable during invalid edits so the operator can still stop it.
+        self.live_control_switch.setEnabled(
+            (manual_ready and (self._manual_plan is not None or self.live_control_switch.isChecked()))
+            or (self.busy and self.live_control_switch.isChecked()))
         self.set_button.setEnabled(manual_ready and self._manual_plan is not None)
         self.read_voltage_button.setEnabled(self._connected and not self.busy and not self._external_controlled)
         self.read_configuration_button.setEnabled(self.read_voltage_button.isEnabled())
@@ -1440,6 +1555,20 @@ class MokeFieldWorkflow(QObject):
         self.zero_button.setEnabled(self._connected and profile is not None and not self._external_controlled
                                    and self._running_kind != "zero")
         reason = self._control_disabled_reason()
+        if ready and profile is not None:
+            if self._selected_channel() not in self._initialized_voltage_channels:
+                reason = f"Waiting for the initial DAC readback of VOUT {self._selected_channel()}."
+            elif self._manual_plan is None:
+                try:
+                    self._manual_voltage_plan((self._voltage(self.target),))
+                except (ValueError, RuntimeError) as exc:
+                    reason = f"Live control unavailable: {str(exc).rstrip('.')}. Enter a valid voltage/settling time, or use Turn off output."
+                self.manual_status.setText(reason)
+            elif self.manual_status.text().startswith("Live control unavailable:"):
+                self.manual_status.setText(
+                    "Live ON. Valid voltage changes are applied automatically after 400 ms."
+                    if self.live_control_switch.isChecked() else
+                    "Live OFF. Change voltage, then click Apply voltage.")
         for button in (self.set_button, self.zero_button, self.live_control_switch):
             if not button.isEnabled():
                 button.setToolTip("Operation in progress or reserved by a recipe." if self.busy or self._external_controlled else reason)
@@ -1451,9 +1580,9 @@ class MokeFieldWorkflow(QObject):
         self.arm_calibration_button.setEnabled(calibration_ready)
         self.start_calibration_button.setEnabled(calibration_ready and self._calibration_request is not None)
         self.stop_button.setEnabled(self.busy)
-        self.activate_button.setEnabled(ready and self._review_model is not None and self.reviewed.isChecked())
-        self.load_model_button.setEnabled(ready and self.saved_models.count() > 0)
-        self.saved_models.setEnabled(ready)
+        self.activate_button.setEnabled(ready and self._catalog_thread is None and self._review_model is not None and self.reviewed.isChecked())
+        self.load_model_button.setEnabled(ready and self._catalog_thread is None and self.saved_models.count() > 0)
+        self.saved_models.setEnabled(ready and self._catalog_thread is None)
         live_draft = self.busy and self._running_kind == "voltage"
         editable = (not self.busy or live_draft) and not self._external_controlled and self._manual_profile() is not None
         # Set each input directly to its final state. Disabling a pressed

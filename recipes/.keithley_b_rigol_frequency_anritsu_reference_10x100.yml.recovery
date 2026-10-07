@@ -4,7 +4,9 @@ root:
   id: root
   type: sequence
   children:
-    - id: settle
-      type: wait
-      duration: 1 ms
+  - id: settle
+    type: wait
+    duration: 1 ms
+    block_type: recipe.wait
+  block_type: recipe.sequence
 finally: []

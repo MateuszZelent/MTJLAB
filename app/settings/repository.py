@@ -323,10 +323,10 @@ class SettingsRepository:
                                 legacy_limits.append(min(abs(lower), abs(upper)))
                         if legacy_limits:
                             try:
-                                existing_limit = parse_quantity(
+                                existing_limit = abs(parse_quantity(
                                     limits["combined_voltage_limit"],
                                     DIMENSION_VOLTAGE,
-                                ).si_value
+                                ).si_value)
                             except (KeyError, TypeError, ValueError):
                                 existing_limit = math.inf
                             migrated_limit = min(existing_limit, *legacy_limits)
@@ -351,17 +351,6 @@ class SettingsRepository:
             del generator["arm_ttl"]
             changed = True
 
-        try:
-            safety = raw["devices"]["anritsu"]["safety"]
-        except (KeyError, TypeError):
-            return changed
-        if not isinstance(safety, dict):
-            return changed
-
-        documented_reference = {"min": "-120 dBm", "max": "+50 dBm"}
-        if safety.get("reference_level") != documented_reference:
-            safety["reference_level"] = documented_reference
-            changed = True
         return changed
 
     @classmethod

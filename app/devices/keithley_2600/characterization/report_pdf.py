@@ -269,13 +269,13 @@ class KeithleyPdfReportGenerator:
             [
                 Paragraph("<b>Source Range:</b>", body_style),
                 Paragraph(
-                    "AUTO" if cfg.source_autorange else f"{cfg.source_range_si:g} SI",
+                    "AUTO" if cfg.source_autorange else "Not recorded" if cfg.source_range_si is None else f"{cfg.source_range_si:g} SI",
                     body_style,
                 ),
                 Paragraph("<b>Measurement Ranges:</b>", body_style),
                 Paragraph(
-                    f"V: {'AUTO' if cfg.measure_voltage_autorange else f'{cfg.measure_voltage_range_si:g} V'}; "
-                    f"I: {'AUTO' if cfg.measure_current_autorange else f'{cfg.measure_current_range_si:g} A'}",
+                    "V: " + ("AUTO" if cfg.measure_voltage_autorange else "Not recorded" if cfg.measure_voltage_range_si is None else f"{cfg.measure_voltage_range_si:g} V")
+                    + "; I: " + ("AUTO" if cfg.measure_current_autorange else "Not recorded" if cfg.measure_current_range_si is None else f"{cfg.measure_current_range_si:g} A"),
                     body_style,
                 ),
             ],

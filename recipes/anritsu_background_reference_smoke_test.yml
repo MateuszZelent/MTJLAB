@@ -1,0 +1,124 @@
+# MOKE VOUT2 + Anritsu test: use Measurement mode for physical voltage changes.
+# 10 inclusive points from 0 to 10 mV; one RAW spectrum per point.
+# Applied voltages are DAC-quantized (about 0.305 mV per code).
+# Keep the analyzer's current frequency/RBW/VBW/detector settings.
+# Keithley A supplies a fixed 1.5 mA during the 10 spectra; Rigol is unused.
+# Background and reference are archived separately with Keithley A OUTPUT OFF.
+# Explicit operating point before baselines: VOUT2 = 0 mV (editable).
+# Baseline acquisition itself does not change MOKE. Finally returns it to 0 V.
+# After enabling Keithley A once, wait 5 s before the voltage sweep.
+# Allow baseline acquisition time plus 35 s settling and spectrum/storage time.
+schema_version: 1
+name: MOKE VOUT2 0-10 mV, Keithley A 1.5 mA - background, reference, 10 RAW spectra
+root:
+  id: analyzer-smoke-test
+  type: sequence
+  children:
+  - id: initial-moke-safe
+    type: sequence
+    device_module: moke_box
+    channel: 2
+    children:
+    - id: initial-moke-voltage
+      type: set_moke_voltage
+      channel: 2
+      voltage: 0 mV
+      block_type: recipe.set_moke_voltage
+    block_type: device.moke_box
+  - id: initial-keithley-a-off
+    type: set_keithley_output
+    channel: A
+    enabled: false
+    block_type: recipe.set_keithley_output
+  - id: baseline-settle
+    type: wait
+    duration: 3 s
+    block_type: recipe.wait
+  - id: background
+    type: acquire_reference
+    purpose: background
+    trace: TRAC1
+    average_count: 4
+    minimum_duration: 30 s
+    inter_sweep_delay: 3 s
+    block_type: recipe.acquire_reference
+  - id: settle-after-background
+    type: wait
+    duration: 3 s
+    block_type: recipe.wait
+  - id: reference
+    type: acquire_reference
+    purpose: reference
+    trace: TRAC1
+    average_count: 4
+    inter_sweep_delay: 3 s
+    block_type: recipe.acquire_reference
+  - id: settle-after-reference
+    type: wait
+    duration: 3 s
+    block_type: recipe.wait
+  # These source settings match the saved channel-A station configuration.
+  # Omitted NPLC and measurement-range fields are preserved by the adapter.
+  - id: keithley-a-current-settings
+    type: configure_keithley
+    channel: A
+    mode: current
+    level: 1.5 mA
+    compliance: 670 mV
+    sense_mode: 2wire
+    source_autorange: false
+    source_range: 10 mA
+    block_type: recipe.configure_keithley
+  - id: enable-keithley-a
+    type: set_keithley_output
+    channel: A
+    enabled: true
+    block_type: recipe.set_keithley_output
+  - id: settle-after-keithley-a-enable
+    type: wait
+    duration: 5 s
+    block_type: recipe.wait
+  - id: moke-measurement-device
+    type: sequence
+    device_module: moke_box
+    channel: 2
+    children:
+    - id: moke-voltage-sweep
+      type: sweep
+      target: moke_box.vout2.voltage
+      segments:
+      - start: 0 mV
+        stop: 10 mV
+        spacing: linear
+        points: 10
+      children:
+      - id: settle-moke
+        type: wait
+        duration: 3 s
+        block_type: recipe.wait
+      - id: test-spectrum
+        type: acquire_spectrum
+        trace: TRAC1
+        average_count: 1
+        reference_operation: none
+        store_raw: true
+        store_processed: false
+        block_type: recipe.acquire_spectrum
+      block_type: recipe.sweep
+    block_type: device.moke_box
+  block_type: recipe.sequence
+finally:
+- id: final-keithley-a-zero
+  type: ramp_keithley_to_zero
+  channel: A
+  deadline: 10 s
+  block_type: recipe.ramp_keithley_to_zero
+- id: final-keithley-a-off
+  type: set_keithley_output
+  channel: A
+  enabled: false
+  block_type: recipe.set_keithley_output
+- id: final-moke-safe
+  type: stop_moke_voltage
+  channel: 2
+  block_type: recipe.stop_moke_voltage

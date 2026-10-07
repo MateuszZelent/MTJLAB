@@ -20,7 +20,7 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
     if not isinstance(adapter, AnritsuAdapter):
         raise TypeError("Anritsu module received an incompatible adapter.")
     if operation.startswith("read_background_filter_configuration:"):
-        return adapter.read_full_configuration(), adapter.read_advanced_spectrum_configuration()
+        return adapter.read_acquisition_configuration()
     actions = {
         "read_configuration": adapter.read_current_configuration,
         "read_advanced_spectrum": adapter.read_advanced_spectrum_configuration,
@@ -30,10 +30,11 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         "stop_live": adapter.stop_live,
         "fetch_trace": lambda: adapter.fetch_trace(str(payload or "TRAC1")),
         "read_full_configuration": adapter.read_full_configuration,
+        "read_acquisition_configuration": adapter.read_acquisition_configuration,
         "fetch_current_trace": lambda: adapter.fetch_current_trace(str(payload or "TRAC1")),
         "fetch_current_trace_fast": lambda: adapter.fetch_current_trace_fast(str(payload or "TRAC1")),
         "acquire_fresh_trace": lambda: adapter.acquire_fresh_trace(str(payload or "TRAC1")),
-        "single_sweep": lambda: adapter.acquire_single_sweep(str(payload or "TRAC1")),
+        "single_sweep": lambda: adapter.acquire_single_sweep(str(payload or "TRAC1"), restore_continuous=False),
         "read_signal_generator": adapter.read_signal_generator_configuration,
         "configure_signal_generator": lambda: adapter.configure_signal_generator(payload),
         "update_signal_generator": lambda: adapter.update_signal_generator(payload),

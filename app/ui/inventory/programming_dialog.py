@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.ui.dialogs import StationDialog
+
 from dataclasses import replace
 import string
 
@@ -56,17 +58,17 @@ class ColumnLabelsEdit(PlainTextEdit):
         self.setPlainText(text)
 
 
-class RenumberRowsDialog(QDialog):
+class RenumberRowsDialog(StationDialog):
     """Resize a sample grid and optionally renumber its rows."""
 
     def __init__(self, sample: Sample, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(parent, resizable=True)
         self._sample = sample
         self.setWindowTitle(f"Resize / Renumber Grid · {sample.name}")
         self.setMinimumWidth(500)
         self.setModal(True)
 
-        layout = QVBoxLayout(self)
+        layout = self.modal_content_layout()
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(14)
 
@@ -255,7 +257,8 @@ class RenumberRowsDialog(QDialog):
         )
 
 
-class SampleProgrammingDialog(QDialog):
+
+class SampleProgrammingDialog(StationDialog):
     """Wizard to define, configure, or re-program a sample and its device grid.
 
     Provides both quick presets and fine-grained per-row and per-column table editing
@@ -277,7 +280,7 @@ class SampleProgrammingDialog(QDialog):
         sample: Sample | None = None,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent, resizable=True)
         self._existing_sample = sample
         is_edit = sample is not None
 
@@ -288,7 +291,7 @@ class SampleProgrammingDialog(QDialog):
         self.setSizeGripEnabled(True)
         self.setModal(True)
 
-        layout = QVBoxLayout(self)
+        layout = self.modal_content_layout()
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
@@ -874,10 +877,10 @@ class SampleProgrammingDialog(QDialog):
         current_start = int(first_item.text()) if first_item and first_item.text().isdigit() else 1
         default_start = 20 if current_start == 1 else current_start
 
-        dlg = QDialog(self)
+        dlg = StationDialog(self, resizable=True)
         dlg.setWindowTitle("Renumber Rows")
         dlg.setMinimumWidth(340)
-        dlg_layout = QVBoxLayout(dlg)
+        dlg_layout = dlg.modal_content_layout()
         dlg_layout.setSpacing(12)
         dlg_layout.addWidget(SubtitleLabel("Renumber Rows", dlg))
         dlg_layout.addWidget(

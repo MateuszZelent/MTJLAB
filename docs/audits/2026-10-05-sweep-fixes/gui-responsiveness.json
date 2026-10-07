@@ -1,0 +1,14 @@
+{
+  "stored_points": 1000,
+  "gui_timer_ticks": 5369,
+  "maximum_gui_gap_s": 0.24350309977307916,
+  "maximum_gap_context": {
+    "points": 1000,
+    "worker_running": true
+  },
+  "max_tree_update_duration_s": 0.03406349988654256,
+  "max_preview_update_duration_s": 0.012972000055015087,
+  "result_import_pending": true,
+  "result_reader_active": false,
+  "result_path": "C:\\Users\\Shark\\git\\MTJLAB\\.sweep-fixes-stress-release-tmp\\test_execution_tree_keeps_qt_e0\\responsiveness\\20261005T035945.323543Z_responsiveness.h5"
+}

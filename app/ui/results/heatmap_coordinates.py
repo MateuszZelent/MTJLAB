@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-import math
 from pathlib import Path
 from typing import TypeAlias
 
@@ -18,7 +18,6 @@ from app.storage import (
     ThatecRunReader,
     ThatecSchemaMapper,
 )
-
 
 _FREQUENCY_ID = "frequency"
 _CHECKPOINT_ID = "measurement.checkpoint"
@@ -151,6 +150,7 @@ def read_heatmap_matrix(
     request: HeatmapRequest,
     *,
     cancelled: Callable[[], bool] | None = None,
+    processor=None,
 ) -> HeatmapMatrix:
     """Build one exact coordinate plane; never aggregate duplicate checkpoints."""
 
@@ -223,14 +223,19 @@ def read_heatmap_matrix(
             raise ValueError(
                 f"THATEC row {row.id} has multiple trace components; inspect it in Spectrum."
             )
+        if processor is not None:
+            derived = processor.process(checkpoint, spectrum.x_values, spectrum.traces[0].values, spectrum.y_unit)
+            spectrum_values, spectrum_unit = derived.values, derived.unit
+        else:
+            spectrum_values, spectrum_unit = spectrum.traces[0].values, spectrum.y_unit
         frequencies = np.asarray(spectrum.x_values, dtype=float)
-        values = np.asarray(spectrum.traces[0].values, dtype=float)
+        values = np.asarray(spectrum_values, dtype=float)
         if frequencies.ndim != 1 or values.ndim != 1 or frequencies.shape != values.shape:
             raise ValueError(f"THATEC row {row.id} has an invalid spectral grid.")
         if raw_frequency_grid is None:
             raw_frequency_grid = frequencies
             z_label = spectrum.y_label
-            z_unit = spectrum.y_unit
+            z_unit = spectrum_unit
             if frequency_on_axis and frequency_range is not None:
                 frequency_mask = _selection_mask(frequencies, frequency_range)
                 if not np.any(frequency_mask):

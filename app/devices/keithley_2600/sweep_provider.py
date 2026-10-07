@@ -77,6 +77,7 @@ class KeithleySweepProvider:
         if descriptor.device_module != self.module_key or f".{channel}." not in target:
             raise ConfigurationError(f"{node.id}: target {target!r} is not owned by Keithley {channel}.")
         parameter_id = {
+            "level": "source.level",
             "current": "source.level",
             "voltage": "source.level",
             "compliance_voltage": "source.compliance",
@@ -104,8 +105,18 @@ class KeithleySweepProvider:
             raise ConfigurationError(f"{node.id}: Keithley sweep binding endpoint does not match configuration.")
         if binding.target.startswith(f"keithley.{channel}.") is False:
             raise ConfigurationError(f"{node.id}: Keithley target {binding.target!r} does not match endpoint.")
+        expected = self.binding_for_target(node, binding.target)
+        if binding.parameter_id != expected.parameter_id or binding.dimension != expected.dimension:
+            raise ConfigurationError(f"{node.id}: Keithley binding parameter/dimension does not match target.")
         if mode == "measure_only" and binding.parameter_id in {"source.level", "source.compliance"}:
             raise ConfigurationError(f"{node.id}: measure_only cannot sweep {binding.parameter_id}.")
+        parameter = binding.target.rsplit(".", 1)[-1]
+        required_mode = {
+            "level": "current", "current": "current", "compliance_voltage": "current",
+            "voltage": "voltage", "compliance_current": "voltage",
+        }.get(parameter)
+        if required_mode is not None and mode != required_mode:
+            raise ConfigurationError(f"{node.id}: Keithley target does not match configured source mode.")
 
     def compile_point(
         self,
@@ -119,7 +130,7 @@ class KeithleySweepProvider:
         descriptor = parameter_descriptor(binding.target)
         value.require_dimension(descriptor.dimension)
         channel = binding.endpoint
-        mode = "current" if binding.target.rsplit(".", 1)[-1] in {"current", "compliance_voltage"} else "voltage"
+        mode = "current" if binding.target.rsplit(".", 1)[-1] in {"level", "current", "compliance_voltage"} else "voltage"
         if binding.target.rsplit(".", 1)[-1] == "settling_time":
             if value.si_value < 0 or value.si_value > 3600:
                 raise SafetyViolation(f"{node.id}: settling time is outside 0..3600 s.")
@@ -136,7 +147,9 @@ class KeithleySweepProvider:
             maximum = parse_quantity(limit.max, descriptor.dimension).si_value
             if not minimum - 1e-12 <= value.si_value <= maximum + 1e-12:
                 raise SafetyViolation(f"{node.id}: Keithley value {value.si_value:g} SI is outside station limits.")
-        applied = quantize_keithley_value(value.si_value, descriptor.dimension)
+        source_range = context.get(f"keithley.{channel}.source_range")
+        applied = quantize_keithley_value(value.si_value, descriptor.dimension,
+            requested_range_si=source_range.si_value if source_range is not None and binding.parameter_id == "source.level" else None)
         if binding.parameter_id == "source.level":
             return CompiledAxisSetpoint(
                 "update_keithley_level",

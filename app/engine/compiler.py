@@ -17,6 +17,7 @@ from app.devices.anritsu_ms2830a.adapter import (
 )
 from app.devices.rigol_dg1000z.adapter import RigolChannelConfig, RigolOutputConfig
 from app.domain.errors import ConfigurationError, ExecutionError, SafetyViolation
+from app.domain.immutable import freeze_configuration
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_DB,
@@ -27,9 +28,11 @@ from app.domain.quantities import (
     Quantity,
     parse_quantity,
 )
-from app.recipes.models import Recipe, RecipeNode
+from app.recipes.models import Recipe, RecipeNode, validate_action_fields
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
-from app.recipes.semantic_tree import AxisPointContext, SemanticMeasurementTree, normalize_recipe_tree
+from app.recipes.semantic_tree import (
+    AxisPointContext, SemanticMeasurementTree, axis_update_matches, normalize_recipe_tree,
+)
 from app.recipes.sweep_points import generate_sweep_points
 if TYPE_CHECKING:
     from app.contracts import DeviceModuleRegistry
@@ -67,6 +70,9 @@ class PlanAction:
     semantic_id: str | None = None
     source_node_id: str | None = None
     axis_context: AxisPointContext | None = None
+    completion_only: bool = False
+    retained_output: str | None = None
+    fault_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +87,21 @@ class ExecutionPlan:
     safe_shutdown_actions: tuple[str, ...] = ()
     recipe_dut_limits: dict[str, Any] = field(default_factory=dict)
     elab_upload_config: dict[str, Any] | None = None
+    total_control_points: int = 0
+
+    @property
+    def retained_outputs(self) -> frozenset[str]:
+        return frozenset(action.retained_output for action in self.actions
+                         if action.completion_only and action.retained_output is not None)
+
+    def __post_init__(self) -> None:
+        # Compilation builds mutable drafts; the executable plan owns a frozen
+        # snapshot so later edits cannot alter the accepted values or hash.
+        object.__setattr__(self, "actions", tuple(freeze_configuration(action) for action in self.actions))
+        object.__setattr__(self, "recipe_dut_limits", freeze_configuration(self.recipe_dut_limits))
+        object.__setattr__(self, "elab_upload_config", freeze_configuration(self.elab_upload_config))
+        object.__setattr__(self, "required_devices", frozenset(self.required_devices))
+        object.__setattr__(self, "safe_shutdown_actions", tuple(self.safe_shutdown_actions))
 
 
 def required_devices_for_actions(actions: Iterable[PlanAction]) -> frozenset[str]:
@@ -106,6 +127,44 @@ def required_devices_for_actions(actions: Iterable[PlanAction]) -> frozenset[str
     return frozenset(required)
 
 
+def action_produces_checkpoint(action: PlanAction) -> bool:
+    """One authoritative count for compilation, storage estimates and recovery."""
+    return action.kind in {"acquire_spectrum", "checkpoint"} or (
+        action.kind in {"measure_moke_hall", "measure_lakeshore_field"}
+        and action.payload.get("checkpoint", True) is True
+    )
+
+
+def action_can_energize(action: PlanAction) -> bool:
+    """Classify recipe mutations without confusing DAC control with an ON switch."""
+    return action.kind == "update_moke_voltage" or (
+        action.kind in {"set_rigol_output", "set_keithley_output", "set_anritsu_sg_output"}
+        and bool(action.payload.get("enabled"))
+    )
+
+
+def controlled_output_endpoints(actions: Iterable[PlanAction]) -> frozenset[str]:
+    """Physical outputs whose confirmed OFF state a resume must establish."""
+    endpoints = set()
+    for action in actions:
+        payload = action.payload
+        if "keithley" in action.kind:
+            channel = getattr(payload.get("request"), "channel", payload.get("channel"))
+            if channel in {"A", "B"}:
+                endpoints.add(f"keithley.{channel}")
+        elif "rigol" in action.kind:
+            channel = getattr(payload.get("config"), "channel", payload.get("channel"))
+            if channel in {1, 2}:
+                endpoints.add(f"rigol.{channel}")
+        elif "anritsu_sg" in action.kind or (
+            action.kind == "assert_output_on" and payload.get("device") == "anritsu_sg"
+        ):
+            endpoints.add("anritsu.sg")
+        elif action.kind in {"configure_moke_box", "arm_moke_voltage", "update_moke_voltage", "stop_moke_voltage"}:
+            endpoints.add("moke_box.field")
+    return frozenset(endpoints)
+
+
 class RecipeCompiler:
     """Reject unsafe values before an adapter can see an execution request."""
 
@@ -118,7 +177,12 @@ class RecipeCompiler:
         device_registry: DeviceModuleRegistry | None = None,
     ) -> None:
         self._settings = settings
-        self._max_actions = int(settings.execution.get("max_expanded_points", 100_000)) * 10
+        self._max_points = settings.execution.get("max_expanded_points", 100_000)
+        if type(self._max_points) is not int or self._max_points < 1:
+            raise ConfigurationError("max_expanded_points must be a positive integer.")
+        self._max_actions = settings.execution.get("max_expanded_actions", self._max_points * 10)
+        if type(self._max_actions) is not int or self._max_actions < 1:
+            raise ConfigurationError("max_expanded_actions must be a positive integer.")
         self._cancellation_requested = cancellation_requested
         self._outputs_forced_off = bool(outputs_forced_off)
         if device_registry is None:
@@ -136,6 +200,58 @@ class RecipeCompiler:
         # the exact outer/inner axis combination without parsing node IDs.
         self._active_axis_context: AxisPointContext | None = None
         self._recipe_nodes: dict[str, RecipeNode] = {}
+        self._planned_action_cursor = 0
+        self._planned_context: dict[str, Quantity] = {}
+        self._planned_keithley_requests: dict[str, KeithleySourceRequest] = {}
+        self._planned_rigol_configs: dict[int, RigolChannelConfig] = {}
+        self._planned_anritsu_mode: str | None = None
+
+    def _sync_planned_state(self, actions: list[PlanAction]) -> None:
+        """Track physical state across loop exits without rescanning the plan."""
+        for action in actions[self._planned_action_cursor:]:
+            self._remember_literal_configuration(action, self._planned_context)
+            if action.kind == "configure_anritsu" and action.payload["config"].changed_fields is None:
+                self._planned_anritsu_mode = "SPECTRUM"
+            elif action.kind == "configure_anritsu_sg":
+                self._planned_anritsu_mode = "SG"
+            if action.kind == "configure_keithley":
+                request = action.payload["request"]
+                merged = self._merge_keithley_configuration(
+                    self._planned_keithley_requests.get(request.channel), request
+                )
+                action.payload["request"] = replace(merged, changed_fields=request.changed_fields)
+                self._planned_keithley_requests[request.channel] = merged
+            elif action.kind in {"update_keithley_level", "update_keithley_compliance"}:
+                channel = action.payload["channel"]
+                previous = self._planned_keithley_requests.get(channel)
+                if previous is not None:
+                    field = "level_si" if action.kind == "update_keithley_level" else "compliance_si"
+                    self._planned_keithley_requests[channel] = replace(previous, **{field: action.payload[field]})
+            if action.kind == "configure_rigol":
+                config = action.payload["config"]
+                self._planned_rigol_configs[config.channel] = config
+            elif action.kind in {"update_rigol_frequency", "update_rigol_levels"}:
+                channel = action.payload["channel"]
+                previous = self._planned_rigol_configs.get(channel)
+                if previous is not None:
+                    fields = ("frequency_hz",) if action.kind == "update_rigol_frequency" else ("high_level_v", "low_level_v")
+                    self._planned_rigol_configs[channel] = replace(previous, **{field: action.payload[field] for field in fields})
+        self._planned_action_cursor = len(actions)
+
+    @staticmethod
+    def _merge_keithley_configuration(previous, request):
+        """Mirror adapter patch semantics instead of promoting defaults to settings."""
+        if previous is None or request.changed_fields is None:
+            return replace(request, changed_fields=None)
+        merged = replace(previous, **{
+            key: getattr(request, key) for key in request.changed_fields
+        }, changed_fields=None)
+        if merged.mode == "measure_only":
+            merged = replace(
+                merged, level_si=0.0, compliance_si=0.0,
+                source_range_si=None, source_autorange=False,
+            )
+        return merged
 
     def _check_cancelled(self) -> None:
         if (
@@ -143,6 +259,38 @@ class RecipeCompiler:
             and self._cancellation_requested()
         ):
             raise ConfigurationError("Recipe compilation cancelled.")
+
+    def _check_expansion_budget(self, recipe: Recipe) -> None:
+        """Bound repeats and checkpoint products before plan allocation."""
+        def cost(node: RecipeNode) -> tuple[int, int]:
+            self._check_cancelled()
+            if node.data.get("disabled") is True:
+                return 0, 0
+            children = [cost(child) for child in node.children]
+            alternative = [cost(child) for child in node.else_children]
+            points = sum(item[0] for item in children)
+            actions = sum(item[1] for item in children)
+            if node.type == "if":
+                points = max(points, sum(item[0] for item in alternative))
+                actions = max(actions, sum(item[1] for item in alternative))
+            multiplier = node.data["count"] if node.type == "repeat" else 1
+            binding = self._semantic_axes_by_source.get(node.id)
+            if binding is not None:
+                multiplier *= len(binding.points)
+                actions += 1
+            if node.type not in {"sequence", "sweep", "repeat", "if"}:
+                actions += 1
+                if node.type in {"acquire_spectrum", "checkpoint"} or (
+                    node.type in {"measure_moke_hall", "measure_lakeshore_field"}
+                    and node.data.get("checkpoint", True) is True
+                ):
+                    points += 1
+            points *= multiplier
+            actions *= multiplier
+            if points > self._max_points or actions > self._max_actions:
+                raise SafetyViolation(f"{node.id}: expanded recipe exceeds its checkpoint/action budget before allocation.")
+            return points, actions
+        cost(recipe.root)
 
     def _semantic_point_count(self) -> int:
         """Count Cartesian leaf points without changing checkpoint semantics."""
@@ -166,35 +314,26 @@ class RecipeCompiler:
             visit(root)
         return total
 
-    @staticmethod
-    def _axis_update_matches(child: RecipeNode, compiled_kind: str) -> bool:
-        """Identify an authored technical update represented by Set ROI value."""
-
-        return child.type == compiled_kind
-
-    @staticmethod
-    def _binding_configured(binding, actions: list[PlanAction]) -> bool:
+    def _binding_configured(self, binding, actions: list[PlanAction]) -> bool:
+        self._sync_planned_state(actions)
         channel = str(binding.endpoint)
         if binding.device_module == "keithley":
-            return any(
-                action.kind == "configure_keithley"
-                and str(action.payload.get("request").channel) == channel
-                for action in actions
-            )
+            request = self._planned_keithley_requests.get(channel)
+            tail = binding.target.rsplit(".", 1)[-1]
+            mode = "current" if tail in {"level", "current", "compliance_voltage"} else "voltage"
+            return request is not None and (tail == "settling_time" or request.mode == mode)
         if binding.device_module == "rigol":
-            return any(
-                action.kind == "configure_rigol"
-                and str(action.payload.get("config").channel) == channel
-                for action in actions
-            )
+            return int(channel) in self._planned_rigol_configs
         if binding.device_module == "anritsu":
-            return any(
-                action.kind in {"configure_anritsu", "configure_anritsu_sg"}
-                for action in actions
-            )
+            return self._planned_anritsu_mode == binding.endpoint.upper()
         if binding.device_module == "moke_box":
-            return any(action.kind == "configure_moke_box"
-                       and f"vout{action.payload['profile'].channel}" == channel for action in actions)
+            for action in reversed(actions):
+                if action.kind == "stop_moke_voltage":
+                    return False
+                if action.kind == "configure_moke_box":
+                    return (not action.payload.get("automatic_sweep_preparation", False)
+                            and f"vout{action.payload['profile'].channel}" == channel)
+            return False
         return False
 
     def _semantic_axis_action(
@@ -216,7 +355,7 @@ class RecipeCompiler:
         provider_node = owner
         if binding.owner_node_id == node.id and not owner.data.get("channel"):
             target_tail = binding.target.rsplit(".", 1)[-1]
-            mode = "current" if target_tail in {"current", "compliance_voltage"} else "voltage"
+            mode = "current" if target_tail in {"level", "current", "compliance_voltage"} else "voltage"
             provider_node = RecipeNode(
                 node.id,
                 node.type,
@@ -224,16 +363,18 @@ class RecipeCompiler:
                 node.children,
                 node.else_children,
             )
-        compiled = provider.compile_point(provider_node, binding, value, context, self._settings)
+        physical_context = {**context, **self._planned_context, binding.target: value}
+        if binding.device_module == "keithley":
+            request = self._planned_keithley_requests.get(binding.endpoint)
+            if request is not None and request.source_range_si is not None:
+                dimension = DIMENSION_CURRENT if request.mode == "current" else DIMENSION_VOLTAGE
+                physical_context[f"keithley.{binding.endpoint}.source_range"] = Quantity(request.source_range_si, dimension)
+        compiled = provider.compile_point(provider_node, binding, value, physical_context, self._settings)
         axis_context = AxisPointContext(
             binding.axis_id,
             point_index,
             point_count,
-            next(
-                stage.stage_index
-                for stage in binding.stages
-                if any(point.si_value == value.si_value for point in stage.points)
-            ),
+            binding.stage_index_at(point_index),
             value.si_value,
             {key: item.si_value for key, item in context.items()},
             (*active_axis_ids, binding.source_node_id),
@@ -255,13 +396,21 @@ class RecipeCompiler:
         )
 
     def compile(self, recipe: Recipe) -> ExecutionPlan:
+        self._check_cancelled()
         actions: list[PlanAction] = []
         self._reference_assets = {}
         self._recipe_nodes = {}
         self._active_axis_path = ()
         self._active_axis_context = None
+        self._planned_action_cursor = 0
+        self._planned_context = {}
+        self._planned_keithley_requests = {}
+        self._planned_rigol_configs = {}
+        self._planned_anritsu_mode = None
 
         def index_recipe_node(node: RecipeNode) -> None:
+            from app.recipes.models import validate_action_fields
+            validate_action_fields(node.type, node.data, f"block {node.id}")
             self._recipe_nodes[node.id] = node
             for child in (*node.children, *node.else_children):
                 index_recipe_node(child)
@@ -269,24 +418,35 @@ class RecipeCompiler:
         index_recipe_node(recipe.root)
         for node in recipe.finally_nodes:
             index_recipe_node(node)
-        try:
-            self._semantic_tree = normalize_recipe_tree(
-                recipe, self._device_registry.sweep_providers()
-            )
-            self._semantic_axes_by_source = {
-                node.source_node_id: node.axis
-                for node in self._semantic_tree.by_id.values()
-                if node.axis is not None and node.source_node_id is not None
-            }
-        except Exception:
-            # Keep the established compiler diagnostics for recipes that do not
-            # use sweep axes; axis-bearing documents fail at the same typed
-            # normalization boundary with the precise ConfigurationError.
-            self._semantic_tree = None
-            self._semantic_axes_by_source = {}
+        self._semantic_tree = normalize_recipe_tree(
+            recipe, self._device_registry.sweep_providers(), max_points=self._max_points,
+            cancellation_requested=self._cancellation_requested,
+        )
+        self._semantic_axes_by_source = {
+            node.source_node_id: node.axis
+            for node in self._semantic_tree.by_id.values()
+            if node.axis is not None and node.source_node_id is not None
+        }
+        self._check_expansion_budget(recipe)
         self._visit(recipe.root, {}, actions)
+        completion_started = False
         for node in recipe.finally_nodes:
+            if completion_started and node.type != "final_state":
+                raise ConfigurationError("Put final-state blocks after all shutdown actions in Finally.")
+            completion_started = completion_started or node.type == "final_state"
             self._visit(node, {}, actions, is_finally=True)
+        final_endpoints = {action.payload["final_endpoint"] for action in actions if action.completion_only}
+        for index, action in enumerate(actions):
+            if not action.is_finally or action.completion_only:
+                continue
+            channel = action.payload.get("channel")
+            endpoint = (f"keithley.{channel}" if action.kind in {"set_keithley_output", "ramp_keithley_to_zero"}
+                        else f"rigol.{channel}" if action.kind == "set_rigol_output"
+                        else f"moke_box.vout{channel}" if action.kind == "stop_moke_voltage" else None)
+            overridden = endpoint in final_endpoints or (action.kind == "stop_moke_voltage" and channel is None
+                           and any(endpoint.startswith("moke_box.") for endpoint in final_endpoints))
+            if overridden:
+                actions[index] = replace(action, fault_only=True)
         self._prepare_moke_trajectories(actions)
         self._validate_reference_flow(actions)
         self._validate_device_state_flow(actions)
@@ -297,21 +457,17 @@ class RecipeCompiler:
             raise SafetyViolation(
                 f"The plan expands to {len(actions)} actions; the limit is {self._max_actions}."
             )
-        total_points = sum(
-            action.kind in {"acquire_spectrum", "checkpoint"}
-            or (
-                action.kind in {"measure_moke_hall", "measure_lakeshore_field"}
-                and bool(action.payload.get("checkpoint", True))
-            )
-            for action in actions
-        )
+        total_points = sum(action_produces_checkpoint(action) for action in actions)
         semantic_points = self._semantic_point_count()
-        if semantic_points:
-            total_points = max(total_points, semantic_points)
+        if total_points > self._max_points:
+            raise SafetyViolation(
+                f"The plan expands to {total_points} points; the limit is {self._max_points}."
+            )
         total_spectra = sum(action.kind == "acquire_spectrum" for action in actions)
         required_devices = required_devices_for_actions(actions)
         safe_shutdown_actions = self._safe_shutdown_actions(
-            required_devices, moke_output=any(action.kind in {"arm_moke_voltage", "update_moke_voltage", "stop_moke_voltage"}
+            required_devices, anritsu_output="anritsu.sg" in controlled_output_endpoints(actions),
+            moke_output=any(action.kind in {"arm_moke_voltage", "update_moke_voltage", "stop_moke_voltage"}
                                              for action in actions))
         canonical = json.dumps(
             {
@@ -325,6 +481,9 @@ class RecipeCompiler:
                     "semantic_id": item.semantic_id,
                     "source_node_id": item.source_node_id,
                     "axis_context": self._canonicalize(item.axis_context),
+                    "completion_only": item.completion_only,
+                    "retained_output": item.retained_output,
+                    "fault_only": item.fault_only,
                 }
                 for item in actions
                 ],
@@ -351,6 +510,7 @@ class RecipeCompiler:
             safe_shutdown_actions,
             dict(recipe.dut_limits),
             elab_upload_config,
+            semantic_points,
         )
 
     @staticmethod
@@ -359,6 +519,7 @@ class RecipeCompiler:
         configured = None
         arm = None
         targets: list[float] = []
+        target_actions: list[PlanAction] = []
 
         def finish():
             if configured is None:
@@ -371,11 +532,14 @@ class RecipeCompiler:
             plan.validate(profile)
             configured.payload["plan"] = plan
             arm.payload["plan"] = plan
+            for target_action in target_actions:
+                target_action.payload["applied_si"] = plan.applied_voltage(target_action.payload["voltage_v"])
 
         for action in actions:
             if action.kind == "configure_moke_box":
                 finish()
                 configured, arm, targets = action, None, []
+                target_actions = []
             elif action.kind == "arm_moke_voltage":
                 if configured is None or arm is not None:
                     raise ConfigurationError("MOKE arm requires exactly one preceding voltage configuration.")
@@ -387,9 +551,11 @@ class RecipeCompiler:
                     raise SafetyViolation("MOKE voltage update channel differs from the configured physical binding.")
                 action.payload["ramp_timeout_s"] = configured.payload["profile"].ramp_timeout_s
                 targets.append(action.payload["voltage_v"])
+                target_actions.append(action)
             elif action.kind == "stop_moke_voltage":
                 finish()
                 configured, arm, targets = None, None, []
+                target_actions = []
         finish()
 
     def _validate_keithley_range_flow(self, actions: list[PlanAction]) -> None:
@@ -398,15 +564,37 @@ class RecipeCompiler:
         for action in actions:
             if action.kind == "configure_keithley":
                 request = action.payload["request"]
-                configured[request.channel] = request
+                merged = self._merge_keithley_configuration(configured.get(request.channel), request)
+                validate_keithley_source(self._settings.keithley.safety.channels[request.channel], merged)
+                action.payload["request"] = replace(merged, changed_fields=request.changed_fields)
+                configured[request.channel] = merged
             elif action.kind == "update_keithley_level":
                 channel = action.payload["channel"]
                 request = configured.get(channel)
                 if request is not None:
+                    raw = replace(request, level_si=action.payload["level_si"])
                     validate_keithley_source(
                         self._settings.keithley.safety.channels[channel],
-                        replace(request, level_si=action.payload["level_si"]),
+                        raw,
                     )
+                    applied = self._quantize_keithley_request(raw)
+                    validate_keithley_source(self._settings.keithley.safety.channels[channel], applied)
+                    action.payload["level_si"] = applied.level_si
+                    if "applied_si" in action.payload:
+                        action.payload["applied_si"] = applied.level_si
+                    configured[channel] = applied
+            elif action.kind == "update_keithley_compliance":
+                channel = action.payload["channel"]
+                request = configured.get(channel)
+                if request is not None:
+                    raw = replace(request, compliance_si=action.payload["compliance_si"])
+                    validate_keithley_source(self._settings.keithley.safety.channels[channel], raw)
+                    applied = self._quantize_keithley_request(raw)
+                    validate_keithley_source(self._settings.keithley.safety.channels[channel], applied)
+                    action.payload["compliance_si"] = applied.compliance_si
+                    if "applied_si" in action.payload:
+                        action.payload["applied_si"] = applied.compliance_si
+                    configured[channel] = applied
 
     @staticmethod
     def _validate_reference_flow(actions: list[PlanAction]) -> None:
@@ -449,11 +637,21 @@ class RecipeCompiler:
 
         configured: set[tuple[str, str]] = set()
         output_enabled: dict[tuple[str, str], bool] = {}
+        anritsu_mode: str | None = None
         for action in actions:
-            if action.is_finally:
+            if action.fault_only:
                 continue
             kind = action.kind
             payload = action.payload
+            if kind == "configure_anritsu" and payload["config"].changed_fields is None:
+                if output_enabled.get(("anritsu_sg", "RF"), False):
+                    raise ConfigurationError(f"{action.node_id}: turn SG RF OFF explicitly before selecting Spectrum Analyzer mode.")
+                anritsu_mode = "spectrum"
+                configured.discard(("anritsu_sg", "RF"))
+            elif kind == "configure_anritsu_sg":
+                anritsu_mode = "sg"
+            elif kind in {"acquire_reference", "acquire_spectrum"} and not payload.get("source_file") and anritsu_mode == "sg":
+                raise ConfigurationError(f"{action.node_id}: acquisition requires an explicit Spectrum Analyzer configuration after SG mode; it cannot silently switch SG OFF.")
             key: tuple[str, str] | None = None
             if kind == "configure_keithley":
                 key = ("keithley", str(payload["request"].channel))
@@ -462,7 +660,12 @@ class RecipeCompiler:
             elif kind == "configure_anritsu_sg":
                 key = ("anritsu_sg", "RF")
             if key is not None:
-                configured.add(key)
+                if kind == "configure_keithley" and payload["request"].mode == "measure_only":
+                    # Measurement setup preserves the hardware source registers;
+                    # it is not evidence of a validated source for OUTPUT ON.
+                    configured.discard(key)
+                else:
+                    configured.add(key)
                 # Every full device configuration is specified to force and
                 # confirm OUTPUT OFF before applying setpoints.
                 output_enabled[key] = False
@@ -551,7 +754,8 @@ class RecipeCompiler:
             )
         )
 
-    def _safe_shutdown_actions(self, required_devices: frozenset[str], *, moke_output: bool = False) -> tuple[str, ...]:
+    def _safe_shutdown_actions(self, required_devices: frozenset[str], *, moke_output: bool = False,
+                               anritsu_output: bool = False) -> tuple[str, ...]:
         allowed = {
             "keithley.outputs_off": "keithley",
             "rigol.outputs_off": "rigol",
@@ -567,7 +771,11 @@ class RecipeCompiler:
             action = str(value)
             if action not in allowed:
                 raise ConfigurationError(f"Unsupported emergency-stop action {action!r}.")
-            if action == "anritsu.abort_acquisition":
+            if action.startswith("anritsu."):
+                if not anritsu_output:
+                    # A receiver owns no energy output; normal completion keeps
+                    # its front-panel acquisition running. Fault abort is separate.
+                    continue
                 action = "anritsu.rf_off_and_abort"
             device = allowed[action]
             if device == "storage":
@@ -578,19 +786,15 @@ class RecipeCompiler:
         required_actions = {
             "keithley": "keithley.outputs_off",
             "rigol": "rigol.outputs_off",
-            "anritsu": "anritsu.rf_off_and_abort",
+            "anritsu": "anritsu.rf_off_and_abort" if anritsu_output else "anritsu.abort_acquisition",
         }
         if moke_output:
             result.append("moke_box.dac_zero_or_unknown")
-        # A normal measurement owns the complete station and therefore keeps
-        # the station-wide shutdown invariant.  A dry run never enables an
-        # output; it is intentionally scoped to the devices referenced by the
-        # plan so an Anritsu-only simulation does not require unrelated source
-        # sessions just to prove a state it is forbidden to energise.
-        shutdown_devices = (
-            tuple(device for device in ("keithley", "rigol", "anritsu") if device in required_devices)
-            if self._outputs_forced_off
-            else ("keithley", "rigol", "anritsu")
+        # Every execution mode owns only the devices declared by its actions.
+        # The separate station E-STOP remains explicitly global.
+        shutdown_devices = tuple(
+            device for device in ("keithley", "rigol", "anritsu")
+            if device in required_devices and (device != "anritsu" or anritsu_output)
         )
         for device in shutdown_devices:
             action = required_actions[device]
@@ -780,6 +984,69 @@ class RecipeCompiler:
             return [RecipeCompiler._canonicalize(item) for item in value]
         return value
 
+    def _visit_final_state(self, node, context, actions) -> None:
+        """Compile success-only endpoints through existing validated operations."""
+        self._sync_planned_state(actions)
+        data = dict(node.data)
+        device, channel, output = data.get("device"), data.get("channel"), data.get("output")
+        fields = {"moke_box": {"voltage"}, "keithley": {"level"},
+                  "rigol": {"frequency", "high_level", "low_level"}}
+        if not isinstance(device, str) or device not in fields or not isinstance(output, str) or output not in {"off", "hold"}:
+            raise ConfigurationError("Final state requires MOKE/Keithley/Rigol and output off or hold.")
+        extra = set(data) - fields[device] - {"device", "channel", "output", "label", "description", "disabled"}
+        if extra:
+            raise ConfigurationError(f"{node.id}: fields do not belong to {device}: {sorted(extra)}.")
+        if (device == "keithley" and (not isinstance(channel, str) or channel not in {"A", "B"})) or (
+            device != "keithley" and (type(channel) is not int or channel not in (range(8) if device == "moke_box" else (1, 2)))
+        ):
+            raise ConfigurationError("Final state requires a valid explicit output channel.")
+        endpoint = f"{device}.{'vout' if device == 'moke_box' else ''}{channel}"
+        if any(action.source_node_id != node.id and action.completion_only
+               and action.payload.get("final_endpoint") == endpoint for action in actions):
+            raise ConfigurationError(f"Duplicate final state for {endpoint}.")
+        operations = []
+        if device == "moke_box":
+            if not any(action.kind == "configure_moke_box" and action.payload["profile"].channel == channel
+                       and not action.completion_only for action in actions):
+                raise ConfigurationError("MOKE final state requires this VOUT in the main measurement plan.")
+            if output == "off":
+                if "voltage" in data and parse_quantity(data["voltage"], DIMENSION_VOLTAGE).si_value != 0:
+                    raise ConfigurationError("MOKE off uses the qualified zero target; choose hold for nonzero voltage.")
+                operations.append(("stop_moke_voltage", {"channel": channel}))
+            else:
+                operations.append(("set_moke_voltage", {"channel": channel, "voltage": data.get("voltage")}))
+        elif device == "keithley":
+            request = self._planned_keithley_requests.get(channel)
+            if request is None or request.mode == "measure_only":
+                raise ConfigurationError("Keithley final state requires a source configuration in the main plan.")
+            if "level" in data:
+                operations.append(("update_keithley_level", {"channel": channel, "mode": request.mode, "level": data["level"]}))
+            if output == "off":
+                operations.append(("set_keithley_output", {"channel": channel, "enabled": False}))
+        else:
+            if channel not in self._planned_rigol_configs:
+                raise ConfigurationError("Rigol final state requires a carrier configuration in the main plan.")
+            if "frequency" in data:
+                operations.append(("update_rigol_frequency", {"channel": channel, "frequency": data["frequency"]}))
+            if {"high_level", "low_level"}.intersection(data):
+                if not {"high_level", "low_level"}.issubset(data):
+                    raise ConfigurationError("Rigol final voltage requires both high_level and low_level.")
+                operations.append(("update_rigol_levels", {key: data[key] for key in ("channel", "high_level", "low_level")}))
+            if output == "off":
+                operations.append(("set_rigol_output", {"channel": channel, "enabled": False}))
+        start = len(actions)
+        for index, (kind, values) in enumerate(operations):
+            self._visit(RecipeNode(f"{node.id}.{index}", kind, values), context, actions)
+        if output == "hold" and device != "moke_box":
+            self._append_output_continuity_assertion(actions, node_id=node.id, device=device,
+                                                    channel=str(channel), context=context)
+        for index in range(start, len(actions)):
+            action = actions[index]
+            actions[index] = replace(action, is_finally=True, completion_only=True,
+                semantic_id=node.id, source_node_id=node.id,
+                payload={**action.payload, "final_endpoint": endpoint},
+                retained_output=endpoint if output == "hold" and index == len(actions) - 1 else None)
+
     def _visit(
         self,
         node: RecipeNode,
@@ -789,6 +1056,7 @@ class RecipeCompiler:
         is_finally: bool = False,
     ) -> None:
         self._check_cancelled()
+        validate_action_fields(node.type, node.data, node.id)
         disabled = node.data.get("disabled", False)
         if not isinstance(disabled, bool):
             raise ConfigurationError(
@@ -802,11 +1070,28 @@ class RecipeCompiler:
             return
         if len(actions) > self._max_actions:
             raise SafetyViolation("The expanded-action limit was exceeded.")
+        if node.type == "final_state":
+            if not is_finally:
+                raise ConfigurationError("Final state belongs in the Finally branch.")
+            self._visit_final_state(node, context, actions)
+            return
         if node.type == "sequence":
             device_module = node.data.get("device_module")
+            if device_module == "moke_box" and "channel" in node.data:
+                declared_channel = node.data["channel"]
+                if type(declared_channel) is not int or declared_channel not in range(8):
+                    raise ConfigurationError(f"{node.id}: MOKE device channel must be 0..7.")
+                for child in node.children:
+                    child_channel = (child.data.get("channel") if child.type in {"set_moke_voltage", "configure_moke_box", "update_moke_voltage"}
+                        else int(str(child.data["target"]).split(".")[1].removeprefix("vout"))
+                        if child.type == "sweep" and str(child.data.get("target", "")).startswith("moke_box.vout") else None)
+                    if child_channel is not None and child_channel != declared_channel:
+                        raise ConfigurationError(f"{node.id}: MOKE device channel differs from its operation channel.")
             if device_module == "moke_box" and (
                 node.data.get("configuration_required")
-                or not any(child.type == "configure_moke_box" for child in node.children)
+                or not any(child.type in {"configure_moke_box", "set_moke_voltage"}
+                    or (child.type == "sweep" and str(child.data.get("target", "")).startswith("moke_box."))
+                    for child in node.children)
             ):
                 raise ConfigurationError(f"{node.id}: MOKE Box configuration is incomplete.")
             if (
@@ -879,6 +1164,27 @@ class RecipeCompiler:
                 )
             )
             return
+        if node.type == "set_moke_voltage":
+            if is_finally:
+                raise SafetyViolation("Use MOKE return-to-zero cleanup in finally.")
+            channel = node.data.get("channel")
+            simulation = bool((self._settings.moke_box.endpoint or "").startswith("SIM::MOKE"))
+            profile = control_profile_from_settings(self._settings, simulation=simulation, channel=channel)
+            voltage = parse_quantity(node.data.get("voltage"), DIMENSION_VOLTAGE).si_value
+            MokeVoltagePlan(profile.fingerprint, channel, profile.minimum_v, profile.maximum_v, (voltage,)).validate(profile)
+            operations = [
+                ("prepare", "configure_moke_box", {"channel": channel,
+                    "minimum_voltage": Quantity(profile.minimum_v, DIMENSION_VOLTAGE),
+                    "maximum_voltage": Quantity(profile.maximum_v, DIMENSION_VOLTAGE)}),
+                ("arm", "arm_moke_voltage", {}),
+                ("apply", "update_moke_voltage", {"channel": channel, "voltage": node.data["voltage"]}),
+            ]
+            for suffix, kind, data in operations:
+                action = self._compile_action(RecipeNode(f"{node.id}.{suffix}", kind, data), context, is_finally=False)
+                if kind == "configure_moke_box":
+                    action.payload["automatic_sweep_preparation"] = True
+                actions.append(replace(action, source_node_id=node.id, semantic_id=node.id))
+            return
         if node.type == "sweep":
             target = str(node.data["target"])
             try:
@@ -886,7 +1192,54 @@ class RecipeCompiler:
             except KeyError as exc:
                 allowed = ", ".join(sorted(SWEEP_DIMENSIONS))
                 raise ConfigurationError(f"Unsupported sweep target {target!r}; allowed: {allowed}.") from exc
-            for value in self._node_sweep_values(node, dimension, context):
+            binding = self._semantic_axes_by_source.get(node.id)
+            configured = binding is not None and self._binding_configured(binding, actions)
+            if binding is not None and binding.device_module == "moke_box" and not configured:
+                if is_finally:
+                    raise SafetyViolation("MOKE voltage sweeps cannot be cleanup actions.")
+                values = tuple(self._node_sweep_values(node, dimension, context))
+                if not values:
+                    raise ConfigurationError(f"{node.id}: MOKE sweep has no voltage points.")
+                channel = int(binding.endpoint.removeprefix("vout"))
+                simulation = bool((self._settings.moke_box.endpoint or "").startswith("SIM::MOKE"))
+                profile = control_profile_from_settings(self._settings, simulation=simulation, channel=channel)
+                minimum = min(value.si_value for value in values)
+                maximum = max(value.si_value for value in values)
+                if minimum == maximum:
+                    minimum, maximum = profile.minimum_v, profile.maximum_v
+                preparation = self._compile_action(RecipeNode(
+                    f"{node.id}.prepare", "configure_moke_box", {
+                        "channel": channel,
+                        "minimum_voltage": Quantity(minimum, DIMENSION_VOLTAGE),
+                        "maximum_voltage": Quantity(maximum, DIMENSION_VOLTAGE),
+                    }), context, is_finally=False)
+                preparation.payload["automatic_sweep_preparation"] = True
+                actions.append(replace(preparation, source_node_id=node.id, semantic_id=binding.axis_id))
+                arming = self._compile_action(
+                    RecipeNode(f"{node.id}.arm", "arm_moke_voltage", {}), context, is_finally=False)
+                actions.append(replace(arming, source_node_id=node.id, semantic_id=binding.axis_id))
+                configured = True
+            authored_configuration = False
+            if binding is not None:
+                reference = "${" + binding.target + "}"
+                configuration_kind = {
+                    "keithley": "configure_keithley", "rigol": "configure_rigol",
+                    "anritsu": "configure_anritsu_sg" if binding.endpoint == "SG" else "configure_anritsu",
+                }.get(binding.device_module)
+                field_name = {
+                    "level": "level", "current": "level", "voltage": "level", "compliance_current": "compliance",
+                    "compliance_voltage": "compliance", "power": "power",
+                }.get(binding.target.rsplit(".", 1)[-1], binding.target.rsplit(".", 1)[-1])
+                authored_configuration = any(
+                    child.type == configuration_kind and child.data.get(field_name) == reference
+                    and (binding.device_module == "anritsu" or str(child.data.get("channel")) == binding.endpoint)
+                    for child in node.children
+                )
+                if not configured and not authored_configuration and not binding.target.endswith("settling_time"):
+                    raise ConfigurationError(
+                        f"{node.id}: physical sweep {target!r} requires explicit device configuration before its points."
+                    )
+            for point_index, value in enumerate(self._node_sweep_values(node, dimension, context)):
                 self._check_cancelled()
                 nested = dict(context)
                 nested[target] = value
@@ -895,16 +1248,10 @@ class RecipeCompiler:
                 if (
                     binding is not None
                     and not is_finally
-                    and self._binding_configured(binding, actions)
+                    and not authored_configuration
+                    and (configured or binding.target.endswith("settling_time"))
                 ):
-                    point_index = next(
-                        (
-                            index
-                            for index, point in enumerate(binding.points)
-                            if math.isclose(point.si_value, value.si_value, rel_tol=0.0, abs_tol=1e-18)
-                        ),
-                        0,
-                    )
+                    self._sync_planned_state(actions)
                     point_action = self._semantic_axis_action(
                         node,
                         binding,
@@ -923,7 +1270,7 @@ class RecipeCompiler:
                     self._active_axis_context = point_action.axis_context
                 try:
                     for child in node.children:
-                        if generated_kind and self._axis_update_matches(child, generated_kind):
+                        if generated_kind and axis_update_matches(child, binding, generated_kind):
                             continue
                         self._visit(child, nested, actions, is_finally=is_finally)
                 finally:
@@ -945,6 +1292,7 @@ class RecipeCompiler:
             return
         if node.type == "comment":
             return
+        self._sync_planned_state(actions)
         action = self._compile_action(node, context, is_finally=is_finally)
         actions.append(action)
         if not is_finally:
@@ -1039,6 +1387,28 @@ class RecipeCompiler:
                 "measure_current_range", "AUTO"
             ),
         }
+        self._sync_planned_state(actions)
+        baseline = self._planned_keithley_requests.get(channel)
+        if baseline is None or baseline.mode != mode:
+            raise ConfigurationError(
+                f"{node.id}: selected Keithley parameters require an explicit "
+                f"configure_keithley baseline for channel {channel} in {mode} mode."
+            )
+        level_dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
+        compliance_dimension = DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
+        configure_data.update({
+            "level": Quantity(baseline.level_si, level_dimension),
+            "compliance": Quantity(baseline.compliance_si, compliance_dimension),
+            "nplc": baseline.nplc,
+            "settle_time": Quantity(baseline.settle_time_s, DIMENSION_TIME),
+            "sense_mode": baseline.sense_mode,
+            "source_autorange": baseline.source_autorange,
+            "source_range": None if baseline.source_range_si is None else Quantity(baseline.source_range_si, level_dimension),
+            "measure_voltage_autorange": baseline.measure_voltage_autorange,
+            "measure_voltage_range": None if baseline.measure_voltage_range_si is None else Quantity(baseline.measure_voltage_range_si, DIMENSION_VOLTAGE),
+            "measure_current_autorange": baseline.measure_current_autorange,
+            "measure_current_range": None if baseline.measure_current_range_si is None else Quantity(baseline.measure_current_range_si, DIMENSION_CURRENT),
+        })
         self._apply_keithley_set_actions(configure_data, parameter_actions, node.id)
         sweep_values: tuple[Quantity, ...] = ()
         axis_target = f"keithley.{channel}.{mode}"
@@ -1124,6 +1494,23 @@ class RecipeCompiler:
         configure_action = self._compile_action(
             configure_node, configure_context, is_finally=False
         )
+        field_map = {
+            "source.level": ("level_si",),
+            "source.compliance": ("compliance_si",),
+            "measurement.nplc": ("nplc",),
+            "measurement.settling_time": ("settle_time_s",),
+            "measurement.sense_mode": ("sense_mode",),
+            "source.range": ("source_autorange", "source_range_si"),
+            "measurement.voltage_range": ("measure_voltage_autorange", "measure_voltage_range_si"),
+            "measurement.current_range": ("measure_current_autorange", "measure_current_range_si"),
+        }
+        selected_fields = tuple(dict.fromkeys(
+            field for action in parameter_actions
+            for field in field_map[str(action["parameter_id"])]
+        ))
+        configure_action.payload["request"] = replace(
+            configure_action.payload["request"], changed_fields=selected_fields,
+        )
         legacy_binding = self._semantic_axes_by_source.get(node.id)
         if sweep_values:
             configure_action = self._semanticize_legacy_action(
@@ -1135,7 +1522,7 @@ class RecipeCompiler:
             )
         configured_request = configure_action.payload["request"]
         applied_configured_request = self._quantize_keithley_request(
-            configured_request
+            baseline if output_policy == "continue" else configured_request
         )
         if output_policy == "continue":
             self._append_output_continuity_assertion(
@@ -1160,8 +1547,9 @@ class RecipeCompiler:
                 },
             )
         else:
-            actions.append(configure_action)
-            self._remember_literal_configuration(configure_action, context)
+            if selected_fields:
+                actions.append(configure_action)
+                self._remember_literal_configuration(configure_action, context)
         if output_policy in {"on", "on_keep"}:
             actions.append(
                 self._compile_action(
@@ -1227,8 +1615,7 @@ class RecipeCompiler:
                         is_finally=False,
                     )
                 elif sweep_parameter == "source.compliance":
-                    point_config = dict(configure_data)
-                    point_config["compliance"] = value
+                    point_config = {"channel": channel, "mode": mode, "compliance": value}
                     update_action = self._compile_action(
                         RecipeNode(
                             f"{node.id}.update-compliance",
@@ -1250,8 +1637,8 @@ class RecipeCompiler:
                         configured_request, sweep_parameter, value
                     )
                     if (
-                        point_index > 0
-                        and applied_signature != previous_applied_signature
+                        (point_index == 0 and output_policy == "continue")
+                        or (point_index > 0 and applied_signature != previous_applied_signature)
                     ):
                         actions.append(update_action)
                     previous_applied_signature = applied_signature
@@ -1263,9 +1650,8 @@ class RecipeCompiler:
                     configure_data["settle_time"], DIMENSION_TIME, {}
                 )
             )
-            if settle_value.si_value > 0:
-                actions.append(
-                    self._compile_action(
+            if settle_value.si_value > 0 or sweep_parameter == "measurement.settling_time":
+                wait_action = self._compile_action(
                         RecipeNode(
                             f"{node.id}.settle",
                             "wait",
@@ -1274,7 +1660,11 @@ class RecipeCompiler:
                         nested,
                         is_finally=False,
                     )
-                )
+                if sweep_parameter == "measurement.settling_time":
+                    wait_action = self._semanticize_legacy_action(
+                        wait_action, legacy_binding, point_context, value, node.id,
+                    )
+                actions.append(wait_action)
             for child in node.children:
                 self._visit(child, nested, actions, is_finally=False)
             self._active_axis_context = previous_context
@@ -1316,6 +1706,23 @@ class RecipeCompiler:
             raise ConfigurationError(
                 f"{node.id}: invalid Rigol channel in snapshot."
             ) from exc
+        self._sync_planned_state(actions)
+        baseline = self._planned_rigol_configs.get(channel)
+        if baseline is None:
+            raise ConfigurationError(f"{node.id}: selected Rigol parameters require an explicit configure_rigol baseline for CH{channel}.")
+        configuration = {
+            **configuration,
+            "waveform": baseline.waveform,
+            "frequency": Quantity(baseline.frequency_hz, DIMENSION_FREQUENCY),
+            "high_level": Quantity(baseline.high_level_v, DIMENSION_VOLTAGE),
+            "low_level": Quantity(baseline.low_level_v, DIMENSION_VOLTAGE),
+            "output_load": baseline.output_load, "phase_deg": baseline.phase_deg,
+            "square_duty_percent": baseline.square_duty_percent,
+            "ramp_symmetry_percent": baseline.ramp_symmetry_percent,
+            "pulse_width": None if baseline.pulse_width_s is None else Quantity(baseline.pulse_width_s, DIMENSION_TIME),
+            "pulse_leading": None if baseline.pulse_leading_s is None else Quantity(baseline.pulse_leading_s, DIMENSION_TIME),
+            "pulse_trailing": None if baseline.pulse_trailing_s is None else Quantity(baseline.pulse_trailing_s, DIMENSION_TIME),
+        }
         waveform = str(configuration.get("waveform", "")).upper()
         config_data: dict[str, Any] = {
             "channel": channel,
@@ -1454,36 +1861,8 @@ class RecipeCompiler:
             is_finally=False,
         )
         legacy_binding = self._semantic_axes_by_source.get(node.id)
-        if sweep_values:
-            configure_action = self._semanticize_legacy_action(
-                configure_action,
-                legacy_binding,
-                self._legacy_axis_context(node, sweep_values[0], 0),
-                sweep_values[0],
-                node.id,
-            )
-        output_path_action = self._compile_action(
-            RecipeNode(
-                f"{node.id}.configure-output-path",
-                "configure_rigol_output",
-                {
-                    "channel": channel,
-                    "output_load": configuration.get("output_load", "HIGHZ"),
-                    "polarity": configuration.get("output_polarity", "NORM"),
-                    "mode": configuration.get("output_mode", "NORM"),
-                    "gate_polarity": configuration.get("gate_polarity", "NORM"),
-                    "sync_enabled": configuration.get("sync_enabled", False),
-                    "sync_polarity": configuration.get("sync_polarity", "NORM"),
-                    "sync_delay": configuration.get("sync_delay", "0 s"),
-                },
-            ),
-            configure_context,
-            is_finally=False,
-        )
         if output_policy == "continue":
-            config = configure_action.payload["config"]
-            applied_config = self._quantize_rigol_config(config)
-            output_config = output_path_action.payload["config"]
+            applied_config = self._quantize_rigol_config(baseline)
             self._append_output_continuity_assertion(
                 actions,
                 node_id=node.id,
@@ -1502,20 +1881,31 @@ class RecipeCompiler:
                     "pulse_width_s": applied_config.pulse_width_s,
                     "pulse_leading_s": applied_config.pulse_leading_s,
                     "pulse_trailing_s": applied_config.pulse_trailing_s,
-                    "output_path": {
-                        "polarity": output_config.polarity,
-                        "mode": output_config.mode,
-                        "gate_polarity": output_config.gate_polarity,
-                        "sync_enabled": output_config.sync_enabled,
-                        "sync_polarity": output_config.sync_polarity,
-                        "sync_delay_s": output_config.sync_delay_s,
-                    },
                 },
             )
-        else:
-            actions.append(configure_action)
-            self._remember_literal_configuration(configure_action, context)
-            actions.append(output_path_action)
+        # Continuity preserves OUTPUT, not the previous selected setpoints.
+        # Apply every authored Set and the first ROI point after checking the
+        # incoming carrier; otherwise constant Set rows silently disappear.
+        selected = {str(action["parameter_id"]) for action in parameter_actions}
+        config = configure_action.payload["config"]
+        if "carrier.frequency" in selected:
+            update = replace(configure_action, kind="update_rigol_frequency", payload={"channel": channel, "frequency_hz": config.frequency_hz})
+            if sweep_values and sweep_parameter == "carrier.frequency":
+                update = self._semanticize_legacy_action(
+                    update, legacy_binding, self._legacy_axis_context(node, sweep_values[0], 0),
+                    sweep_values[0], node.id,
+                )
+            actions.append(update)
+            self._remember_literal_configuration(update, context)
+        if selected & {"carrier.high_level", "carrier.low_level", "carrier.amplitude", "carrier.offset"}:
+            update = replace(configure_action, kind="update_rigol_levels", payload={"channel": channel, "high_level_v": config.high_level_v, "low_level_v": config.low_level_v})
+            if sweep_values and sweep_parameter != "carrier.frequency":
+                update = self._semanticize_legacy_action(
+                    update, legacy_binding, self._legacy_axis_context(node, sweep_values[0], 0),
+                    sweep_values[0], node.id,
+                )
+            actions.append(update)
+            self._remember_literal_configuration(update, context)
 
         if output_policy in {"on", "on_keep"}:
             actions.append(
@@ -1553,6 +1943,7 @@ class RecipeCompiler:
                 self._active_axis_context = point_context
             nested = dict(context)
             if value is not None and axis_target is not None:
+                self._sync_planned_state(actions)
                 nested[axis_target] = value
                 if output_policy == "continue" and point_index > 0:
                     self._append_output_continuity_assertion(
@@ -1570,14 +1961,17 @@ class RecipeCompiler:
                     )
                 else:
                     point_config = dict(config_data)
+                    current_config = self._planned_rigol_configs[channel]
+                    point_config["high_level"] = Quantity(current_config.high_level_v, DIMENSION_VOLTAGE)
+                    point_config["low_level"] = Quantity(current_config.low_level_v, DIMENSION_VOLTAGE)
                     if sweep_parameter == "carrier.high_level":
                         point_config["high_level"] = value
                     elif sweep_parameter == "carrier.low_level":
                         point_config["low_level"] = value
                     elif sweep_parameter == "carrier.amplitude":
                         current_offset = (
-                            float(configure_action.payload["config"].high_level_v)
-                            + float(configure_action.payload["config"].low_level_v)
+                            current_config.high_level_v
+                            + current_config.low_level_v
                         ) / 2.0
                         point_config["high_level"] = Quantity(
                             current_offset + value.si_value / 2.0,
@@ -1589,8 +1983,8 @@ class RecipeCompiler:
                         )
                     elif sweep_parameter == "carrier.offset":
                         current_amplitude = (
-                            float(configure_action.payload["config"].high_level_v)
-                            - float(configure_action.payload["config"].low_level_v)
+                            current_config.high_level_v
+                            - current_config.low_level_v
                         )
                         point_config["high_level"] = Quantity(
                             value.si_value + current_amplitude / 2.0,
@@ -1603,7 +1997,7 @@ class RecipeCompiler:
                     update_node = RecipeNode(
                         f"{node.id}.update-levels",
                         "update_rigol_levels",
-                        point_config,
+                        {name: point_config[name] for name in ("channel", "high_level", "low_level")},
                     )
                 update_action = self._compile_action(
                     update_node, nested, is_finally=False
@@ -1673,18 +2067,7 @@ class RecipeCompiler:
             "points": configuration.get("points"),
             "trace": node.data.get("trace", "TRAC1"),
         }
-        if any(value is None for value in base_data.values()):
-            raise ConfigurationError(
-                f"{node.id}: incomplete Anritsu spectrum snapshot."
-            )
-        advanced_data: dict[str, Any] = {
-            "rbw_mode": "auto",
-            "vbw_mode": "auto",
-            "detector": "NORM",
-            "attenuation_mode": "auto",
-            "preamplifier_enabled": False,
-            "sweep_time_mode": "auto",
-        }
+        advanced_data: dict[str, Any] = {}
         base_parameters = {
             "spectrum.start_frequency": (
                 "start_frequency",
@@ -1708,6 +2091,7 @@ class RecipeCompiler:
             "advanced.rbw": "rbw",
             "advanced.vbw_mode": "vbw_mode",
             "advanced.vbw": "vbw",
+            "advanced.vbw_filter_mode": "vbw_filter_mode",
             "advanced.detector": "detector",
             "advanced.attenuation_mode": "attenuation_mode",
             "advanced.attenuation": "attenuation",
@@ -1800,24 +2184,47 @@ class RecipeCompiler:
                 key, _dimension, _target = base_parameters[sweep_parameter]
                 point_base[key] = value
                 nested[axis_target] = value
-            configure_action = self._compile_action(
-                RecipeNode(
-                    f"{node.id}.configure-spectrum",
-                    "configure_anritsu",
-                    point_base,
-                ),
-                nested,
-                is_finally=False,
-            )
-            configure_action = self._semanticize_legacy_action(
-                configure_action,
-                legacy_binding,
-                point_context,
-                value,
-                node.id,
-            )
-            actions.append(configure_action)
-            self._remember_literal_configuration(configure_action, nested)
+            self._sync_planned_state(actions)
+            selected_base = {
+                base_parameters[str(action["parameter_id"])][0]
+                for action in parameter_actions
+                if str(action["parameter_id"]) in base_parameters
+            }
+            if selected_base:
+                for parameter, (key, _dimension, _target) in base_parameters.items():
+                    current = self._planned_context.get(f"anritsu.{parameter}")
+                    if current is None:
+                        raise ConfigurationError(f"{node.id}: selected spectrum fields require an explicit configure_anritsu baseline.")
+                    if key not in selected_base:
+                        point_base[key] = int(current.si_value) if key == "points" else current
+            if selected_base:
+                configure_action = self._compile_action(
+                    RecipeNode(
+                        f"{node.id}.configure-spectrum",
+                        "configure_anritsu",
+                        point_base,
+                    ),
+                    nested,
+                    is_finally=False,
+                )
+                configure_action = self._semanticize_legacy_action(
+                    configure_action,
+                    legacy_binding,
+                    point_context,
+                    value,
+                    node.id,
+                )
+                config_fields = {
+                    "start_frequency": "start_hz", "stop_frequency": "stop_hz",
+                    "reference_level": "reference_level_dbm", "points": "points",
+                }
+                configure_action.payload["config"] = replace(
+                    configure_action.payload["config"],
+                    changed_fields=tuple(config_fields[key] for key in sorted(selected_base)),
+                )
+                if selected_base:
+                    actions.append(configure_action)
+                    self._remember_literal_configuration(configure_action, nested)
             if any(
                 parameter_id in advanced_parameters
                 for parameter_id in (
@@ -1895,6 +2302,12 @@ class RecipeCompiler:
             raise ConfigurationError(
                 f"{node.id}: an Anritsu SG module supports one local sweep axis."
             )
+        self._sync_planned_state(actions)
+        baseline_frequency = self._planned_context.get("anritsu.sg.frequency")
+        baseline_power = self._planned_context.get("anritsu.sg.power")
+        if baseline_frequency is None or baseline_power is None:
+            raise ConfigurationError(f"{node.id}: selected SG parameters require an explicit configure_anritsu_sg baseline.")
+        point_data.update(frequency=baseline_frequency, power=baseline_power)
         sweep_values: tuple[Quantity, ...] = ()
         sweep_parameter: str | None = None
         axis_target: str | None = None
@@ -1939,7 +2352,7 @@ class RecipeCompiler:
         first_configure = self._compile_action(
             RecipeNode(
                 f"{node.id}.configure-sg",
-                "configure_anritsu_sg",
+                "update_anritsu_sg",
                 first_data,
             ),
             first_context,
@@ -1954,6 +2367,12 @@ class RecipeCompiler:
                 node.id,
             )
         first_config = first_configure.payload["config"]
+        selected_fields = tuple(dict.fromkeys(
+            "frequency_hz" if str(action["parameter_id"]) == "sg.frequency" else "power_dbm"
+            for action in parameter_actions
+        ))
+        first_config = replace(first_config, changed_fields=selected_fields)
+        first_configure.payload["config"] = first_config
         runtime_context = dict(context)
         if output_policy == "continue":
             self._append_output_continuity_assertion(
@@ -1963,11 +2382,11 @@ class RecipeCompiler:
                 channel="RF",
                 context=context,
                 expected_state={
-                    "frequency_hz": first_config.frequency_hz,
-                    "power_dbm": first_config.power_dbm,
+                    "frequency_hz": baseline_frequency.si_value,
+                    "power_dbm": baseline_power.si_value,
                 },
             )
-        else:
+        if selected_fields:
             actions.append(first_configure)
             self._remember_literal_configuration(first_configure, runtime_context)
 
@@ -2026,6 +2445,10 @@ class RecipeCompiler:
                         nested,
                         is_finally=False,
                     )
+                    update_action.payload["config"] = replace(
+                        update_action.payload["config"],
+                        changed_fields=("frequency_hz" if sweep_parameter == "sg.frequency" else "power_dbm",),
+                    )
                     actions.append(
                         self._semanticize_legacy_action(
                             update_action,
@@ -2073,6 +2496,19 @@ class RecipeCompiler:
                     request.level_si, dimension
                 )
             return
+        if action.kind == "update_keithley_level":
+            mode = action.payload["mode"]
+            dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
+            context[f"keithley.{action.payload['channel']}.{mode}"] = Quantity(action.payload["level_si"], dimension)
+            return
+        if action.kind == "update_rigol_frequency":
+            context[f"rigol.{action.payload['channel']}.frequency"] = Quantity(action.payload["frequency_hz"], DIMENSION_FREQUENCY)
+            return
+        if action.kind == "update_rigol_levels":
+            prefix = f"rigol.{action.payload['channel']}"
+            context[f"{prefix}.high_level"] = Quantity(action.payload["high_level_v"], DIMENSION_VOLTAGE)
+            context[f"{prefix}.low_level"] = Quantity(action.payload["low_level_v"], DIMENSION_VOLTAGE)
+            return
         if action.kind == "configure_rigol":
             config = action.payload["config"]
             prefix = f"rigol.{config.channel}"
@@ -2080,10 +2516,16 @@ class RecipeCompiler:
             context[f"{prefix}.high_level"] = Quantity(config.high_level_v, DIMENSION_VOLTAGE)
             context[f"{prefix}.low_level"] = Quantity(config.low_level_v, DIMENSION_VOLTAGE)
             return
-        if action.kind == "configure_anritsu_sg":
+        if action.kind in {"configure_anritsu_sg", "update_anritsu_sg"}:
             config = action.payload["config"]
             context["anritsu.sg.frequency"] = Quantity(config.frequency_hz, DIMENSION_FREQUENCY)
             context["anritsu.sg.power"] = Quantity(config.power_dbm, DIMENSION_DBM)
+        if action.kind == "configure_anritsu":
+            config = action.payload["config"]
+            context["anritsu.spectrum.start_frequency"] = Quantity(config.start_hz, DIMENSION_FREQUENCY)
+            context["anritsu.spectrum.stop_frequency"] = Quantity(config.stop_hz, DIMENSION_FREQUENCY)
+            context["anritsu.spectrum.reference_level"] = Quantity(config.reference_level_dbm, DIMENSION_DBM)
+            context["anritsu.spectrum.points"] = Quantity(float(config.points), "ratio")
 
     @staticmethod
     def _sweep_values(start: Quantity, stop: Quantity, points: int, spacing: str) -> tuple[Quantity, ...]:
@@ -2138,7 +2580,12 @@ class RecipeCompiler:
 
     def _evaluate_condition(self, node: RecipeNode, context: dict[str, Quantity]) -> bool:
         if "condition" in node.data:
-            return bool(node.data["condition"])
+            condition = node.data["condition"]
+            if not isinstance(condition, bool):
+                raise ConfigurationError(f"{node.id}: if.condition must be true or false.")
+            if any(key in node.data for key in ("left", "operator", "right")):
+                raise ConfigurationError(f"{node.id}: use either condition or left/operator/right.")
+            return condition
         left_raw = node.data["left"]
         match = _REFERENCE_RE.match(left_raw) if isinstance(left_raw, str) else None
         if match is None:
@@ -2195,23 +2642,7 @@ class RecipeCompiler:
         binding = self._semantic_axes_by_source.get(node.id)
         if binding is None:
             return None
-        stages = tuple(getattr(binding, "stages", ()))
-        stage_index = next(
-            (
-                int(getattr(stage, "stage_index", 0))
-                for stage in stages
-                if any(
-                    math.isclose(
-                        point.si_value,
-                        value.si_value,
-                        rel_tol=0.0,
-                        abs_tol=1e-18,
-                    )
-                    for point in getattr(stage, "points", ())
-                )
-            ),
-            0,
-        )
+        stage_index = binding.stage_index_at(point_index)
         active = (
             dict(self._active_axis_context.active_setpoints_si)
             if self._active_axis_context is not None
@@ -2260,11 +2691,12 @@ class RecipeCompiler:
             elif action.kind == "update_rigol_frequency":
                 payload["applied_si"] = payload.get("frequency_hz", value.si_value)
             elif action.kind == "update_rigol_levels":
-                payload["applied_si"] = (
-                    payload.get("high_level_v", value.si_value)
-                    if target.endswith("high_level")
-                    else payload.get("low_level_v", value.si_value)
-                )
+                high, low = payload["high_level_v"], payload["low_level_v"]
+                parameter = target.rsplit(".", 1)[-1]
+                payload["applied_si"] = {
+                    "high_level": high, "low_level": low,
+                    "amplitude": high - low, "offset": (high + low) / 2,
+                }[parameter]
             else:
                 payload["applied_si"] = value.si_value
         payload.setdefault("target", target)
@@ -2279,18 +2711,27 @@ class RecipeCompiler:
     def _compile_action(
         self, node: RecipeNode, context: dict[str, Quantity], *, is_finally: bool
     ) -> PlanAction:
-        data = {key: self._resolve_value(value, context) for key, value in node.data.items()}
+        validate_action_fields(node.type, node.data, node.id)
+        data = {
+            key: self._resolve_value(value, context) for key, value in node.data.items()
+            if key not in {"description", "disabled"} and (key != "label" or node.type == "checkpoint")
+        }
         setpoints = self._context_as_si(context)
         action_kind = node.type
         if node.type == "configure_rigol":
             payload = self._compile_rigol(data)
+            names = {"waveform": "waveform", "frequency": "frequency_hz", "high_level": "high_level_v", "low_level": "low_level_v",
+                     "output_load": "output_load", "phase_deg": "phase_deg", "square_duty_percent": "square_duty_percent",
+                     "ramp_symmetry_percent": "ramp_symmetry_percent", "pulse_width": "pulse_width_s",
+                     "pulse_leading": "pulse_leading_s", "pulse_trailing": "pulse_trailing_s"}
+            payload["config"] = replace(payload["config"], changed_fields=tuple(value for key, value in names.items() if key in data))
         elif node.type == "configure_moke_box":
             unknown = set(data) - {"channel", "minimum_voltage", "maximum_voltage", "calibration_id"}
             if unknown:
                 raise ConfigurationError(f"{node.id}: unsupported MOKE voltage configuration fields: {sorted(unknown)}.")
             simulation = bool((self._settings.moke_box.endpoint or "").startswith("SIM::MOKE"))
-            profile = control_profile_from_settings(self._settings, simulation=simulation)
             channel = data.get("channel")
+            profile = control_profile_from_settings(self._settings, simulation=simulation, channel=channel)
             if type(channel) is not int or channel != profile.channel:
                 raise SafetyViolation(f"{node.id}: MOKE configuration requires the qualified VOUT channel.")
             minimum = parse_quantity(data.get("minimum_voltage"), DIMENSION_VOLTAGE).si_value
@@ -2319,11 +2760,14 @@ class RecipeCompiler:
             value = parse_quantity(data.get("voltage"), DIMENSION_VOLTAGE).si_value
             payload = {"channel": channel, "voltage_v": value}
         elif node.type == "stop_moke_voltage":
-            if data:
-                raise ConfigurationError("stop_moke_voltage uses the qualified safe target and accepts no parameters.")
             simulation = bool((self._settings.moke_box.endpoint or "").startswith("SIM::MOKE"))
-            profile = control_profile_from_settings(self._settings, simulation=simulation)
+            channel = data.get("channel")
+            if channel is not None and (type(channel) is not int or channel not in range(8)):
+                raise ConfigurationError("MOKE stop requires channel 0..7.")
+            profile = control_profile_from_settings(self._settings, simulation=simulation, channel=channel)
             payload = {"ramp_timeout_s": profile.ramp_timeout_s}
+            if channel is not None:
+                payload["channel"] = channel
         elif node.type == "configure_rigol_output":
             channel = int(data.get("channel", 0))
             if channel not in {1, 2}:
@@ -2373,6 +2817,18 @@ class RecipeCompiler:
             payload = {"config": config}
         elif node.type == "configure_keithley":
             payload = self._compile_keithley(data, node.id)
+            field_map = {
+                "mode": "mode", "level": "level_si", "compliance": "compliance_si",
+                "nplc": "nplc", "settle_time": "settle_time_s", "settling_time": "settle_time_s",
+                "sense_mode": "sense_mode", "source_autorange": "source_autorange",
+                "source_range": "source_range_si", "measure_voltage_autorange": "measure_voltage_autorange",
+                "measure_voltage_range": "measure_voltage_range_si", "measure_current_autorange": "measure_current_autorange",
+                "measure_current_range": "measure_current_range_si",
+            }
+            selected = list(dict.fromkeys(field_map[key] for key in data if key in field_map))
+            if "source_range_si" in selected and "source_autorange" not in selected:
+                selected.append("source_autorange")
+            payload["request"] = replace(payload["request"], changed_fields=tuple(selected))
         elif node.type == "configure_anritsu":
             payload = self._compile_anritsu(data)
         elif node.type == "configure_anritsu_advanced":
@@ -2384,11 +2840,15 @@ class RecipeCompiler:
         elif node.type == "update_keithley_level":
             payload = self._compile_keithley_level_update(data, node.id)
         elif node.type == "update_keithley_compliance":
-            request = self._compile_keithley(data, node.id)["request"]
-            if request.mode == "measure_only":
+            channel, mode = data.get("channel"), data.get("mode")
+            request = self._planned_keithley_requests.get(channel)
+            if request is None or request.mode != mode or mode == "measure_only":
                 raise ConfigurationError(
-                    f"{node.id}: measure_only has no source compliance."
+                    f"{node.id}: compliance update requires a matching explicit current/voltage baseline."
                 )
+            dimension = DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
+            request = replace(request, compliance_si=self._resolve_quantity(data["compliance"], dimension, {}).si_value)
+            validate_keithley_source(self._settings.keithley.safety.channels[channel], request)
             payload = {
                 "channel": request.channel,
                 "mode": request.mode,
@@ -2397,7 +2857,16 @@ class RecipeCompiler:
         elif node.type == "update_rigol_frequency":
             payload = self._compile_rigol_frequency_update(data, node.id)
         elif node.type == "update_rigol_levels":
-            config = self._compile_rigol(data)["config"]
+            channel = data["channel"]
+            baseline = self._planned_rigol_configs.get(channel)
+            if baseline is None:
+                raise ConfigurationError(f"{node.id}: Rigol level update requires an explicit carrier baseline.")
+            config = replace(baseline,
+                high_level_v=self._resolve_quantity(data["high_level"], DIMENSION_VOLTAGE, {}).si_value,
+                low_level_v=self._resolve_quantity(data["low_level"], DIMENSION_VOLTAGE, {}).si_value)
+            validate_rigol_waveform(channel=self._settings.rigol.safety.channels[str(channel)], safety=self._settings.rigol.safety,
+                waveform=config.waveform, frequency=config.frequency_hz, high_level=config.high_level_v,
+                low_level=config.low_level_v, output_load=config.output_load)
             payload = {
                 "channel": config.channel,
                 "high_level_v": config.high_level_v,
@@ -2449,6 +2918,23 @@ class RecipeCompiler:
                     f"{node.id}: average_count must be in the range 1..9999."
                 )
             payload["average_count"] = average_count
+            if node.type == "acquire_reference":
+                duration = self._resolve_quantity(data.get("minimum_duration", "0 s"), DIMENSION_TIME, {}).si_value
+                if not 0 <= duration <= 3600:
+                    raise ConfigurationError(f"{node.id}: minimum_duration must be in 0..3600 s.")
+                purpose = data.get("purpose", "reference")
+                if not isinstance(purpose, str) or purpose not in {"reference", "background"}:
+                    raise ConfigurationError(f"{node.id}: purpose must be reference or background.")
+                if duration and data.get("source_file"):
+                    raise ConfigurationError(f"{node.id}: minimum_duration cannot be used with an imported file.")
+                if duration:
+                    payload["minimum_duration_s"] = duration
+                if "purpose" in data:
+                    payload["purpose"] = purpose
+            delay = self._resolve_quantity(data.get("inter_sweep_delay", "0 s"), DIMENSION_TIME, {}).si_value
+            if not 0 <= delay <= 3600:
+                raise SafetyViolation(f"{node.id}: inter_sweep_delay must be in 0..3600 s.")
+            payload["inter_sweep_delay_s"] = delay
             if node.type == "acquire_reference" and data.get("source_file"):
                 from pathlib import Path
 
@@ -2698,22 +3184,30 @@ class RecipeCompiler:
     def _compile_anritsu_advanced(
         self, data: dict[str, Any], node_id: str
     ) -> dict[str, Any]:
-        rbw_mode = str(data.get("rbw_mode", "auto")).strip().lower()
-        vbw_mode = str(data.get("vbw_mode", "auto")).strip().lower()
-        attenuation_mode = str(data.get("attenuation_mode", "auto")).strip().lower()
-        sweep_time_mode = str(data.get("sweep_time_mode", "auto")).strip().lower()
+        for value_name, mode_name in (("rbw", "rbw_mode"), ("vbw", "vbw_mode"),
+                                      ("attenuation", "attenuation_mode"), ("sweep_time", "sweep_time_mode")):
+            if value_name in data and str(data.get(mode_name, "")).strip().lower() != "manual":
+                raise ConfigurationError(f"{node_id}: {value_name} requires explicit {mode_name}=manual; the value cannot be ignored.")
+        filter_mode = data.get("vbw_filter_mode")
+        if filter_mode not in {None, "VID", "POW"}:
+            raise ConfigurationError(f"{node_id}: vbw_filter_mode must be VID or POW.")
+        rbw_mode = str(data["rbw_mode"]).strip().lower() if "rbw_mode" in data else None
+        vbw_mode = str(data["vbw_mode"]).strip().lower() if "vbw_mode" in data else None
+        attenuation_mode = str(data["attenuation_mode"]).strip().lower() if "attenuation_mode" in data else None
+        sweep_time_mode = str(data["sweep_time_mode"]).strip().lower() if "sweep_time_mode" in data else None
         for name, mode, allowed in (
             ("rbw_mode", rbw_mode, {"auto", "manual"}),
             ("vbw_mode", vbw_mode, {"auto", "manual", "off"}),
             ("attenuation_mode", attenuation_mode, {"auto", "manual"}),
             ("sweep_time_mode", sweep_time_mode, {"auto", "manual"}),
         ):
-            if mode not in allowed:
+            if mode is not None and mode not in allowed:
                 raise ConfigurationError(
                     f"{node_id}.{name} must be one of: {', '.join(sorted(allowed))}."
                 )
         config = AdvancedSpectrumConfig(
-            rbw_auto=rbw_mode == "auto",
+            vbw_filter_mode=filter_mode,
+            rbw_auto=rbw_mode == "auto" if rbw_mode is not None else None,
             rbw_hz=(
                 self._resolve_quantity(data.get("rbw"), DIMENSION_FREQUENCY, {}).si_value
                 if rbw_mode == "manual"
@@ -2725,8 +3219,8 @@ class RecipeCompiler:
                 if vbw_mode == "manual"
                 else None
             ),
-            detector=str(data.get("detector", "NORM")).strip().upper(),
-            attenuation_auto=attenuation_mode == "auto",
+            detector=str(data["detector"]).strip().upper() if "detector" in data else None,
+            attenuation_auto=attenuation_mode == "auto" if attenuation_mode is not None else None,
             attenuation_db=(
                 self._resolve_quantity(data.get("attenuation"), DIMENSION_DB, {}).si_value
                 if attenuation_mode == "manual"
@@ -2734,8 +3228,8 @@ class RecipeCompiler:
             ),
             preamplifier_enabled=self._optional_boolean(
                 data, "preamplifier_enabled", False, node_id
-            ),
-            sweep_time_auto=sweep_time_mode == "auto",
+            ) if "preamplifier_enabled" in data else None,
+            sweep_time_auto=sweep_time_mode == "auto" if sweep_time_mode is not None else None,
             sweep_time_s=(
                 self._resolve_quantity(data.get("sweep_time"), DIMENSION_TIME, {}).si_value
                 if sweep_time_mode == "manual"
@@ -2807,10 +3301,15 @@ class RecipeCompiler:
         configured_auto = self._settings.keithley.safety.channels[channel].defaults.get("source_autorange", False)
         if not isinstance(configured_auto, bool):
             raise ConfigurationError("Settings source_autorange must be a boolean.")
-        recipe_auto = self._optional_boolean(data, "source_autorange", False, node_id)
-        if recipe_auto and not configured_auto:
-            raise SafetyViolation("A recipe cannot enable source autorange; change it explicitly in Settings.")
-        source_auto = configured_auto and mode != "measure_only"
+        required_auto = configured_auto if mode != "measure_only" else False
+        recipe_auto = self._optional_boolean(data, "source_autorange", required_auto, node_id)
+        if recipe_auto != required_auto:
+            raise SafetyViolation(
+                f"{node_id}: recipe source_autorange={recipe_auto} conflicts with "
+                f"{'measure_only' if mode == 'measure_only' else 'Settings'} "
+                f"source_autorange={required_auto}. Update the recipe or change Settings explicitly."
+            )
+        source_auto = recipe_auto
         dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
         level = 0.0 if mode == "measure_only" else self._resolve_quantity(data.get("level"), dimension, {}).si_value
         compliance_dimension = DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
@@ -2843,12 +3342,18 @@ class RecipeCompiler:
 
     def _compile_anritsu(self, data: dict[str, Any]) -> dict[str, Any]:
         safety = self._settings.anritsu.safety
+        if data.get("vbw_filter_mode") not in {None, "VID", "POW"}:
+            raise ConfigurationError("Anritsu vbw_filter_mode must be VID or POW.")
+        if type(data.get("points")) is not int:
+            raise ConfigurationError("Anritsu points must be an integer without rounding.")
         config = SpectrumConfig(
             start_hz=self._resolve_quantity(data["start_frequency"], DIMENSION_FREQUENCY, {}).si_value,
             stop_hz=self._resolve_quantity(data["stop_frequency"], DIMENSION_FREQUENCY, {}).si_value,
             reference_level_dbm=self._resolve_quantity(data["reference_level"], DIMENSION_DBM, {}).si_value,
-            points=int(data["points"]),
+            points=data["points"],
             trace=validate_anritsu_trace_name(str(data.get("trace", "TRAC1"))),
+            prepare_current_buffer=False,
+            vbw_mode=data.get("vbw_filter_mode"),
         )
         validate_anritsu_spectrum(
             safety,

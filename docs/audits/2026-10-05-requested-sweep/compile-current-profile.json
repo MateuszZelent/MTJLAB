@@ -1,0 +1,14 @@
+{
+  "hardware_contacted": false,
+  "recipe_sha256": "0f4f7edb6ea36c1b9604a088b693b69a828f7736d4bae1189b25727ba2bb65a0",
+  "profile_sha256": "37ef6cb097aa1c3115f0036e18d3c06bcb847abb340540d34e7350d793203491",
+  "plan_sha256": "01ad4d7c34c15606487696fccb769b8dfdbb74c509513e2cd5562e1f4bdf51ba",
+  "points": 297,
+  "spectra": 297,
+  "actions": 1812,
+  "signal_raw_sweeps": 9504,
+  "nominal_duration_s": 4919.875659999954,
+  "storage_reservation_upper_bytes": 5010603942,
+  "maximum_background_sweeps_reserved": 9999,
+  "public_import_upper_bytes": 260553280
+}

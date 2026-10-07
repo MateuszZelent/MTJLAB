@@ -42,7 +42,7 @@ class SimulationContextTests(unittest.TestCase):
                 "anritsu", context=SimulationContext(seed=seed)
             ).open("SIM::ANRITSU", "@sim", 1_000)
             session.write("SWE:POIN 5")
-            return session.query("TRAC? TRACE1")
+            return session.query("TRAC? TRAC1")
 
         self.assertEqual(trace(17), trace(17))
         self.assertNotEqual(trace(17), trace(18))

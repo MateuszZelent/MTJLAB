@@ -626,9 +626,11 @@ class LimitEditDialog(StationDialog):
         value_label: str = "Minimum",
         max_label: str = "Maximum",
         guidance: str | None = None,
+        validate=None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._validate_limits = validate
         dialog_title = f"Edit limit — {title}" if not maximum_enabled else f"Edit limits — {title}"
         self.setWindowTitle(dialog_title)
         self.setModal(True)
@@ -664,6 +666,10 @@ class LimitEditDialog(StationDialog):
         )
         warning.setWordWrap(True)
         layout.addWidget(warning)
+        self.validation_error = BodyLabel(surface)
+        self.validation_error.setWordWrap(True)
+        self.validation_error.hide()
+        layout.addWidget(self.validation_error)
         footer = QHBoxLayout()
         footer.addStretch(1)
         cancel = PushButton("Cancel", surface)
@@ -673,6 +679,16 @@ class LimitEditDialog(StationDialog):
         footer.addWidget(cancel)
         footer.addWidget(save)
         layout.addLayout(footer)
+
+    def accept(self) -> None:
+        try:
+            if self._validate_limits is not None:
+                self._validate_limits(self.minimum.text(), self.maximum.text())
+        except (ValueError, RuntimeError) as exc:
+            self.validation_error.setText(str(exc))
+            self.validation_error.show()
+            return
+        super().accept()
 
 
 class KeithleyLimitProposalDialog(StationDialog):

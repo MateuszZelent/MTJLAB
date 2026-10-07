@@ -62,6 +62,15 @@ class AnritsuFastAcquisitionTests(unittest.TestCase):
         result = ANRITSU_MODULE.dispatch(self.adapter, "read_full_configuration", None)
         self.assertIsInstance(result, AnritsuFullConfigurationReadback)
 
+    def test_full_readback_preserves_confirmed_preamplifier(self) -> None:
+        from dataclasses import replace
+        from app.devices.anritsu_ms2830a.adapter import ANRITSU_PREAMPLIFIER_OPTIONS
+
+        self.adapter._capabilities = replace(self.adapter.capabilities,
+            hardware_options=tuple(ANRITSU_PREAMPLIFIER_OPTIONS))
+        self.adapter._require_session().write("POW:GAIN ON")
+        self.assertTrue(self.adapter.read_full_configuration().preamplifier_enabled)
+
     def test_acquire_fresh_trace(self) -> None:
         trace = self.adapter.acquire_fresh_trace("TRAC1", timeout_s=2.0)
         self.assertIsInstance(trace, SpectrumTrace)
@@ -146,6 +155,9 @@ class AnritsuFastAcquisitionTests(unittest.TestCase):
         self.assertEqual(len(assigned_params), 1)
         self.assertEqual(assigned_params[0][0], "stop_hz")
         self.assertEqual(assigned_params[0][1], 10e6)
+        # Emitting a request is not confirmation that the form accepted it.
+        self.assertIn("Form: 5 MHz", dialog._status_items["stop_hz"].text())
+        dialog.refresh_form_values({**form_values, "stop_hz": 10e6})
         self.assertEqual(dialog._status_items["stop_hz"].text(), "MATCH")
 
         # Test use all compatible values
@@ -205,17 +217,17 @@ class AnritsuFastAcquisitionTests(unittest.TestCase):
                 trace_name="TRAC1",
             )
             # Frame 1
-            controller.result.emit("fetch_current_trace_fast", trace)
+            controller.result.emit("single_sweep", trace)
             self.assertIn("Progress: 1 / 5 spectra", page.average_stats_label.text())
             self.assertIn("/s", page.average_stats_label.text())
 
             # Frames 2, 3, 4
             for i in range(2, 5):
-                controller.result.emit("fetch_current_trace_fast", trace)
+                controller.result.emit("single_sweep", trace)
                 self.assertIn(f"Progress: {i} / 5 spectra", page.average_stats_label.text())
 
             # Frame 5 (completion)
-            controller.result.emit("fetch_current_trace_fast", trace)
+            controller.result.emit("single_sweep", trace)
             self.assertFalse(page._averaging_active)
             self.assertIn("Completed: 5 spectra taken in ", page.average_stats_label.text())
             self.assertIn("/s", page.average_stats_label.text())
@@ -247,8 +259,8 @@ class AnritsuFastAcquisitionTests(unittest.TestCase):
                 acquired_at_utc=datetime.now(timezone.utc),
                 trace_name="TRAC1",
             )
-            controller.result.emit("fetch_current_trace_fast", trace)
-            controller.result.emit("fetch_current_trace_fast", trace)
+            controller.result.emit("single_sweep", trace)
+            controller.result.emit("single_sweep", trace)
             page.cancel_averaging()
             self.assertFalse(page._averaging_active)
             self.assertIn("Averaging cancelled at 2 / 10 spectra", page.average_stats_label.text())
@@ -397,6 +409,30 @@ class AnritsuFastAcquisitionTests(unittest.TestCase):
             controller.result.emit("stop_live", None)
             self.assertFalse(page._timer.isActive())
             self.assertEqual(page.live.text(), "Start Live")
+
+            # A run stops polling locally and a late Start Live cannot resume it.
+            page.resize(1500, 900)
+            page.show()
+            self.application.processEvents()
+            page._timer.start()
+            page.set_execution_controlled(True)
+            self.application.processEvents()
+            self.assertFalse(page._timer.isActive())
+            self.assertTrue(page.execution_badge.isVisible())
+            self.assertGreater(page.execution_badge.width(), 0)
+            calls_before = list(controller.calls)
+            self.assertFalse(page._request_trace())
+            page.toggle_live()
+            page.read_once()
+            controller.result.emit("start_live", snapshot)
+            self.assertFalse(page._timer.isActive())
+            self.assertEqual(controller.calls, calls_before)
+            page.set_execution_controlled(False)
+            self.assertFalse(page._timer.isActive())
+            from pathlib import Path
+            folder = Path("artifacts/anritsu-acquisition-traffic")
+            folder.mkdir(parents=True, exist_ok=True)
+            self.assertTrue(page.grab().save(str(folder / "execution-polling-paused.png")))
         finally:
             page.close()
 

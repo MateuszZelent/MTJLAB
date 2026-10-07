@@ -175,7 +175,7 @@ def test_legacy_normalization_rejects_ambiguous_sweeps_and_dimension_mismatch() 
         "          segments: [{start: 0 A, stop: 1 mA, points: 2}]\n"
         "      children:",
     )
-    with pytest.raises(ConfigurationError, match="multiple legacy local sweeps"):
+    with pytest.raises(ConfigurationError, match="unique within the node"):
         normalize_recipe_tree(parse_recipe_text(ambiguous), _providers())
     with pytest.raises(ConfigurationError, match="dimension"):
         normalize_recipe_tree(
@@ -251,3 +251,33 @@ def test_snapshot_preserves_source_and_is_immutable() -> None:
         tree.roots[0].label = "changed"  # type: ignore[misc]
     with pytest.raises(ConfigurationError, match="Unknown semantic node"):
         tree.require("missing")
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+def test_conditions_distinguish_alternative_branches_and_repeat_count(disabled):
+    source = f"""schema_version: 1
+name: branches
+root:
+  id: condition
+  type: if
+  disabled: {str(disabled).lower()}
+  left: 1 mA
+  operator: '>'
+  right: 0 mA
+  children:
+    - id: repeated
+      type: repeat
+      count: 3
+      children:
+        - {{id: positive, type: wait, duration: 3 s}}
+  else:
+    - {{id: negative, type: wait, duration: 1 s}}
+"""
+    tree = normalize_recipe_tree(parse_recipe_text(source), _providers())
+    assert tree.require("condition").label == "If · 1 mA > 0 mA"
+    assert tree.require("repeated").label == "Then · Repeat · 3 times"
+    assert tree.require("negative").label == "Else · Wait · 1 s"
+    assert tree.parent_by_id["repeated"] == tree.parent_by_id["negative"] == "condition"
+    assert tree.require("repeated").data["conditional_branch"] == "then"
+    assert tree.require("negative").data["conditional_branch"] == "else"
+    assert bool(tree.require("negative").data.get("disabled")) == disabled

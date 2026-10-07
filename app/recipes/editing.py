@@ -10,6 +10,7 @@ from ruamel.yaml import YAML
 
 from app.domain.errors import ConfigurationError
 from app.recipes.models import parse_recipe_text
+from app.recipes.block_registry import annotate_recipe_blocks
 
 
 def add_recipe_node(
@@ -188,11 +189,18 @@ def _load(source: str) -> dict[str, Any]:
 
 
 def _dump_validated(raw: dict[str, Any], origin: str) -> str:
+    annotate_recipe_blocks(raw)
     stream = StringIO()
     YAML().dump(raw, stream)
     result = stream.getvalue()
     parse_recipe_text(result, origin=origin)
     return result
+
+
+def canonical_recipe_source(source: str) -> str:
+    """Upgrade legacy identities on import/save, preserving comments and values."""
+    parse_recipe_text(source, origin="recipe block identity validation")
+    return _dump_validated(_load(source), "recipe block identities")
 
 
 def move_recipe_nodes(

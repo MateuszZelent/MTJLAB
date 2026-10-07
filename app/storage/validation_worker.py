@@ -6,7 +6,7 @@ import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, TemporaryFile
 
 
 def validate_archive_isolated(path, *, timeout_s=120):
@@ -14,7 +14,7 @@ def validate_archive_isolated(path, *, timeout_s=120):
 
     target = Path(path).resolve()
     try:
-        with TemporaryDirectory(prefix="mtjlab-validation-") as directory:
+        with TemporaryDirectory(prefix="mtjlab-validation-") as directory, TemporaryFile(mode="w+b") as diagnostic:
             result_path = Path(directory) / "report.json"
             result = subprocess.run(
                 [
@@ -27,13 +27,15 @@ def validate_archive_isolated(path, *, timeout_s=120):
                 cwd=Path(__file__).resolve().parents[2],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stderr=diagnostic,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 timeout=timeout_s,
                 check=False,
             )
             if result.returncode != 0:
-                detail = result.stderr.decode("utf-8", errors="replace")[-2000:]
+                diagnostic.seek(0, os.SEEK_END)
+                diagnostic.seek(max(0, diagnostic.tell() - 2000))
+                detail = diagnostic.read(2000).decode("utf-8", errors="replace")
                 raise RuntimeError(f"Validation process failed ({result.returncode}): {detail}")
             data = json.loads(result_path.read_text(encoding="utf-8"))
             if Path(data["path"]) != target:

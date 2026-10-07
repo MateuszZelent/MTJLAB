@@ -59,9 +59,9 @@ class MokeSweepProvider:
         self.validate_binding(node, binding)
         value.require_dimension(DIMENSION_VOLTAGE)
         simulation = bool((settings.moke_box.endpoint or "").startswith("SIM::MOKE"))
-        profile = control_profile_from_settings(settings, simulation=simulation)
-        if voltage_channel(binding.target) != profile.channel:
-            raise ConfigurationError("MOKE sweep channel is not the qualified electromagnet channel.")
+        profile = control_profile_from_settings(
+            settings, simulation=simulation, channel=voltage_channel(binding.target)
+        )
         plan = MokeVoltagePlan(profile.fingerprint, profile.channel,
                                profile.minimum_v, profile.maximum_v, (value.si_value,))
         plan.validate(profile)

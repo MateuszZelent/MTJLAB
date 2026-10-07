@@ -1,0 +1,718 @@
+
+[1;33m Tips:[0m QFluentWidgets Pro is now released. Click [1;96mhttps://qfluentwidgets.com/pages/pro[0m to learn more about it.
+
+START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_execution_cockpit_prioritizes_current_operation_and_workspace
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_execution_event_log_summarizes_large_payloads
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_execution_event_log_throttles_repeated_action_telemetry
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_execution_monitor_rethemes_fluent_cards_without_losing_visible_actions
+.venv/Scripts/python.exe : Timeout (0:00:40)!
+In Zeile:2 Zeichen:1
++ .venv/Scripts/python.exe -m pytest -p _sweep_fixes_diagnostics -p tes ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Timeout (0:00:40)!:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Thread 0x000047c4 [AuditWriter-13798b6c] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\string\__init__.py", line ??? 
+in safe_substitute
+  <invalid frame>
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_execution_monitor_uses_the_exact_semantic_snapshot
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_execution_tree_never_projects_technical_action_ids
+Timeout (0:00:40)!
+Thread 0x00000c70 [AuditWriter-90cd3e08] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\app\ui\design_system\fluent_theme.py", line ??? in eventFilter
+  <invalid frame>
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_execution_tree_shows_current_roi_value_and_progress
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_execution_without_semantic_snapshot_stays_empty
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_main_window_coalesces_read_only_device_projection_during_run
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_main_window_drains_runner_action_events_in_bounded_gui_batches
+Timeout (0:00:40)!
+Thread 0x0000015c [AuditWriter-b0f9a3dd] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\app\ui\design_system\fluent_theme.py", line 122 in eventFilter
+  File "C:\Users\Shark\git\MTJLAB\app\ui\widgets\limit_field.py", line 343 in __init__
+  File "C:\Users\Shark\git\MTJLAB\app\devices\anritsu_ms2830a\ui\page.py", line 281 in _bounded
+  File "C:\Users\Shark\git\MTJLAB\app\devices\anritsu_ms2830a\ui\page.py", line 218 in __init__
+  File "C:\Users\Shark\git\MTJLAB\app\devices\anritsu_ms2830a\ui\page.py", line 1332 in __init__
+  File "C:\Users\Shark\git\MTJLAB\app\devices\anritsu_ms2830a\module.py", line 49 in _page
+  File "C:\Users\Shark\git\MTJLAB\app\contracts\device_module.py", line 97 in create_page
+  File "C:\Users\Shark\git\MTJLAB\app\ui\shell\main_window.py", line 320 in _build
+  File "C:\Users\Shark\git\MTJLAB\app\ui\shell\main_window.py", line 248 in __init__
+  File "C:\Users\Shark\git\MTJLAB\tests\shell_test_isolation.py", line 52 in create_window
+  File "C:\Users\Shark\git\MTJLAB\tests\test_fluent_recipe_execution_pages.py", line 472 in 
+test_main_window_drains_runner_action_events_in_bounded_gui_batches
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\unittest\case.py", line 615 in 
+_callTestMethod
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\unittest\case.py", line 669 in 
+run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\unittest\case.py", line 725 in 
+__call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\unittest.py", line 410 in runtest
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 184 in pytest_runtest_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 250 in <lambda>
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 361 in from_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 249 in call_and_report
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 139 in runtestprotocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 118 in pytest_runtest_protocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 408 in pytest_runtestloop
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 384 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 330 in wrap_session
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 377 in pytest_cmdline_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 229 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 253 in _console_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pytest\__main__.py", line 9 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_manual_execution_shows_floating_stage_gate_and_requires_next
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_runner_projects_anritsu_moke_and_lakeshore_into_their_live_pages
+Timeout (0:00:40)!
+Thread 0x00004390 [AuditWriter-1d0028b9] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\qfluentwidgets\components\navigation\pivot.py", line 47 in 
+__init__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\qfluentwidgets\components\navigation\segmented_widget.py", 
+line 77 in __init__
+  File "C:\Users\Shark\git\MTJLAB\app\ui\results\page.py", line 132 in __init__
+  File "C:\Users\Shark\git\MTJLAB\app\ui\results\page.py", line 340 in __init__
+  File "C:\Users\Shark\git\MTJLAB\app\ui\shell\main_window.py", line 507 in _build
+  File "C:\Users\Shark\git\MTJLAB\app\ui\shell\main_window.py", line 248 in __init__
+  File "C:\Users\Shark\git\MTJLAB\tests\shell_test_isolation.py", line 52 in create_window
+  File "C:\Users\Shark\git\MTJLAB\tests\test_fluent_recipe_execution_pages.py", line 796 in 
+test_runner_projects_anritsu_moke_and_lakeshore_into_their_live_pages
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\unittest\case.py", line 615 in 
+_callTestMethod
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\unittest\case.py", line 669 in 
+run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\unittest\case.py", line 725 in 
+__call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\unittest.py", line 410 in runtest
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 184 in pytest_runtest_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 250 in <lambda>
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 361 in from_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 249 in call_and_report
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 139 in runtestprotocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 118 in pytest_runtest_protocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 408 in pytest_runtestloop
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 384 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 330 in wrap_session
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 377 in pytest_cmdline_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 229 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 253 in _console_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pytest\__main__.py", line 9 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_runner_telemetry_projects_confirmed_state_to_read_only_device_pages
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_spectrum_preview_updates_are_coalesced_to_latest_frame
+Timeout (0:00:40)!
+Thread 0x000045dc [AuditWriter-ed6fde84] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\qfluentwidgets\common\style_sheet.py", line 342 in 
+setStyleSheet
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\qfluentwidgets\common\style_sheet.py", line 117 in apply
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\qfluentwidgets\components\widgets\button.py", line 31 in 
+__init__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\qfluentwidgets\common\overload.py", line 38 in _method
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\qfluentwidgets\components\widgets\button.py", line 41 in _
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\qfluentwidgets\common\overload.py", line 38 in _method
+  File "C:\Users\Shark\git\MTJLAB\app\ui\recipes\page.py", line 607 in __init__
+  File "C:\Users\Shark\git\MTJLAB\app\ui\shell\main_window.py", line 492 in _build
+  File "C:\Users\Shark\git\MTJLAB\app\ui\shell\main_window.py", line 248 in __init__
+  File "C:\Users\Shark\git\MTJLAB\tests\shell_test_isolation.py", line 52 in create_window
+  File "C:\Users\Shark\git\MTJLAB\tests\test_fluent_recipe_execution_pages.py", line 559 in 
+test_spectrum_preview_updates_are_coalesced_to_latest_frame
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\unittest\case.py", line 615 in 
+_callTestMethod
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\unittest\case.py", line 669 in 
+run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\unittest\case.py", line 725 in 
+__call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\unittest.py", line 410 in runtest
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 184 in pytest_runtest_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 250 in <lambda>
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 361 in from_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 249 in call_and_report
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 139 in runtestprotocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 118 in pytest_runtest_protocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 408 in pytest_runtestloop
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 384 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 330 in wrap_session
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 377 in pytest_cmdline_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 229 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 253 in _console_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pytest\__main__.py", line 9 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_sweep_builder_exposes_fluent_workspace_surfaces_at_desktop_size
+Timeout (0:00:40)!
+Thread 0x000044f4 [AuditWriter-45f58001] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\app\ui\design_system\fluent_theme.py", line 435 in _apply_station_surface
+  File "C:\Users\Shark\git\MTJLAB\app\ui\design_system\fluent_theme.py", line 281 in _apply_station_control_style
+  File "C:\Users\Shark\git\MTJLAB\app\ui\design_system\fluent_theme.py", line 266 in _apply_station_control_styles
+  File "C:\Users\Shark\git\MTJLAB\app\ui\design_system\fluent_theme.py", line 75 in apply_application_theme
+  File "C:\Users\Shark\git\MTJLAB\app\ui\shell\main_window.py", line 1390 in _set_theme_mode
+  File "C:\Users\Shark\git\MTJLAB\tests\test_fluent_recipe_execution_pages.py", line 120 in 
+test_sweep_builder_exposes_fluent_workspace_surfaces_at_desktop_size
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\unittest\case.py", line 615 in 
+_callTestMethod
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\unittest\case.py", line 669 in 
+run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\unittest\case.py", line 725 in 
+__call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\unittest.py", line 410 in runtest
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 184 in pytest_runtest_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 250 in <lambda>
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 361 in from_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 249 in call_and_report
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 139 in runtestprotocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 118 in pytest_runtest_protocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 408 in pytest_runtestloop
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 384 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 330 in wrap_session
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 377 in pytest_cmdline_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 229 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 253 in _console_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pytest\__main__.py", line 9 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_sweep_builder_keeps_primary_workspace_rendered_at_narrow_desktop_width
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_sweep_workspace_and_roi_dialog_retheme_together
+Timeout (0:00:40)!
+Thread 0x00002e38 [AuditWriter-b024700a] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\qfluentwidgets\common\style_sheet.py", line 464 in color
+  <invalid frame>
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_sweep_workspace_has_framed_scrollable_surfaces_and_read_only_run_state
+Timeout (0:00:40)!
+Thread 0x00002a54 [AuditWriter-eb275403] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\qfluentwidgets\common\style_sheet.py", line 295 in 
+getStyleSheetFromFile
+  <invalid frame>
+.START tests/test_fluent_recipe_execution_pages.py::FluentRecipeAndExecutionPageTests::test_unchanged_runner_snapshot_repaints_only_the_active_device_page
+.START tests/test_execution_ui_responsiveness.py::test_gui_gap_probe_excludes_time_before_monitoring_starts
+.START tests/test_execution_ui_responsiveness.py::test_1000_semantic_events_coalesce_to_bounded_model_flushes
+.START tests/test_execution_ui_responsiveness.py::test_wait_semantic_projection_preserves_duration_while_running
+.START tests/test_execution_ui_responsiveness.py::test_current_operation_displays_the_executed_transition[update_moke_voltage-qualified_ramp-RAMPING]
+.START tests/test_execution_ui_responsiveness.py::test_current_operation_displays_the_executed_transition[ramp_keithley_to_zero-qualified_ramp-RAMPING]
+.START tests/test_execution_ui_responsiveness.py::test_current_operation_displays_the_executed_transition[update_keithley_level-direct_setpoint-SETTING PARAMETER]
+.START tests/test_execution_ui_responsiveness.py::test_semantic_execution_renders_one_tree_without_legacy_overlap
+.START tests/test_execution_ui_responsiveness.py::test_execution_workspace_is_bounded_while_tree_keeps_internal_scroll
+.START tests/test_execution_ui_responsiveness.py::test_large_spectrum_preview_is_decimated_before_plotting
+.START tests/test_execution_ui_responsiveness.py::test_execution_page_owns_only_the_semantic_measurement_tree
+.START tests/test_execution_ui_responsiveness.py::test_execution_tree_keeps_qt_event_loop_live_for_1000_points
+Timeout (0:00:40)!
+Thread 0x00002f38 [AuditWriter-3cf1351e] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\qfluentwidgets\components\widgets\button.py", line 62 in 
+setIcon
+  File "C:\Users\Shark\git\MTJLAB\app\ui\recipes\page.py", line 1203 in action
+  File "C:\Users\Shark\git\MTJLAB\app\ui\recipes\page.py", line 1335 in _build_device_library
+  File "C:\Users\Shark\git\MTJLAB\app\ui\recipes\page.py", line 802 in __init__
+  File "C:\Users\Shark\git\MTJLAB\app\ui\shell\main_window.py", line 492 in _build
+  File "C:\Users\Shark\git\MTJLAB\app\ui\shell\main_window.py", line 248 in __init__
+  File "C:\Users\Shark\git\MTJLAB\tests\shell_test_isolation.py", line 52 in create_window
+  File "C:\Users\Shark\git\MTJLAB\tests\test_execution_ui_responsiveness.py", line 181 in build_simulated_window
+  File "C:\Users\Shark\git\MTJLAB\tests\test_execution_ui_responsiveness.py", line 463 in 
+test_execution_tree_keeps_qt_event_loop_live_for_1000_points
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\python.py", line 167 in pytest_pyfunc_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\python.py", line 1707 in runtest
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 184 in pytest_runtest_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 250 in <lambda>
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 361 in from_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 249 in call_and_report
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 139 in runtestprotocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 118 in pytest_runtest_protocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 408 in pytest_runtestloop
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 384 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 330 in wrap_session
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 377 in pytest_cmdline_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 229 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 253 in _console_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pytest\__main__.py", line 9 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+Timeout (0:00:40)!
+Thread 0x00001e44 [recipe-run-watchdog] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 373 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 670 in wait
+  File "C:\Users\Shark\git\MTJLAB\app\engine\runner.py", line 947 in _watchdog_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00002dc8 [QThread] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\json\encoder.py", line 263 in 
+iterencode
+  <invalid frame>
+
+Thread 0x00002f38 [AuditWriter-3cf1351e] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\tests\test_execution_ui_responsiveness.py", line 227 in start_and_wait_for_run
+  File "C:\Users\Shark\git\MTJLAB\tests\test_execution_ui_responsiveness.py", line 480 in 
+test_execution_tree_keeps_qt_event_loop_live_for_1000_points
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\python.py", line 167 in pytest_pyfunc_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\python.py", line 1707 in runtest
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 184 in pytest_runtest_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 250 in <lambda>
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 361 in from_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 249 in call_and_report
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 139 in runtestprotocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 118 in pytest_runtest_protocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 408 in pytest_runtestloop
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 384 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 330 in wrap_session
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 377 in pytest_cmdline_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 229 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 253 in _console_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pytest\__main__.py", line 9 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+Timeout (0:00:40)!
+Thread 0x00001e44 [recipe-run-watchdog] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 373 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 670 in wait
+  File "C:\Users\Shark\git\MTJLAB\app\engine\runner.py", line 947 in _watchdog_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00002dc8 [QThread] (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\app\storage\thatec_writer.py", line 503 in _append_spectrum
+  File "C:\Users\Shark\git\MTJLAB\app\storage\thatec_writer.py", line 275 in append
+  File "C:\Users\Shark\git\MTJLAB\app\storage\hdf5_writer.py", line 834 in append
+  File "C:\Users\Shark\git\MTJLAB\app\engine\runner.py", line 2224 in _append_checkpoint
+  File "C:\Users\Shark\git\MTJLAB\app\engine\runner.py", line 429 in run
+  File "C:\Users\Shark\git\MTJLAB\app\ui\run_worker.py", line 510 in run
+
+Thread 0x00002f38 [AuditWriter-3cf1351e] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pyqtgraph\graphicsItems\AxisItem.py", line 681 in paint
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pyqtgraph\widgets\GraphicsView.py", line 137 in paintEvent
+  File "C:\Users\Shark\git\MTJLAB\tests\test_execution_ui_responsiveness.py", line 226 in start_and_wait_for_run
+  File "C:\Users\Shark\git\MTJLAB\tests\test_execution_ui_responsiveness.py", line 480 in 
+test_execution_tree_keeps_qt_event_loop_live_for_1000_points
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\python.py", line 167 in pytest_pyfunc_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\python.py", line 1707 in runtest
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 184 in pytest_runtest_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 250 in <lambda>
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 361 in from_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 249 in call_and_report
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 139 in runtestprotocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 118 in pytest_runtest_protocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 408 in pytest_runtestloop
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 384 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 330 in wrap_session
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 377 in pytest_cmdline_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 229 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 253 in _console_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pytest\__main__.py", line 9 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+Timeout (0:00:40)!
+Thread 0x00001e44 [recipe-run-watchdog] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 373 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 670 in wait
+  File "C:\Users\Shark\git\MTJLAB\app\engine\runner.py", line 947 in _watchdog_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00002dc8 [QThread] (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\h5py\_hl\base.py", line 286 in file
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\h5py\_hl\group.py", line 430 in _get
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\h5py\_hl\group.py", line 407 in __getitem__
+  File "C:\Users\Shark\git\MTJLAB\app\storage\thatec_writer.py", line 415 in _append_scalar
+  File "C:\Users\Shark\git\MTJLAB\app\storage\thatec_writer.py", line 269 in append
+  File "C:\Users\Shark\git\MTJLAB\app\storage\hdf5_writer.py", line 834 in append
+  File "C:\Users\Shark\git\MTJLAB\app\engine\runner.py", line 2224 in _append_checkpoint
+  File "C:\Users\Shark\git\MTJLAB\app\engine\runner.py", line 429 in run
+  File "C:\Users\Shark\git\MTJLAB\app\ui\run_worker.py", line 510 in run
+
+Thread 0x00002f38 [AuditWriter-3cf1351e] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\tests\test_execution_ui_responsiveness.py", line 226 in start_and_wait_for_run
+  File "C:\Users\Shark\git\MTJLAB\tests\test_execution_ui_responsiveness.py", line 480 in 
+test_execution_tree_keeps_qt_event_loop_live_for_1000_points
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\python.py", line 167 in pytest_pyfunc_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\python.py", line 1707 in runtest
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 184 in pytest_runtest_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 250 in <lambda>
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 361 in from_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 249 in call_and_report
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 139 in runtestprotocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 118 in pytest_runtest_protocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 408 in pytest_runtestloop
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 384 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 330 in wrap_session
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 377 in pytest_cmdline_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 229 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 253 in _console_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pytest\__main__.py", line 9 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+Timeout (0:00:40)!
+Thread 0x00001e44 [recipe-run-watchdog] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 373 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 670 in wait
+  File "C:\Users\Shark\git\MTJLAB\app\engine\runner.py", line 947 in _watchdog_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00002dc8 [QThread] (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\h5py\_hl\dataset.py", line ??? in _selector
+  <invalid frame>
+
+Thread 0x00002f38 [AuditWriter-3cf1351e] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\app\ui\measurement_tree\view.py", line 216 in drawBranches
+  File "C:\Users\Shark\git\MTJLAB\app\ui\measurement_tree\view.py", line 589 in paintEvent
+  File "C:\Users\Shark\git\MTJLAB\app\ui\measurement_tree\view.py", line 248 in viewportEvent
+  File "C:\Users\Shark\git\MTJLAB\tests\test_execution_ui_responsiveness.py", line 226 in start_and_wait_for_run
+  File "C:\Users\Shark\git\MTJLAB\tests\test_execution_ui_responsiveness.py", line 480 in 
+test_execution_tree_keeps_qt_event_loop_live_for_1000_points
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\python.py", line 167 in pytest_pyfunc_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\python.py", line 1707 in runtest
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 184 in pytest_runtest_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 250 in <lambda>
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 361 in from_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 249 in call_and_report
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 139 in runtestprotocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 118 in pytest_runtest_protocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 408 in pytest_runtestloop
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 384 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 330 in wrap_session
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 377 in pytest_cmdline_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 229 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 253 in _console_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pytest\__main__.py", line 9 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+Timeout (0:00:40)!
+Thread 0x00002f38 [AuditWriter-3cf1351e] (most recent call first):
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 369 in wait
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\queue.py", line 199 in get
+  File "C:\Users\Shark\git\MTJLAB\app\audit\logger.py", line 106 in _writer_loop
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1024 in run
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1082 in 
+_bootstrap_inner
+  File "C:\Users\Shark\AppData\Roaming\uv\python\cpython-3.14.6-windows-x86_64-none\Lib\threading.py", line 1044 in 
+_bootstrap
+
+Thread 0x00001234 (most recent call first):
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\qfluentwidgets\components\widgets\card_widget.py", line 97 
+in paintEvent
+  File "C:\Users\Shark\git\MTJLAB\tests\test_execution_ui_responsiveness.py", line 231 in start_and_wait_for_run
+  File "C:\Users\Shark\git\MTJLAB\tests\test_execution_ui_responsiveness.py", line 480 in 
+test_execution_tree_keeps_qt_event_loop_live_for_1000_points
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\python.py", line 167 in pytest_pyfunc_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\python.py", line 1707 in runtest
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 184 in pytest_runtest_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 250 in <lambda>
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 361 in from_call
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 249 in call_and_report
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 139 in runtestprotocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\runner.py", line 118 in pytest_runtest_protocol
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 408 in pytest_runtestloop
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 384 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 330 in wrap_session
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\main.py", line 377 in pytest_cmdline_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 229 in _main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\_pytest\config\__init__.py", line 253 in _console_main
+  File "C:\Users\Shark\git\MTJLAB\.venv\Lib\site-packages\pytest\__main__.py", line 9 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 203 in _run_module_as_main
+.START tests/test_sweep_spectrum_ui.py::test_shown_editor_geometry_and_roundtrip[False-light]
+.START tests/test_sweep_spectrum_ui.py::test_shown_editor_geometry_and_roundtrip[False-dark]
+.START tests/test_sweep_spectrum_ui.py::test_shown_editor_geometry_and_roundtrip[True-light]
+.START tests/test_sweep_spectrum_ui.py::test_shown_editor_geometry_and_roundtrip[True-dark]
+.START tests/test_sweep_spectrum_ui.py::test_managed_editor_opens_shared_options_and_rebuild_preserves_them
+.START tests/test_sweep_spectrum_ui.py::test_recipe_parameters_do_not_mix_average_across_points
+.START tests/test_sweep_spectrum_ui.py::test_execution_preview_renders_processed_unit_and_resets_for_reference
+.START tests/test_sweep_spectrum_ui.py::test_processing_runs_off_gui_thread_and_timer_remains_live
+.START tests/test_sweep_spectrum_ui.py::test_sweeps_page_shows_processing_recipe_at_desktop_and_narrow_sizes
+.START tests/test_sweep_spectrum_ui.py::test_completed_result_waits_for_visible_results_and_readers_stop
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_delete_selected_nodes_deletes_multiple_nodes
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_drag_and_drop_multiple_nodes_into_sweep_loop
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_drag_and_drop_onto_set_roi_value_inserts_at_beginning_of_loop
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_drag_and_drop_single_node_into_sweep_loop
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_library_action_adds_inside_sweep_loop_body
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_library_default_destination_when_loop_body_selected
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_library_default_destination_when_set_roi_value_selected
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_library_drop_into_sweep_loop_body
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_library_drop_onto_set_roi_value
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_measurement_tree_model_supported_drag_and_drop_actions
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_mouse_drag_gesture_triggers_qdrag_exec_with_multiple_selected_items
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_multi_selection_updates_delete_button_enablement
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_selected_semantic_ids_returns_all_selected_rows_in_order
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_start_drag_defaults_to_move_action_when_copy_action_passed
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_start_drag_serializes_multiple_selected_nodes_to_mime_json
+.START tests/test_sweep_tree_multiselect_and_drop.py::SweepTreeMultiSelectAndDropTests::test_tree_selection_mode_is_extended_selection
+.
+56 passed in 589.14s (0:09:49)

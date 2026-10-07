@@ -479,7 +479,13 @@ class QuantityAndSafetyTests(unittest.TestCase):
             )
 
     def test_anritsu_reference_level_uses_documented_hardware_range(self) -> None:
-        settings = simulation_settings()
+        raw = simulation_settings().model_dump(mode="python")
+        # This case isolates the hardware envelope; narrower operator limits
+        # are independently enforced and must not be implicitly ignored.
+        raw["devices"]["anritsu"]["safety"]["reference_level"] = {
+            "min": "-120 dBm", "max": "+50 dBm",
+        }
+        settings = StationSettings.model_validate(raw)
         for value in (-120.0, 50.0):
             validate_anritsu_spectrum(
                 settings.anritsu.safety,

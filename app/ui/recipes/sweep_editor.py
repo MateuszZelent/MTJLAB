@@ -27,6 +27,7 @@ from app.ui.common import line_edit as _line
 from app.ui.dialogs import StationMessageBox as QMessageBox
 from app.ui.design_system import effective_theme, plot_theme, tokens_for
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
+from app.ui.recipes.configuration_comparison import ConfigurationReview, ConfigurationComparisonRow, current_parameter_setting
 from app.safety.quick_controls import QuickControlSafetyBound, quick_control_safety_bounds
 from app.settings.models import StationSettings
 from app.safety.moke_box import control_profile_from_settings
@@ -72,12 +73,17 @@ class SweepGeneratorDialog(FluentRecipeDialog):
     ) -> None:
         super().__init__(parent)
         self.setProperty("stationSurface", "page")
-        self.definition = definition
+        self.definition = dict(definition)
         self.setWindowTitle(f"Point generator — {definition['label']}")
         self.setMinimumSize(640, 560)
         self.resize(1180, 700)
         surface = self.use_modal_shell_content().surface
         layout = self.modal_content_layout(spacing=10)
+        self.review = ConfigurationReview(surface)
+        layout.addWidget(self.review)
+        self.review.table.set_rows([ConfigurationComparisonRow(
+            "axis", definition["label"], current_parameter_setting(parent, definition.get("target", "")),
+            "Values defined by the ROI below", "Sweep")])
         heading = BodyLabel(
             "Build any number of inclusive intervals. Each interval uses either a point count "
             "or a physical step; the scatter plot always shows the exact generated points."
@@ -92,7 +98,7 @@ class SweepGeneratorDialog(FluentRecipeDialog):
             # Show every physical output, but only the qualified one is writable.
             for candidate in range(8):
                 self.channel_selector.addItem(f"VOUT {candidate}", userData=candidate)
-                if candidate != channel:
+                if not self._moke_channel_available(candidate):
                     self.channel_selector.setItemEnabled(candidate, False)
             self.channel_selector.setCurrentIndex(channel)
             layout.addWidget(BodyLabel("Output channel", surface))
@@ -198,6 +204,8 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         self.add_segment.clicked.connect(self.add_interval)
         self.remove_segment.clicked.connect(self.remove_interval)
         self.segments.cellChanged.connect(self._refresh_preview)
+        if hasattr(self, "channel_selector"):
+            self.channel_selector.currentIndexChanged.connect(self._moke_channel_changed)
         self.create_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
         if initial_segments:
@@ -208,6 +216,29 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         self._update_responsive_layout()
         self._connect_theme_source()
 
+    def _moke_channel_available(self, channel: int) -> bool:
+        owner = self.parentWidget()
+        while owner is not None:
+            settings = getattr(owner, "_settings", None)
+            if isinstance(settings, StationSettings):
+                try:
+                    control_profile_from_settings(settings, simulation=(settings.moke_box.endpoint or "").startswith("SIM::MOKE"), channel=channel)
+                except RuntimeError:
+                    return False
+                return True
+            owner = owner.parentWidget()
+        return False
+
+    def _moke_channel_changed(self, index: int) -> None:
+        channel = self.channel_selector.itemData(index)
+        self.definition["target"] = f"moke_box.vout{channel}.voltage"
+        self.definition["label"] = f"VOUT {channel} · programming voltage"
+        self.setWindowTitle(f"Point generator — {self.definition['label']}")
+        self.review.table.set_rows([ConfigurationComparisonRow(
+            "axis", self.definition["label"], current_parameter_setting(self.parentWidget(), self.definition["target"]),
+            "Values defined by the ROI below", "Sweep")])
+        self._refresh_preview()
+
     def _resolve_safety_bound(self) -> QuickControlSafetyBound | None:
         owner: QWidget | None = self.parentWidget()
         while owner is not None:
@@ -216,7 +247,8 @@ class SweepGeneratorDialog(FluentRecipeDialog):
                 if str(self.definition.get("target", "")).startswith("moke_box."):
                     simulation = (settings.moke_box.endpoint or "").startswith("SIM::MOKE")
                     try:
-                        profile = control_profile_from_settings(settings, simulation=simulation)
+                        channel = int(self.definition["target"].split(".")[1].removeprefix("vout"))
+                        profile = control_profile_from_settings(settings, simulation=simulation, channel=channel)
                     except RuntimeError:
                         return None
                     return QuickControlSafetyBound(profile.minimum_v, profile.maximum_v,
@@ -244,6 +276,8 @@ class SweepGeneratorDialog(FluentRecipeDialog):
 
     def _validate_safety_bounds(self, points: tuple[Any, ...]) -> None:
         if self._safety_bound is None:
+            if str(self.definition.get("target", "")).startswith("moke_box."):
+                raise ConfigurationError("MOKE sweep requires a qualified channel profile with station limits.")
             return
         for point in points:
             if not (
@@ -575,6 +609,7 @@ class SweepGeneratorDialog(FluentRecipeDialog):
 
     def _refresh_preview(self) -> None:
         try:
+            self._refresh_safety_bound()
             segments = self.segment_data()
             point_count = estimate_sweep_point_count(
                 segments, self.definition["dimension"]
@@ -679,6 +714,7 @@ class SweepGeneratorDialog(FluentRecipeDialog):
 
     def accept(self) -> None:
         try:
+            self._refresh_safety_bound()
             segments = self.segment_data()
             point_count = estimate_sweep_point_count(
                 segments, self.definition["dimension"]

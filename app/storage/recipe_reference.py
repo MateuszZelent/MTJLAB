@@ -40,6 +40,8 @@ def load_recipe_reference(path, kind):
             raise ExecutionError(
                 "Imported reference lacks verified RF input/bandwidth metadata; acquire a new reference."
             )
+        if reference.vbw_filter_mode is None:
+            raise ExecutionError("Imported reference lacks verified VID/POW metadata; acquire a new reference.")
         return reference.trace, reference.average_count, reference
     raise ExecutionError("Reference file kind must be reference or background.")
 
@@ -64,6 +66,7 @@ def verify_recipe_reference(evidence, full, advanced, device_idn, fingerprint):
                     "rbw_auto",
                     "rbw_hz",
                     "vbw_mode",
+                    "vbw_filter_mode",
                     "vbw_hz",
                     "detector",
                     "attenuation_auto",

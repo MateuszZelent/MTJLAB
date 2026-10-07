@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from app.recipes import RecipeRepository
+from app.recipes.editing import canonical_recipe_source
 
 
 SOURCE_A = """\
@@ -30,8 +31,8 @@ class RecipeRepositoryTests(unittest.TestCase):
             self.assertIsNone(first.backup_path)
             self.assertIsNotNone(second.backup_path)
             assert second.backup_path is not None
-            self.assertEqual(second.backup_path.read_text(encoding="utf-8"), SOURCE_A)
-            self.assertEqual(path.read_text(encoding="utf-8"), SOURCE_B)
+            self.assertEqual(second.backup_path.read_text(encoding="utf-8"), canonical_recipe_source(SOURCE_A))
+            self.assertEqual(path.read_text(encoding="utf-8"), canonical_recipe_source(SOURCE_B))
             self.assertEqual(repository.versions(path), (second.backup_path,))
             self.assertNotEqual(first.sha256, second.sha256)
 
@@ -57,7 +58,7 @@ class RecipeRepositoryTests(unittest.TestCase):
             repository.save(path, SOURCE_A)
             with self.assertRaises(Exception):
                 repository.save(path, "schema_version: 1\n")
-            self.assertEqual(path.read_text(encoding="utf-8"), SOURCE_A)
+            self.assertEqual(path.read_text(encoding="utf-8"), canonical_recipe_source(SOURCE_A))
 
 
 if __name__ == "__main__":

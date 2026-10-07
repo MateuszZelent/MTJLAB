@@ -1,0 +1,2050 @@
+[
+  {
+    "dialog": "StationAlertDialog",
+    "theme": "light",
+    "size": [
+      640,
+      800
+    ]
+  },
+  {
+    "dialog": "StationAlertDialog",
+    "theme": "light",
+    "size": [
+      640,
+      700
+    ]
+  },
+  {
+    "dialog": "StationSettingsGuidanceDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "StationSettingsGuidanceDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SweepDeviceReadinessDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SweepDeviceReadinessDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "QuickControlPicker",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "QuickControlPicker",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ElabFavoritesDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ElabFavoritesDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ManualStageDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ManualStageDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ImageViewerDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ImageViewerDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "RenameHeaderDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "RenameHeaderDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "AddHeaderDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "AddHeaderDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "CatalogueSettingsDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "CatalogueSettingsDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "RenumberRowsDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "RenumberRowsDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SampleProgrammingDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SampleProgrammingDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "OutputPolicyDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "OutputPolicyDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "RepeatCountDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "RepeatCountDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ActionNodeEditorDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ActionNodeEditorDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "KeithleySweepBuilderDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "KeithleySweepBuilderDialog",
+    "theme": "light",
+    "size": [
+      900,
+      700
+    ]
+  },
+  {
+    "dialog": "FixedValueDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "FixedValueDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "AnritsuAcquisitionEditorDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "AnritsuAcquisitionEditorDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "CommentEditorDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "CommentEditorDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "DeviceParameterDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "DeviceParameterDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ElabUploadEditorDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ElabUploadEditorDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "KeithleyShutdownMethodDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "KeithleyShutdownMethodDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SweepGeneratorDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SweepGeneratorDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SweepTreeDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SweepTreeDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "LimitEditDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "LimitEditDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "KeithleyLimitProposalDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "KeithleyLimitProposalDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "RigolNodeEditorDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "RigolNodeEditorDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "MokeFloatingControlsWindow",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "MokeFloatingControlsWindow",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "MokeHallLiveWindow",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "MokeHallLiveWindow",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "LakeShoreLiveWindow",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "LakeShoreLiveWindow",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "FieldScenarioDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "FieldScenarioDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ObservationDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ObservationDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "KeithleyNodeEditorDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "KeithleyNodeEditorDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "_KeithleyReadbackDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "_KeithleyReadbackDialog",
+    "theme": "light",
+    "size": [
+      980,
+      700
+    ]
+  },
+  {
+    "dialog": "_KeithleyFloatingPanelWindow",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "_KeithleyFloatingPanelWindow",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "KeithleyPlotSettingsDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "KeithleyPlotSettingsDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumAnalysisSettingsDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumAnalysisSettingsDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "BackgroundCorrectionAssistant",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "BackgroundCorrectionAssistant",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumDiagnosticDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumDiagnosticDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumDifferenceDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumDifferenceDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumFinalizationResumeDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumFinalizationResumeDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumFinalizationSelectionDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumFinalizationSelectionDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ManualSpectrumSaveDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ManualSpectrumSaveDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "_AnritsuSpectrogramWindow",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "_AnritsuSpectrogramWindow",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "_AnritsuSpectrumWindow",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "_AnritsuSpectrumWindow",
+    "theme": "light",
+    "size": [
+      860,
+      700
+    ]
+  },
+  {
+    "dialog": "_AnritsuTraceDiagnosticsDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "_AnritsuTraceDiagnosticsDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "PeakTableDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "PeakTableDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "PeakTrackingWindow",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "PeakTrackingWindow",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ProcessingQualityDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ProcessingQualityDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "AnritsuReadbackDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "AnritsuReadbackDialog",
+    "theme": "light",
+    "size": [
+      860,
+      700
+    ]
+  },
+  {
+    "dialog": "AnritsuNodeEditorDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "AnritsuNodeEditorDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "AnritsuSignalGeneratorNodeEditorDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "AnritsuSignalGeneratorNodeEditorDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumResonanceDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumResonanceDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "PlotScaleDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "PlotScaleDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumTrainingDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumTrainingDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumValidationDialog",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumValidationDialog",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineAnritsuAdvanced",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineAnritsuAdvanced",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineAnritsuReference",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineAnritsuReference",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineAnritsuRecording",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineAnritsuRecording",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineKeithleyAdvanced",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineKeithleyAdvanced",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineSettingsChanges",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineSettingsChanges",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineUserRoles",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineUserRoles",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineRenumberRows",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineRenumberRows",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineMokeProtocolTrace",
+    "theme": "light",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineMokeProtocolTrace",
+    "theme": "light",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "StationAlertDialog",
+    "theme": "dark",
+    "size": [
+      640,
+      800
+    ]
+  },
+  {
+    "dialog": "StationAlertDialog",
+    "theme": "dark",
+    "size": [
+      640,
+      700
+    ]
+  },
+  {
+    "dialog": "StationSettingsGuidanceDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "StationSettingsGuidanceDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SweepDeviceReadinessDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SweepDeviceReadinessDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "QuickControlPicker",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "QuickControlPicker",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ElabFavoritesDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ElabFavoritesDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ManualStageDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ManualStageDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ImageViewerDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ImageViewerDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "RenameHeaderDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "RenameHeaderDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "AddHeaderDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "AddHeaderDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "CatalogueSettingsDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "CatalogueSettingsDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "RenumberRowsDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "RenumberRowsDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SampleProgrammingDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SampleProgrammingDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "OutputPolicyDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "OutputPolicyDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "RepeatCountDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "RepeatCountDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ActionNodeEditorDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ActionNodeEditorDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "KeithleySweepBuilderDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "KeithleySweepBuilderDialog",
+    "theme": "dark",
+    "size": [
+      900,
+      700
+    ]
+  },
+  {
+    "dialog": "FixedValueDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "FixedValueDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "AnritsuAcquisitionEditorDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "AnritsuAcquisitionEditorDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "CommentEditorDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "CommentEditorDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "DeviceParameterDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "DeviceParameterDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ElabUploadEditorDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ElabUploadEditorDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "KeithleyShutdownMethodDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "KeithleyShutdownMethodDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SweepGeneratorDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SweepGeneratorDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SweepTreeDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SweepTreeDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "LimitEditDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "LimitEditDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "KeithleyLimitProposalDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "KeithleyLimitProposalDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "RigolNodeEditorDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "RigolNodeEditorDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "MokeFloatingControlsWindow",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "MokeFloatingControlsWindow",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "MokeHallLiveWindow",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "MokeHallLiveWindow",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "LakeShoreLiveWindow",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "LakeShoreLiveWindow",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "FieldScenarioDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "FieldScenarioDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ObservationDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ObservationDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "KeithleyNodeEditorDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "KeithleyNodeEditorDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "_KeithleyReadbackDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "_KeithleyReadbackDialog",
+    "theme": "dark",
+    "size": [
+      980,
+      700
+    ]
+  },
+  {
+    "dialog": "_KeithleyFloatingPanelWindow",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "_KeithleyFloatingPanelWindow",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "KeithleyPlotSettingsDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "KeithleyPlotSettingsDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumAnalysisSettingsDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumAnalysisSettingsDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "BackgroundCorrectionAssistant",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "BackgroundCorrectionAssistant",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumDiagnosticDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumDiagnosticDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumDifferenceDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumDifferenceDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumFinalizationResumeDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumFinalizationResumeDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumFinalizationSelectionDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumFinalizationSelectionDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ManualSpectrumSaveDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ManualSpectrumSaveDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "_AnritsuSpectrogramWindow",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "_AnritsuSpectrogramWindow",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "_AnritsuSpectrumWindow",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "_AnritsuSpectrumWindow",
+    "theme": "dark",
+    "size": [
+      860,
+      700
+    ]
+  },
+  {
+    "dialog": "_AnritsuTraceDiagnosticsDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "_AnritsuTraceDiagnosticsDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "PeakTableDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "PeakTableDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "PeakTrackingWindow",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "PeakTrackingWindow",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "ProcessingQualityDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "ProcessingQualityDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "AnritsuReadbackDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "AnritsuReadbackDialog",
+    "theme": "dark",
+    "size": [
+      860,
+      700
+    ]
+  },
+  {
+    "dialog": "AnritsuNodeEditorDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "AnritsuNodeEditorDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "AnritsuSignalGeneratorNodeEditorDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "AnritsuSignalGeneratorNodeEditorDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumResonanceDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumResonanceDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "PlotScaleDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "PlotScaleDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumTrainingDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumTrainingDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "SpectrumValidationDialog",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "SpectrumValidationDialog",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineAnritsuAdvanced",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineAnritsuAdvanced",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineAnritsuReference",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineAnritsuReference",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineAnritsuRecording",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineAnritsuRecording",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineKeithleyAdvanced",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineKeithleyAdvanced",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineSettingsChanges",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineSettingsChanges",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineUserRoles",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineUserRoles",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineRenumberRows",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineRenumberRows",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  },
+  {
+    "dialog": "InlineMokeProtocolTrace",
+    "theme": "dark",
+    "size": [
+      1120,
+      800
+    ]
+  },
+  {
+    "dialog": "InlineMokeProtocolTrace",
+    "theme": "dark",
+    "size": [
+      800,
+      700
+    ]
+  }
+]

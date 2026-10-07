@@ -44,16 +44,15 @@ def initialize_decisions(writer, context, config):
     encoded = _json(metadata)
     if context.frequencies_hz.size > 1048576:
         raise ExecutionError("Processing decision context exceeds its bounded frequency-grid budget.")
-    pending = writer._pending.create_group("decision_initial")
-    pending.attrs.update({"schema": SCHEMA, "metadata_json": encoded, "metadata_sha256": _digest(metadata),
-                          "count": 0, "last_sha256": "", "complete": True})
-    axis = pending.create_dataset("frequency_hz", data=context.frequencies_hz, dtype="f8")
-    axis.attrs["unit"] = "Hz"
-    pending.create_group("records")
-    writer._file.flush()
+    def write_context(pending):
+        pending.attrs.update({"schema": SCHEMA, "metadata_json": encoded, "metadata_sha256": _digest(metadata),
+                              "count": 0, "last_sha256": ""})
+        axis = pending.create_dataset("frequency_hz", data=context.frequencies_hz, dtype="f8")
+        axis.attrs["unit"] = "Hz"
+        pending.create_group("records")
+
     writer._file.require_group("spectrum_processing_v1")
-    writer._file.move("_pending/decision_initial", ROOT)
-    writer._file.flush()
+    writer._commit_processing_record("decision_initial", ROOT, write_context, "processing decision context")
 
 
 def append_decision(writer, operation, parameters):
@@ -68,19 +67,40 @@ def append_decision(writer, operation, parameters):
         "parameters": parameters, "previous_sha256": str(root.attrs["last_sha256"])}
     encoded, identity = _json(record), _digest(record)
     pending_name = f"decision_{index}"
+    destination = f"{ROOT}/records/{index:08d}"
+    previous_hash = str(root.attrs["last_sha256"])
+    if pending_name in writer._pending or destination in writer._file:
+        raise ExecutionError("Processing decision transaction already exists; recover the archive.")
     try:
         pending = writer._pending.create_group(pending_name)
         pending.attrs.update({"record_json": encoded, "sha256": identity, "complete": True})
         writer._file.flush()
-        writer._file.move(f"_pending/{pending_name}", f"{ROOT}/records/{index:08d}")
+        writer._file.move(f"_pending/{pending_name}", destination)
         root.attrs["count"] = index + 1
         root.attrs["last_sha256"] = identity
         writer._file.flush()
     except Exception as exc:
-        if pending_name in writer._pending:
-            del writer._pending[pending_name]
-        writer._file.flush()
-        raise ExecutionError(f"Could not commit processing decision: {exc}") from exc
+        errors = []
+        for key, value in (("count", index), ("last_sha256", previous_hash)):
+            try:
+                root.attrs[key] = value
+            except Exception as rollback_exc:
+                errors.append(f"{key}: {rollback_exc}")
+        for path in (destination, f"_pending/{pending_name}"):
+            try:
+                if path in writer._file:
+                    del writer._file[path]
+            except Exception as rollback_exc:
+                errors.append(f"{path}: {rollback_exc}")
+        try:
+            writer._file.flush()
+        except Exception as rollback_exc:
+            errors.append(f"flush: {rollback_exc}")
+        detail = ""
+        if errors:
+            writer._storage_faulted = True
+            detail = "; rollback failed: " + "; ".join(errors)
+        raise ExecutionError(f"Could not commit processing decision: {exc}{detail}") from exc
     return identity
 
 

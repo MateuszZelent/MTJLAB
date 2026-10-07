@@ -14,6 +14,27 @@ class MokeBoxTcpTransport:
     def __init__(self) -> None:
         self._socket: socket.socket | None = None
         self._timeout_s: float | None = None
+        self._operation_deadline: float | None = None
+
+    @contextmanager
+    def operation_timeout(self, duration_s: float):
+        if not math.isfinite(duration_s) or duration_s <= 0:
+            raise ValueError("MOKE operation timeout must be finite and positive.")
+        previous = self._operation_deadline
+        deadline = time.monotonic() + duration_s
+        self._operation_deadline = deadline if previous is None else min(previous, deadline)
+        try:
+            yield
+        finally:
+            self._operation_deadline = previous
+
+    def _remaining_timeout(self, timeout_s):
+        if self._operation_deadline is None:
+            return timeout_s
+        remaining = self._operation_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("MOKE operation deadline expired before transport I/O.")
+        return remaining if timeout_s is None else min(timeout_s, remaining)
 
     @contextmanager
     def io_timeout(self, timeout_s: float):
@@ -35,6 +56,7 @@ class MokeBoxTcpTransport:
         if not separator or not host:
             raise ValueError("MOKE endpoint must be formatted as host:port.")
         self.close()
+        timeout_s = self._remaining_timeout(timeout_s)
         self._timeout_s = timeout_s
         self._socket = socket.create_connection((host, int(port_text)), timeout=timeout_s)
         self._socket.settimeout(timeout_s)
@@ -42,7 +64,15 @@ class MokeBoxTcpTransport:
     def send(self, frame: bytes) -> None:
         if self._socket is None:
             raise ConnectionError("MOKE TCP transport is not connected.")
-        self._socket.sendall(frame)
+        connection = self._socket
+        timeout = self._remaining_timeout(self._timeout_s)
+        if timeout is not None:
+            connection.settimeout(timeout)
+        try:
+            connection.sendall(frame)
+        finally:
+            if self._socket is connection:
+                connection.settimeout(self._timeout_s)
 
     def recv_exact(self, count: int) -> bytes:
         if self._socket is None:
@@ -60,6 +90,8 @@ class MokeBoxTcpTransport:
             if (configured_timeout is not None and configured_timeout > 0)
             else None
         )
+        if self._operation_deadline is not None:
+            deadline = self._operation_deadline if deadline is None else min(deadline, self._operation_deadline)
         chunks: list[bytes] = []
         remaining = count
         try:

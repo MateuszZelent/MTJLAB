@@ -8,8 +8,8 @@ crashing the Qt event loop.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,13 +17,14 @@ from app.domain.errors import ExecutionError
 from app.spectrum import peak_preserving_indices
 
 
-def iter_recipe_spectrum_sweeps(path):
+def iter_recipe_spectrum_sweeps(path, *, selected_indices=None):
     """Read committed raw recipe sources one sweep at a time, including interrupted blocks."""
     import h5py
+
     from .recipe_spectrum_store import iter_recipe_sweeps
 
     with h5py.File(path, "r") as file:
-        yield from iter_recipe_sweeps(file)
+        yield from iter_recipe_sweeps(file, selected_indices=selected_indices)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +71,7 @@ class StoredPoint:
     metadata: dict[str, Any]
     device_states: dict[str, Any]
     has_spectrum: bool
+    details_loaded: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +97,21 @@ class StoredReference:
     average_count: int
     frequencies_hz: tuple[float, ...]
     powers_dbm: tuple[float, ...]
+    purpose: str = "reference"
+    configuration_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredReferenceSummary:
+    """Catalogue metadata; scientific arrays are validated on explicit read."""
+    index: int
+    trace_name: str
+    acquired_at_utc: str | None
+    kind: str
+    average_count: int
+    source_point_count: int
+    purpose: str
+    configuration_fingerprint: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +126,7 @@ class Hdf5RunReader:
     @staticmethod
     def finalized_spectrum_blocks(path: str | Path):
         import h5py
+
         from .finalized_spectrum_codec import read_finalized
 
         with h5py.File(path, "r") as file:
@@ -141,20 +159,24 @@ class Hdf5RunReader:
     @staticmethod
     def spectrum_correction(path: str | Path, index: int):
         """Read a full-resolution signed result from a committed raw checkpoint."""
+        if index < 0:
+            raise ExecutionError("Spectrum index cannot be negative.")
         import h5py
+
         from .spectrum_correction_codec import read_corrected
 
         with h5py.File(path, "r") as file:
             key = f"spectra/{index}/correction_v1"
             if key not in file:
                 return None
-            point_key = f"points/{index}"
-            if point_key not in file or not file[point_key].attrs.get("complete", False):
-                raise ExecutionError("Spectrum correction belongs to an uncommitted checkpoint.")
+            Hdf5RunReader._require_committed_spectrum(file, index)
             result = read_corrected(file[key])
             if result.interference_model_id is not None:
-                from .spectrum_interference_codec import read_interference_calibration, validate_interference_result
                 from .spectrum_correction_codec import read_profile
+                from .spectrum_interference_codec import (
+                    read_interference_calibration,
+                    validate_interference_result,
+                )
 
                 model_key = f"spectrum_processing_v1/interference_models/{result.interference_model_id}"
                 if model_key not in file:
@@ -172,21 +194,23 @@ class Hdf5RunReader:
 
     @staticmethod
     def spectrum_acquisition(path: str | Path, index: int):
+        if index < 0:
+            raise ExecutionError("Spectrum index cannot be negative.")
         import h5py
+
         from .spectrum_correction_codec import read_envelope
 
         with h5py.File(path, "r") as file:
             key = f"spectra/{index}"
             if key not in file:
                 return None
-            point_key = f"points/{index}"
-            if point_key not in file or not file[point_key].attrs.get("complete", False):
-                raise ExecutionError("Spectrum envelope belongs to an uncommitted checkpoint.")
+            Hdf5RunReader._require_committed_spectrum(file, index)
             return read_envelope(file[key])
 
     @staticmethod
     def background_profiles(path: str | Path):
         import h5py
+
         from .spectrum_correction_codec import read_profile
 
         with h5py.File(path, "r") as file:
@@ -199,6 +223,7 @@ class Hdf5RunReader:
     def interference_calibrations(path: str | Path, *, model_id: str | None = None):
         """Read committed models and verify their embedded reference dependencies."""
         import h5py
+
         from .spectrum_correction_codec import read_profile
         from .spectrum_interference_codec import read_interference_calibration
 
@@ -379,7 +404,7 @@ class Hdf5RunReader:
         )
 
     @staticmethod
-    def points(path: str | Path) -> tuple[StoredPoint, ...]:
+    def points(path: str | Path, *, include_details: bool = True) -> tuple[StoredPoint, ...]:
         with Hdf5RunReader._open(path) as file:
             points = file.get("points")
             if points is None:
@@ -387,20 +412,49 @@ class Hdf5RunReader:
             spectra = file.get("spectra", {})
             result: list[StoredPoint] = []
             for name in Hdf5RunReader._committed_point_names(file):
-                group = points[name]
-                result.append(
-                    StoredPoint(
-                        index=int(name),
-                        timestamp_utc=Hdf5RunReader._attribute_text(group.attrs.get("timestamp_utc")),
-                        status=Hdf5RunReader._attribute_text(group.attrs.get("status")) or "unknown",
-                        setpoints=Hdf5RunReader._dataset_json(group, "setpoints_json"),
-                        measurements=Hdf5RunReader._dataset_json(group, "measurements_json"),
-                        metadata=Hdf5RunReader._dataset_json(group, "metadata_json"),
-                        device_states=Hdf5RunReader._dataset_json(group, "device_states_json"),
-                        has_spectrum=name in spectra,
-                    )
-                )
+                result.append(Hdf5RunReader._read_point(points[name], name, spectra, include_details=include_details))
             return tuple(result)
+
+    @staticmethod
+    def point(path: str | Path, index: int) -> StoredPoint:
+        """Read full details of one checkpoint in the committed prefix."""
+        if index < 0:
+            raise ExecutionError("Checkpoint index cannot be negative.")
+        with Hdf5RunReader._open(path) as file:
+            names = Hdf5RunReader._committed_point_names(file, stop_after=index + 1)
+            if index >= len(names):
+                raise ExecutionError(f"Checkpoint {index} is not committed.")
+            name = str(index)
+            return Hdf5RunReader._read_point(file["points"][name], name, file.get("spectra", {}))
+
+    @staticmethod
+    def single_point(path: str | Path) -> StoredPoint:
+        """Read a one-checkpoint artefact without importing a full run first."""
+        with Hdf5RunReader._open(path) as file:
+            names = Hdf5RunReader._committed_point_names(file, stop_after=2)
+            if len(names) != 1:
+                raise ExecutionError("A reference file must contain exactly one checkpoint.")
+            name = names[0]
+            return Hdf5RunReader._read_point(file["points"][name], name, file.get("spectra", {}))
+
+    @staticmethod
+    def _read_point(group, name, spectra, *, include_details=True) -> StoredPoint:
+        metadata = Hdf5RunReader._dataset_json(group, "metadata_json")
+        if not include_details:
+            # Keep the recorded evidence required by spectral post-processing.
+            # Arbitrary additional provenance is loaded on checkpoint selection.
+            metadata = {key: metadata[key] for key in ("raw_recipe_sweep_indices", "spectrum_processing_v1") if key in metadata}
+        return StoredPoint(
+            index=int(name),
+            timestamp_utc=Hdf5RunReader._attribute_text(group.attrs.get("timestamp_utc")),
+            status=Hdf5RunReader._attribute_text(group.attrs.get("status")) or "unknown",
+            setpoints=Hdf5RunReader._dataset_json(group, "setpoints_json"),
+            measurements=Hdf5RunReader._dataset_json(group, "measurements_json"),
+            metadata=metadata,
+            device_states=Hdf5RunReader._dataset_json(group, "device_states_json") if include_details else {},
+            has_spectrum=name in spectra,
+            details_loaded=include_details,
+        )
 
     @staticmethod
     def spectrum_point_count(path: str | Path, index: int) -> int:
@@ -438,23 +492,39 @@ class Hdf5RunReader:
                 return None
             Hdf5RunReader._require_committed_spectrum(file, index)
             group = spectra[str(index)]
-            try:
-                frequencies = tuple(float(value) for value in group["frequency_hz"][:])
-                powers = tuple(float(value) for value in group["power_dbm"][:])
-            except KeyError as exc:
-                raise ExecutionError(f"Spectrum {index} does not contain a complete data axis.") from exc
-            if len(frequencies) != len(powers) or not frequencies:
-                raise ExecutionError(f"Spectrum {index} has a mismatched or empty point count.")
+            frequencies, powers = Hdf5RunReader._read_spectrum_axes(group, f"Spectrum {index}")
             source_count = len(frequencies)
             processed: tuple[float, ...] | None = None
             if "processed_values" in group:
-                processed = tuple(float(value) for value in group["processed_values"][:])
-                if len(processed) != source_count:
+                import numpy as np
+
+                dataset = group["processed_values"]
+                if (not hasattr(dataset, "dtype") or dataset.ndim != 1
+                        or dataset.shape != (source_count,) or dataset.dtype.kind not in "fiu"):
                     raise ExecutionError(
-                        f"Spectrum {index} has a mismatched processed point count."
+                        f"Spectrum {index} processed values must be a matching real numeric vector."
                     )
+                values = dataset[:]
+                if not np.all(np.isfinite(values)):
+                    raise ExecutionError(f"Spectrum {index} processed values contain NaN or infinity.")
+                unit = Hdf5RunReader._attribute_text(group.attrs.get("processed_unit"))
+                operation = Hdf5RunReader._attribute_text(group.attrs.get("processing_operation"))
+                if not unit or not unit.strip() or not operation or not operation.strip() or operation == "none":
+                    raise ExecutionError(f"Spectrum {index} processed values require an explicit unit and operation.")
+                processed = tuple(float(value) for value in values)
             if max_points is not None and max_points > 0 and source_count > max_points:
-                selected = peak_preserving_indices(powers, max_points)
+                if processed is None or max_points < 2:
+                    selected = peak_preserving_indices(powers, max_points)
+                else:
+                    # Both curves share one returned frequency axis. Split
+                    # the interior budget and merge extrema from each unit
+                    # separately: comparing W and dBm magnitudes is invalid.
+                    raw_budget = 2 + (max_points - 2) // 2
+                    processed_budget = max_points - raw_budget + 2
+                    selected = tuple(sorted(
+                        set(peak_preserving_indices(powers, raw_budget))
+                        | set(peak_preserving_indices(processed, processed_budget))
+                    ))
                 frequencies = tuple(frequencies[item] for item in selected)
                 powers = tuple(powers[item] for item in selected)
                 if processed is not None:
@@ -486,7 +556,7 @@ class Hdf5RunReader:
             )
 
     @staticmethod
-    def references(path: str | Path) -> tuple[StoredReference, ...]:
+    def references(path: str | Path, *, metadata_only: bool = False) -> tuple[StoredReference | StoredReferenceSummary, ...]:
         with Hdf5RunReader._open(path) as file:
             container = file.get("references")
             groups: list[tuple[int, Any]] = []
@@ -497,19 +567,28 @@ class Hdf5RunReader:
                 ]
             elif "reference" in file:
                 groups = [(0, file["reference"])]
-            result: list[StoredReference] = []
+            result: list[StoredReference | StoredReferenceSummary] = []
             for index, group in groups:
-                try:
-                    frequencies = tuple(float(value) for value in group["frequency_hz"][:])
-                    powers = tuple(float(value) for value in group["power_dbm"][:])
-                except KeyError as exc:
-                    raise ExecutionError(
-                        f"Reference {index} does not contain a complete spectrum."
-                    ) from exc
-                if len(frequencies) != len(powers) or not frequencies:
-                    raise ExecutionError(
-                        f"Reference {index} has a mismatched or empty point count."
-                    )
+                from .reference_transaction import require_committed_reference
+
+                require_committed_reference(group)
+                if metadata_only:
+                    frequency, power = group.get("frequency_hz"), group.get("power_dbm")
+                    if (frequency is None or power is None or not hasattr(frequency, "dtype")
+                            or not hasattr(power, "dtype") or frequency.ndim != 1 or power.ndim != 1
+                            or frequency.shape != power.shape or frequency.shape[0] < 2
+                            or frequency.dtype.kind not in "fiu" or power.dtype.kind not in "fiu"):
+                        raise ExecutionError(f"Reference {index} has invalid spectrum axes.")
+                    result.append(StoredReferenceSummary(
+                        index, Hdf5RunReader._attribute_text(group.attrs.get("trace_name")) or "TRAC1",
+                        Hdf5RunReader._attribute_text(group.attrs.get("acquired_at_utc")),
+                        Hdf5RunReader._attribute_text(group.attrs.get("kind")) or "single",
+                        int(group.attrs.get("average_count", 1)), int(frequency.shape[0]),
+                        Hdf5RunReader._attribute_text(group.attrs.get("purpose")) or "reference",
+                        Hdf5RunReader._reference_fingerprint(group),
+                    ))
+                    continue
+                frequencies, powers = Hdf5RunReader._read_spectrum_axes(group, f"Reference {index}")
                 result.append(
                     StoredReference(
                         index=index,
@@ -525,6 +604,8 @@ class Hdf5RunReader:
                         average_count=int(group.attrs.get("average_count", 1)),
                         frequencies_hz=frequencies,
                         powers_dbm=powers,
+                        purpose=Hdf5RunReader._attribute_text(group.attrs.get("purpose")) or "reference",
+                configuration_fingerprint=Hdf5RunReader._reference_fingerprint(group),
                     )
                 )
             return tuple(result)
@@ -555,17 +636,10 @@ class Hdf5RunReader:
                 group = file.get("reference")
             if group is None:
                 return None
-            try:
-                frequencies = tuple(float(value) for value in group["frequency_hz"][:])
-                powers = tuple(float(value) for value in group["power_dbm"][:])
-            except KeyError as exc:
-                raise ExecutionError(
-                    f"Reference {index} does not contain a complete spectrum."
-                ) from exc
-            if len(frequencies) != len(powers) or not frequencies:
-                raise ExecutionError(
-                    f"Reference {index} has a mismatched or empty point count."
-                )
+            from .reference_transaction import require_committed_reference
+
+            require_committed_reference(group)
+            frequencies, powers = Hdf5RunReader._read_spectrum_axes(group, f"Reference {index}")
             source_count = len(frequencies)
             if max_points is not None and max_points > 0 and source_count > max_points:
                 selected = peak_preserving_indices(powers, max_points)
@@ -585,7 +659,46 @@ class Hdf5RunReader:
                 average_count=int(group.attrs.get("average_count", 1)),
                 frequencies_hz=frequencies,
                 powers_dbm=powers,
+                purpose=Hdf5RunReader._attribute_text(group.attrs.get("purpose")) or "reference",
+                configuration_fingerprint=Hdf5RunReader._reference_fingerprint(group),
             )
+
+    @staticmethod
+    def _read_spectrum_axes(group: Any, label: str) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        import numpy as np
+
+        frequency = group.get("frequency_hz")
+        power = group.get("power_dbm")
+        if frequency is None or power is None:
+            raise ExecutionError(f"{label} does not contain complete frequency and power axes.")
+        if frequency.ndim != 1 or power.ndim != 1:
+            raise ExecutionError(f"{label} axes must be one-dimensional.")
+        if frequency.shape != power.shape or frequency.shape[0] < 2:
+            raise ExecutionError(f"{label} requires at least two matching frequency and power samples.")
+        if frequency.dtype.kind not in "fiu" or power.dtype.kind not in "fiu":
+            raise ExecutionError(f"{label} axes must contain real numeric values.")
+        frequencies, powers = frequency[:], power[:]
+        if not np.isfinite(frequencies).all() or not np.isfinite(powers).all():
+            raise ExecutionError(f"{label} contains NaN or infinity.")
+        if not (frequencies[1:] > frequencies[:-1]).all():
+            raise ExecutionError(f"{label} frequency axis must be strictly increasing.")
+        return tuple(float(value) for value in frequencies), tuple(float(value) for value in powers)
+
+    @staticmethod
+    def _reference_fingerprint(group):
+        source = Hdf5RunReader._attribute_text(group.attrs.get("acquisition_metadata_json"))
+        if not source:
+            return None
+        try:
+            metadata = json.loads(source)
+            if not isinstance(metadata, dict):
+                raise ValueError("Expected an acquisition metadata object.")
+            fingerprint = metadata.get("configuration_fingerprint")
+            if fingerprint is not None and (not isinstance(fingerprint, str) or not fingerprint):
+                raise ValueError("Invalid analyzer configuration fingerprint.")
+            return fingerprint
+        except (TypeError, ValueError) as exc:
+            raise ExecutionError("Reference acquisition metadata is malformed.") from exc
 
     @staticmethod
     def _events(file: Any) -> tuple[StoredEvent, ...]:
@@ -622,22 +735,23 @@ class Hdf5RunReader:
             raise ExecutionError(f"Cannot read HDF5 file {Path(path).name}: {exc}") from exc
 
     @staticmethod
-    def _committed_point_names(file: Any) -> tuple[str, ...]:
+    def _committed_point_names(file: Any, *, stop_after: int | None = None) -> tuple[str, ...]:
         """Expose the contiguous committed prefix, excluding interrupted work."""
         points = file.get("points")
         if points is None:
             return ()
         names: list[str] = []
-        for name in Hdf5RunReader._numeric_names(points):
-            if int(name) != len(names) or not bool(points[name].attrs.get("complete", False)):
+        while stop_after is None or len(names) < stop_after:
+            name = str(len(names))
+            point = points.get(name)
+            if point is None or not bool(point.attrs.get("complete", False)):
                 break
             names.append(name)
         return tuple(names)
 
     @staticmethod
     def _require_committed_spectrum(file: Any, index: int) -> None:
-        point = file.get(f"points/{index}")
-        if point is None or not bool(point.attrs.get("complete", False)):
+        if index < 0 or index >= len(Hdf5RunReader._committed_point_names(file, stop_after=index + 1)):
             raise ExecutionError(f"Spectrum {index} belongs to an uncommitted checkpoint.")
 
     @staticmethod

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import csv
 import re
 
 
@@ -28,7 +29,7 @@ ANRITSU_SIGNAL_GENERATOR_OPTIONS = frozenset({"020", "120", "021", "121"})
 
 
 def parse_anritsu_option_response(response: str) -> tuple[str, ...]:
-    """Normalize option identifiers returned by the IEEE-488.2 ``*OPT?`` query."""
+    """Normalize an explicit list of option identifiers (not a device catalogue)."""
 
     value = response.strip().upper()
     if not value or value in {"0", "NONE", "NO OPTION", "NO OPTIONS"}:
@@ -43,6 +44,38 @@ def parse_anritsu_option_response(response: str) -> tuple[str, ...]:
         if normalized not in options:
             options.append(normalized)
     return tuple(options)
+
+
+def parse_anritsu_hardware_catalog(response: str, *, native: bool = False) -> tuple[str, ...]:
+    """Parse installed hardware options, excluding catalogue entries marked OFF.
+
+    Mainframe Remote Control 4-116: count followed by number/switch/name triples.
+    Native OPTINFO? HARD (6-75) returns triples, optionally preceded by a count.
+    """
+    columns = next(csv.reader([response], strict=True))
+    columns = [column.strip() for column in columns]
+    if columns == ["0"]:
+        return ()
+    if not native or len(columns) % 3 == 1:
+        if not columns or not columns[0].isdigit():
+            raise ValueError("Anritsu hardware catalogue has no valid entry count.")
+        count = int(columns.pop(0))
+        if len(columns) != count * 3:
+            raise ValueError("Anritsu hardware catalogue count does not match its entries.")
+    elif not columns or len(columns) % 3:
+        raise ValueError("Anritsu hardware catalogue contains incomplete entries.")
+    installed = []
+    for offset in range(0, len(columns), 3):
+        number, switch, name = columns[offset:offset + 3]
+        if not number.isascii() or not number.isdigit() or not 0 <= int(number) <= 999 or not name:
+            raise ValueError("Anritsu hardware catalogue contains an invalid option entry.")
+        switch = switch.upper()
+        if switch not in {"ON", "OFF", "1", "0"}:
+            raise ValueError("Anritsu hardware catalogue contains an unknown option switch.")
+        code = f"{int(number):03d}"
+        if switch in {"ON", "1"} and code not in installed:
+            installed.append(code)
+    return tuple(installed)
 
 
 def frequency_option_for(options: tuple[str, ...]) -> AnritsuFrequencyOption | None:

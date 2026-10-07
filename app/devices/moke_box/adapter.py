@@ -7,7 +7,7 @@ import logging
 from collections.abc import Callable
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Protocol
 
 from app.devices.base import DeviceAdapter
@@ -107,6 +107,7 @@ class MokeBoxAdapter(DeviceAdapter):
         self._output_changed = False
         self._changed_channels: set[int] = set()
         self._active_profile = config.control_profile
+        self._operation_deadline: float | None = None
 
     @property
     def control_profile(self):
@@ -134,10 +135,29 @@ class MokeBoxAdapter(DeviceAdapter):
         return self._safe_target_confirmed
 
     @contextmanager
+    def operation_timeout(self, duration_s: float):
+        if not math.isfinite(duration_s) or duration_s <= 0:
+            raise ValueError("MOKE operation timeout must be finite and positive.")
+        previous = self._operation_deadline
+        deadline = time.monotonic() + duration_s
+        self._operation_deadline = deadline if previous is None else min(previous, deadline)
+        scope = getattr(self._transport, "operation_timeout", None)
+        try:
+            with scope(duration_s) if callable(scope) else nullcontext():
+                yield
+        finally:
+            self._operation_deadline = previous
+
+    @contextmanager
     def io_timeout(self, timeout_s: float):
         if not math.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError("MOKE I/O timeout must be finite and positive.")
         self._require_binary_transport()
+        if self._operation_deadline is not None:
+            remaining = self._operation_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("MOKE operation deadline expired before I/O.")
+            timeout_s = min(timeout_s, remaining)
         scope = getattr(self._transport, "io_timeout", None)
         if callable(scope):
             with scope(timeout_s):
@@ -439,8 +459,14 @@ class MokeBoxAdapter(DeviceAdapter):
 
     def _write_vout(
         self, channel: int, voltage_v: float, *, deadline: float,
-        cancel: threading.Event | None, stopping: bool,
+        cancel: threading.Event | None, stopping: bool, recovery_from_v: float | None = None,
     ) -> float:
+        if recovery_from_v is not None:
+            profile = self.control_profile
+            if (profile is None or profile.kepco_mode != "dac_test"
+                    or not math.isfinite(recovery_from_v) or not -10 <= recovery_from_v <= 10
+                    or voltage_v * recovery_from_v < 0 or abs(voltage_v) >= abs(recovery_from_v)):
+                raise SafetyViolation("DAC recovery must strictly reduce voltage magnitude toward zero.")
         transport = self._require_binary_transport()
         self._output_changed = True
         self._changed_channels.add(channel)
@@ -471,9 +497,17 @@ class MokeBoxAdapter(DeviceAdapter):
             with self.io_timeout(remaining):
                 values = self._read_vouts_from_transport()
             actual = values[channel]
-            if abs(actual - voltage_v) <= VOUT_READBACK_TOLERANCE_V:
-                return actual
             outside_envelope = not profile.minimum_v <= actual <= profile.maximum_v
+            if recovery_from_v is not None:
+                # A transient value outside the working envelope is allowed only
+                # along the already-existing test DAC voltage's path to zero.
+                if (not math.isfinite(actual) or abs(actual) > abs(recovery_from_v) + 1e-12
+                        or actual * recovery_from_v < 0):
+                    raise ConfirmedRampError("DAC recovery readback did not move toward zero.")
+                outside_envelope = False
+            progressed = recovery_from_v is None or abs(actual) < abs(recovery_from_v)
+            if progressed and not outside_envelope and abs(actual - voltage_v) <= VOUT_READBACK_TOLERANCE_V:
+                return actual
             exhausted = time.monotonic() + VOUT_CONFIRMATION_INTERVAL_S >= confirmation_deadline
             if outside_envelope or exhausted:
                 break
@@ -499,7 +533,9 @@ class MokeBoxAdapter(DeviceAdapter):
             plan, profile = self._voltage_plan, self.control_profile
             if type(channel) is not int or not self._armed or plan is None or profile is None or channel != profile.channel:
                 raise SafetyViolation("MOKE voltage trajectory is not armed for this channel.")
-            plan.validate(profile)
+            # Configure and arm validate every immutable target. At each point,
+            # recheck the binding/envelope and validate only the selected value.
+            plan.validate_envelope(profile)
             if self._next_target >= len(plan.targets_v) or voltage_v != plan.targets_v[self._next_target]:
                 raise SafetyViolation("MOKE target is not the next point in the armed trajectory.")
             applied = plan.applied_voltage(voltage_v)
@@ -563,13 +599,27 @@ class MokeBoxAdapter(DeviceAdapter):
             duration = min(duration, deadline_s)
         deadline = time.monotonic() + duration
         absolute_deadline = deadline if deadline_s is not None else float("inf")
+        if self._operation_deadline is not None:
+            absolute_deadline = min(absolute_deadline, self._operation_deadline)
+            deadline = min(deadline, absolute_deadline)
+            duration = min(duration, deadline - time.monotonic())
         try:
+            if duration <= 0:
+                raise TimeoutError("MOKE operation deadline expired before ramp readback.")
             with self.io_timeout(duration):
                 actual = self._read_vouts_from_transport()[profile.channel]
         except Exception as exc:
             self._fault_and_close(exc, "MOKE ramp initial readback failed")
-        if not profile.minimum_v <= actual <= profile.maximum_v:
-            raise SafetyViolation("Current DAC value is outside the qualified station envelope.")
+        outside = not profile.minimum_v <= actual <= profile.maximum_v
+        recovering = (outside and profile.kepco_mode == "dac_test" and target_v == profile.safe_v
+                      and math.isfinite(actual) and -10 <= actual <= 10)
+        if outside and not recovering:
+            raise SafetyViolation(
+                f"Current DAC value is outside the qualified station envelope: "
+                f"VOUT {profile.channel} readback {actual:+.9g} V; "
+                f"approved range [{profile.minimum_v:+.9g}, {profile.maximum_v:+.9g}] V; "
+                f"requested target {target_v:+.9g} V. Ramp was not started."
+            )
         initial = actual
         began = time.monotonic()
         last_report = float("-inf")
@@ -591,10 +641,17 @@ class MokeBoxAdapter(DeviceAdapter):
 
         phase = "zeroing" if stopping else "ramping"
         report(phase, force=True)
+        if (stopping and profile.channel not in self._changed_channels
+                and math.isclose(actual, target_v, rel_tol=0, abs_tol=1e-12)):
+            # A fresh hardware readback already confirms the qualified safe target.
+            # Repeated cleanup must not issue another SET for an unchanged zero.
+            # An uncertain earlier write still requires an explicit safe SET:
+            # its delayed completion could otherwise overwrite this readback.
+            return actual
 
         def update_target():
             nonlocal target_v, initial, began, deadline
-            if stopping or retarget is None:
+            if stopping or recovering or retarget is None:
                 return False
             next_target = retarget()
             if next_target is None or next_target == target_v:
@@ -620,8 +677,12 @@ class MokeBoxAdapter(DeviceAdapter):
                 raise TimeoutError("MOKE voltage ramp exceeded its qualified deadline.")
             delta = target_v - actual
             next_v = target_v if abs(delta) <= step else actual + math.copysign(step, delta)
-            next_v = envelope.applied_voltage(next_v)
-            if next_v == actual and abs(target_v - actual) > 0.001:
+            if recovering and not profile.minimum_v <= next_v <= profile.maximum_v:
+                from app.devices.moke_box.protocol import encode_voltage, decode_voltage
+                next_v = decode_voltage(*encode_voltage(next_v))
+            else:
+                next_v = envelope.applied_voltage(next_v)
+            if next_v == actual and not math.isclose(target_v, actual, rel_tol=0, abs_tol=1e-12):
                 raise DeviceError("MOKE DAC ramp cannot progress within its limits.")
             delay = max(profile.step_interval_s, abs(next_v - actual) / profile.maximum_slew_v_s)
             if not profile.simulation:
@@ -644,14 +705,16 @@ class MokeBoxAdapter(DeviceAdapter):
             try:
                 with self.io_timeout(remaining):
                     actual = self._write_vout(profile.channel, next_v, deadline=deadline,
-                                              cancel=cancel, stopping=stopping)
+                                              cancel=cancel, stopping=stopping,
+                                              recovery_from_v=actual if recovering else None)
             except (ConfirmedRampError, RunInterrupted):
                 report(phase, force=True)
                 raise
             except Exception as exc:
                 report(phase, force=True)  # Preserve the last confirmed sample, never fabricate zero.
                 self._fault_and_close(exc, "MOKE ramp transport failed")
-            reached = abs(actual - target_v) <= 10 / 32767
+            tolerance = 10 / 32767 if stopping else VOUT_READBACK_TOLERANCE_V
+            reached = next_v == target_v and abs(actual - target_v) <= tolerance
             report(phase, force=reached)
             if reached:
                 if not profile.simulation and settling_s:
@@ -674,7 +737,7 @@ class MokeBoxAdapter(DeviceAdapter):
                         raise TimeoutError("MOKE settling exceeded its qualified deadline.")
                     with self.io_timeout(remaining):
                         confirmed = self._read_vouts_from_transport()[profile.channel]
-                    if abs(confirmed - actual) > 0.001:
+                    if abs(confirmed - target_v) > tolerance:
                         raise ConfirmedRampError("MOKE DAC changed during settling time.")
                     actual = confirmed
                     report("settling", force=True)

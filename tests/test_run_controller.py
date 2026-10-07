@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from contextlib import nullcontext
 from unittest.mock import patch
 
 # This module creates only QtCore objects, but offscreen avoids a platform
@@ -28,10 +29,15 @@ from tests.helpers import loaded_settings
 
 
 class _RunLeaseAdapter(DeviceAdapter):
+    def io_timeout(self, timeout_s):
+        assert timeout_s > 0
+        return nullcontext()  # In-memory fixture has no VISA session.
+
     def __init__(self) -> None:
         super().__init__()
         self.connect_count = 0
         self.emergency_off_count = 0
+        self.abort_count = 0
         self.disconnect_count = 0
 
     def connect(self) -> DeviceIdentity:
@@ -49,6 +55,11 @@ class _RunLeaseAdapter(DeviceAdapter):
     def emergency_off(self) -> None:
         self.emergency_off_count += 1
         self._state = DeviceState.OUTPUT_OFF
+
+    def abort_acquisition(self) -> bool:
+        self.abort_count += 1
+        self._state = DeviceState.VERIFIED
+        return True
 
 
 class RunControllerTests(unittest.TestCase):
@@ -102,6 +113,7 @@ root:
       mode: current
       level: "1 mA"
       compliance: "67 mV"
+      source_range: "10 mA"
     - id: rigol
       type: configure_rigol
       channel: 1
@@ -142,6 +154,7 @@ root:
                 self.assertFalse(failures)
                 self.assertEqual(len(finished), 1)
                 result = finished[0]
+                self.assertIsNone(result["result"].error)
                 self.assertEqual(result["result"].stored_points, 1)  # type: ignore[index,union-attr]
                 self.assertFalse(controller.running)
                 files = list((root / "measurements").glob("*.h5"))
@@ -172,6 +185,7 @@ root:
       mode: current
       level: "100 uA"
       compliance: "100 mV"
+      source_range: "10 mA"
     - id: keithley-on
       type: set_keithley_output
       channel: A
@@ -262,7 +276,9 @@ finally:
             timeout.start(5_000)
             loop.exec()
             timeout.stop()
-            self.assertEqual(completed, [()])
+            self.assertEqual(len(completed), 1)
+            self.assertTrue(all("Kepco power state remains unknown" in error for error in completed[0]))
+            self.assertTrue(completed[0])
         finally:
             controller.close()
 
@@ -271,11 +287,12 @@ finally:
         settings = simulated_station_settings(loaded_settings())
         controller._run_settings = settings
         controller._run_simulation = True
+        controller._run_emergency_devices = frozenset({"anritsu"})
         with patch.object(controller, "request_emergency_stop") as emergency:
             controller._worker_event("watchdog_timeout", {"node_id": "slow"})
             controller._worker_event("watchdog_timeout", {"node_id": "slow"})
 
-        emergency.assert_called_once_with(settings, simulation=True)
+        emergency.assert_called_once_with(settings, simulation=True, device_names=frozenset({"anritsu"}), anritsu_rf_output=False)
 
     def test_run_controller_reuses_a_provided_connected_session(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -323,7 +340,8 @@ finally:
                 self.assertFalse(failures)
                 self.assertEqual(len(finished), 1)
                 self.assertEqual(adapter.connect_count, 1)
-                self.assertGreaterEqual(adapter.emergency_off_count, 1)
+                self.assertGreaterEqual(adapter.abort_count, 1)
+                self.assertEqual(adapter.emergency_off_count, 0)
                 self.assertGreaterEqual(adapter.disconnect_count, 1)
             finally:
                 controller.close()

@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from app.devices.registry import built_in_device_registry
-from app.domain.errors import SafetyViolation
+from app.domain.errors import ConfigurationError, SafetyViolation
 from app.domain.quantities import QuantityError
 from app.engine.compiler import RecipeCompiler
 from app.engine.policy import ExecutionPolicy
@@ -29,6 +29,7 @@ from app.ui.measurement_tree.model import MeasurementTreeModel, MeasurementTreeR
 from app.ui.recipes.common_dialogs import ActionNodeEditorDialog
 from app.ui.shell.main_window import simulated_station_settings
 from tests.helpers import simulation_settings
+from tests.test_recipe_compiler import authored_source
 
 
 @dataclass
@@ -37,7 +38,7 @@ class MemoryWriter:
     events: list[tuple[str, dict[str, object], str]] = field(default_factory=list)
     status: str | None = None
 
-    def append(self, point: object, trace: object = None) -> int:
+    def append(self, point: object, trace: object = None, *, device_states=None) -> int:
         self.points.append((point, trace))
         return len(self.points) - 1
 
@@ -65,6 +66,7 @@ root:
       mode: current
       level: 0 A
       compliance: 67 mV
+      source_range: 10 mA
     - id: current-sweep
       type: sweep
       target: keithley.B.current
@@ -98,6 +100,7 @@ root:
       mode: current
       level: 0 A
       compliance: 67 mV
+      source_range: 10 mA
     - id: outer-sweep
       type: sweep
       target: keithley.B.compliance_voltage
@@ -299,6 +302,7 @@ root:
   id: root
   type: sequence
   children:
+    - {{id: initial-b, type: configure_keithley, channel: B, mode: current, level: '0 A', compliance: '67 mV', source_range: '10 mA'}}
     - id: swp
       type: sweep
       target: keithley.B.current
@@ -377,6 +381,7 @@ root:
   id: root
   type: sequence
   children:
+    - {id: initial-b, type: configure_keithley, channel: B, mode: current, level: '0 A', compliance: '67 mV', source_range: '10 mA', settling_time: '40 ms'}
     - id: keithley-axis
       type: sequence
       device_module: keithley
@@ -388,6 +393,7 @@ root:
         source_mode: current
         source_level: 0 A
         compliance: 67 mV
+        source_range: 10 mA
         settling_time: 40 ms
       parameter_actions:
         - parameter_id: source.level
@@ -435,6 +441,7 @@ root:
       mode: current
       level: 0 A
       compliance: 67 mV
+      source_range: 10 mA
     - id: current-sweep
       type: sweep
       target: keithley.B.current
@@ -519,6 +526,7 @@ root:
       mode: current
       level: 0 A
       compliance: 67 mV
+      source_range: 10 mA
     - id: current-sweep
       type: sweep
       target: keithley.B.current
@@ -614,6 +622,7 @@ root:
       mode: current
       level: 0 A
       compliance: 67 mV
+      source_range: 10 mA
     - id: current-sweep
       type: sweep
       target: keithley.B.current
@@ -667,6 +676,7 @@ root:
       mode: current
       level: 0 A
       compliance: 67 mV
+      source_range: 10 mA
     - id: current-sweep
       type: sweep
       target: keithley.B.current
@@ -712,6 +722,7 @@ root:
       mode: current
       level: 0 A
       compliance: 67 mV
+      source_range: 10 mA
     - id: current-sweep
       type: sweep
       target: keithley.B.current
@@ -766,18 +777,20 @@ def test_keithley_sweep_node_from_generator_creates_explicit_wait_child():
             "nplc": 1.0,
             "settle_time": "150 ms",
             "sense_mode": "2wire",
+            "source_range": "1 mA",
         }
         node = page._sweep_node_from_generator(
             definition,
             segments,
             keithley_options=keithley_options,
         )
-        assert node["type"] == "sweep"
+        assert node["type"] == "sequence"
         children = node["children"]
         assert len(children) == 2
         assert children[0]["type"] == "configure_keithley"
-        assert children[1]["type"] == "wait"
-        assert children[1]["duration"] == "150 ms"
+        assert children[1]["type"] == "sweep"
+        assert children[1]["children"][0]["type"] == "wait"
+        assert children[1]["children"][0]["duration"] == "150 ms"
 
         # Zero settling time should not generate a dummy wait
         keithley_options_zero = dict(keithley_options, settle_time="0 s")
@@ -786,8 +799,9 @@ def test_keithley_sweep_node_from_generator_creates_explicit_wait_child():
             segments,
             keithley_options=keithley_options_zero,
         )
-        assert len(node_zero["children"]) == 1
+        assert len(node_zero["children"]) == 2
         assert node_zero["children"][0]["type"] == "configure_keithley"
+        assert node_zero["children"][1]["children"] == []
     finally:
         page.close()
 
@@ -807,6 +821,7 @@ root:
       mode: current
       level: 100 uA
       compliance: 67 mV
+      source_range: 10 mA
       settling_time: 50 ms
 """
     recipe = parse_recipe_text(source)
@@ -1005,11 +1020,17 @@ root:
     duration: 50 ms
 finally: []
 """)
-    tree_a = normalize_recipe_tree(recipe_empty_finally, built_in_device_registry().sweep_providers())
+    tree_a = normalize_recipe_tree(
+        recipe_empty_finally, built_in_device_registry().sweep_providers(),
+        safe_shutdown_actions=("keithley.outputs_off", "rigol.outputs_off",
+                               "anritsu.rf_off_and_abort", "storage.flush_checkpoint"),
+    )
     model_a = MeasurementTreeModel(tree_a)
     finally_a = tree_a.require("__finally__")
-    assert len(finally_a.children) == 4
-    labels_a = [c.label for c in finally_a.children]
+    assert len(finally_a.children) == 1
+    safeguards_a = tree_a.require("__finally__.automatic_safeguards")
+    assert len(safeguards_a.children) == 4
+    labels_a = [c.label for c in safeguards_a.children]
     assert "Keithley A + B · OUTPUT OFF" in labels_a
     assert "Rigol CH1 + CH2 · OUTPUT OFF" in labels_a
     assert "Anritsu RF · OUTPUT OFF + abort" in labels_a
@@ -1019,7 +1040,7 @@ finally: []
     k_off_idx = model_a.index_for_semantic_id("__finally__.keithley_outputs_off")
     assert model_a.data(model_a.index(k_off_idx.row(), 1, k_off_idx.parent()), Qt.ItemDataRole.DisplayRole) == "OFF"
     flush_idx = model_a.index_for_semantic_id("__finally__.storage_flush_checkpoint")
-    assert model_a.data(model_a.index(flush_idx.row(), 1, flush_idx.parent()), Qt.ItemDataRole.DisplayRole) in {"Action", "—"}
+    assert model_a.data(model_a.index(flush_idx.row(), 1, flush_idx.parent()), Qt.ItemDataRole.DisplayRole) == "Generated Safety"
 
     # Case B: Authored finally nodes populate under Finally
     recipe_authored_finally = parse_recipe_text("""
@@ -1043,7 +1064,7 @@ finally:
 """)
     tree_b = normalize_recipe_tree(recipe_authored_finally, built_in_device_registry().sweep_providers())
     finally_b = tree_b.require("__finally__")
-    assert len(finally_b.children) == 2
+    assert len(finally_b.children) == 3
     assert finally_b.children[0].semantic_id == "keithley-off-auth"
     assert finally_b.children[0].label == "Keithley B · OUTPUT OFF"
     assert finally_b.children[1].semantic_id == "keithley-ramp-auth"
@@ -1054,10 +1075,19 @@ def test_untitled_sweep_yml_audit_and_dry_run_simulation(tmp_path: Path) -> None
     """Audit recipes/untitled_sweep.yml for safety, tree presentation, and dry run execution."""
     recipe_path = Path("recipes/untitled_sweep.yml")
     assert recipe_path.exists()
-    recipe = parse_recipe_text(recipe_path.read_text(encoding="utf-8"))
+    original_source = recipe_path.read_text(encoding="utf-8")
+    raw_settings = SettingsRepository(".config/settings.yml").load().settings
+    settings = simulated_station_settings(raw_settings)
+    with pytest.raises(ConfigurationError, match="explicit.*baseline"):
+        RecipeCompiler(settings, outputs_forced_off=True).compile(parse_recipe_text(original_source))
+    # The operator reviews and inserts these visible initial settings; the
+    # compiler must never recover them implicitly from a stored snapshot.
+    recipe = parse_recipe_text(authored_source(original_source))
 
-    # Verify semantic tree presentation
-    tree = normalize_recipe_tree(recipe, built_in_device_registry().sweep_providers())
+    # Verify semantic tree presentation against the actual compiled manifest.
+    plan = RecipeCompiler(settings, outputs_forced_off=True).compile(recipe)
+    tree = normalize_recipe_tree(recipe, built_in_device_registry().sweep_providers(),
+                                 safe_shutdown_actions=plan.safe_shutdown_actions)
     model = MeasurementTreeModel(tree)
 
     # 1. Keithley B OUTPUT ON is explicitly surfaced in tree
@@ -1069,15 +1099,14 @@ def test_untitled_sweep_yml_audit_and_dry_run_simulation(tmp_path: Path) -> None
 
     # 2. Finally is expandable with all guaranteed shutdown rows
     finally_node = tree.require("__finally__")
-    assert len(finally_node.children) == 4
+    assert len(finally_node.children) == 1
+    assert len(tree.require("__finally__.automatic_safeguards").children) == len(plan.safe_shutdown_actions)
     k_off = tree.require("__finally__.keithley_outputs_off")
     assert k_off.label == "Keithley A + B · OUTPUT OFF"
     k_off_idx = model.index_for_semantic_id("__finally__.keithley_outputs_off")
     assert model.data(model.index(k_off_idx.row(), 1, k_off_idx.parent()), Qt.ItemDataRole.DisplayRole) == "OFF"
 
     # 3. Compile against station settings and execute dry run
-    raw_settings = SettingsRepository(".config/settings.yml").load().settings
-    settings = simulated_station_settings(raw_settings)
     plan = RecipeCompiler(settings, outputs_forced_off=True).compile(recipe)
     assert len(plan.actions) > 0
 

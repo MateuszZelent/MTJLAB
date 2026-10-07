@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
-from app.domain.errors import ConfigurationError
+from app.domain.errors import ConfigurationError, ExecutionError
 from app.domain.quantities import Quantity, parse_quantity
 
 
@@ -21,7 +21,25 @@ class SweepSegment:
     spacing: str = "linear"
 
 
-def generate_segment_points(segment: SweepSegment) -> tuple[Quantity, ...]:
+def _point_count(value: object) -> int:
+    if type(value) is not int or value < 2:
+        raise ConfigurationError("Sweep segment points must be an integer >= 2.")
+    return value
+
+
+def _step_count(start: float, stop: float, step: float) -> int:
+    distance = abs(stop - start)
+    ratio = distance / step
+    if not math.isfinite(distance) or not math.isfinite(ratio):
+        raise ConfigurationError("Sweep span/step cannot produce a finite point count.")
+    if distance == 0:
+        return 1
+    nearest = round(ratio)
+    intervals = nearest if nearest >= 1 and math.isclose(ratio, nearest, rel_tol=1e-12, abs_tol=0.0) else max(1, math.ceil(ratio))
+    return intervals + 1
+
+
+def generate_segment_points(segment: SweepSegment, *, cancellation_requested: Callable[[], bool] | None = None) -> tuple[Quantity, ...]:
     """Generate exact inclusive points for one interval.
 
     A segment uses either an explicit number of points or a positive linear
@@ -36,41 +54,45 @@ def generate_segment_points(segment: SweepSegment) -> tuple[Quantity, ...]:
     if segment.spacing not in {"linear", "log"}:
         raise ConfigurationError("Sweep segment spacing must be linear or log.")
     if segment.points is not None:
-        if not isinstance(segment.points, int) or segment.points < 2:
-            raise ConfigurationError("Sweep segment points must be an integer >= 2.")
-        if segment.spacing == "linear":
-            delta = (segment.stop.si_value - segment.start.si_value) / (segment.points - 1)
-            return tuple(
-                Quantity(segment.start.si_value + index * delta, segment.start.dimension)
-                for index in range(segment.points)
-            )
-        if segment.start.si_value <= 0 or segment.stop.si_value <= 0:
+        _point_count(segment.points)
+        if segment.points > 1_000_000:
+            raise ConfigurationError("A sweep segment exceeds the 1,000,000 point generator limit.")
+        if segment.spacing == "log" and (segment.start.si_value <= 0 or segment.stop.si_value <= 0):
             raise ConfigurationError("A logarithmic sweep segment requires positive endpoints.")
-        ratio = (segment.stop.si_value / segment.start.si_value) ** (1 / (segment.points - 1))
-        return tuple(
-            Quantity(segment.start.si_value * ratio**index, segment.start.dimension)
-            for index in range(segment.points)
-        )
+        start, stop = segment.start.si_value, segment.stop.si_value
+        log_start, log_stop = (math.log(start), math.log(stop)) if segment.spacing == "log" else (0.0, 0.0)
+        values = []
+        for index in range(segment.points):
+            if index % 256 == 0 and cancellation_requested is not None and cancellation_requested():
+                raise ExecutionError("Sweep generation was cancelled.")
+            fraction = index / (segment.points - 1)
+            value = start if index == 0 else stop if index == segment.points - 1 else (
+                (1 - fraction) * start + fraction * stop if segment.spacing == "linear"
+                else math.exp((1 - fraction) * log_start + fraction * log_stop)
+            )
+            if not math.isfinite(value) or (start != stop and values and value == values[-1].si_value):
+                raise ConfigurationError("Sweep endpoints/count cannot produce finite distinct SI values.")
+            values.append(Quantity(value, segment.start.dimension))
+        return tuple(values)
 
     assert segment.step is not None
     if segment.spacing != "linear":
         raise ConfigurationError("A logarithmic sweep segment requires a point count, not a step.")
     if segment.step.dimension != segment.start.dimension or segment.step.si_value <= 0:
         raise ConfigurationError("Sweep segment step must be positive and use the sweep dimension.")
+    count = _step_count(segment.start.si_value, segment.stop.si_value, segment.step.si_value)
+    if count > 1_000_000:
+        raise ConfigurationError("A sweep segment exceeds the 1,000,000 point generator limit.")
     direction = 1.0 if segment.stop.si_value >= segment.start.si_value else -1.0
-    step = direction * segment.step.si_value
-    values = [segment.start.si_value]
-    while True:
-        candidate = values[-1] + step
-        if (direction > 0 and candidate >= segment.stop.si_value) or (
-            direction < 0 and candidate <= segment.stop.si_value
-        ):
-            break
-        values.append(candidate)
-        if len(values) > 1_000_000:
-            raise ConfigurationError("A sweep segment exceeds the 1,000,000 point generator limit.")
-    if not math.isclose(values[-1], segment.stop.si_value, rel_tol=1e-12, abs_tol=1e-15):
+    values = []
+    for index in range(max(1, count - 1)):
+        if index % 256 == 0 and cancellation_requested is not None and cancellation_requested():
+            raise ExecutionError("Sweep generation was cancelled.")
+        values.append(segment.start.si_value + index * direction * segment.step.si_value)
+    if count > 1:
         values.append(segment.stop.si_value)
+    if any(not math.isfinite(value) for value in values) or any(a == b for a, b in zip(values, values[1:])):
+        raise ConfigurationError("Sweep step cannot produce finite distinct SI values.")
     return tuple(Quantity(value, segment.start.dimension) for value in values)
 
 
@@ -79,13 +101,14 @@ def generate_sweep_points(
     dimension: str,
     *,
     deduplicate_boundaries: bool = True,
+    cancellation_requested: Callable[[], bool] | None = None,
 ) -> tuple[Quantity, ...]:
     """Build one axis from arbitrary visual intervals, preserving stage order."""
 
     return tuple(
         point
         for stage in generate_sweep_stage_points(
-            segments, dimension, deduplicate_boundaries=deduplicate_boundaries
+            segments, dimension, deduplicate_boundaries=deduplicate_boundaries, cancellation_requested=cancellation_requested
         )
         for point in stage
     )
@@ -104,6 +127,9 @@ def estimate_sweep_point_count(
     for index, raw in enumerate(segments):
         if not isinstance(raw, dict):
             raise ConfigurationError(f"sweep.segments[{index}] must be a mapping.")
+        unknown = set(raw) - {"value", "start", "stop", "points", "step", "spacing"}
+        if unknown:
+            raise ConfigurationError(f"sweep.segments[{index}] has unknown fields: {', '.join(sorted(unknown))}.")
         if "value" in raw:
             if any(
                 key in raw for key in ("start", "stop", "points", "step", "spacing")
@@ -129,11 +155,7 @@ def estimate_sweep_point_count(
                     "Sweep segment spacing must be linear or log."
                 )
             if has_points:
-                count = int(raw["points"])
-                if count < 2:
-                    raise ConfigurationError(
-                        "Sweep segment points must be an integer >= 2."
-                    )
+                count = _point_count(raw["points"])
                 if spacing == "log" and (
                     current_start.si_value <= 0 or current_stop.si_value <= 0
                 ):
@@ -148,12 +170,7 @@ def estimate_sweep_point_count(
                 step = parse_quantity(raw["step"], dimension)
                 if step.si_value <= 0:
                     raise ConfigurationError("Sweep segment step must be positive.")
-                distance = abs(current_stop.si_value - current_start.si_value)
-                count = (
-                    1
-                    if math.isclose(distance, 0.0, abs_tol=1e-15)
-                    else math.ceil(distance / step.si_value) + 1
-                )
+                count = _step_count(current_start.si_value, current_stop.si_value, step.si_value)
             is_single = False
         if (
             deduplicate_boundaries
@@ -162,8 +179,8 @@ def estimate_sweep_point_count(
             and math.isclose(
                 previous_stop.si_value,
                 current_start.si_value,
-                rel_tol=1e-12,
-                abs_tol=1e-15,
+                rel_tol=0.0,
+                abs_tol=0.0,
             )
         ):
             count -= 1
@@ -179,12 +196,18 @@ def generate_sweep_stage_points(
     dimension: str,
     *,
     deduplicate_boundaries: bool = True,
+    cancellation_requested: Callable[[], bool] | None = None,
 ) -> tuple[tuple[Quantity, ...], ...]:
     """Generate point collections per stage using the runner's exact semantics."""
 
+    segments = tuple(segments)
+    # Apply the same field/count validation to direct generator callers.
+    estimate_sweep_point_count(segments, dimension, deduplicate_boundaries=deduplicate_boundaries)
     values: list[Quantity] = []
     stages: list[tuple[Quantity, ...]] = []
     for index, raw in enumerate(segments):
+        if cancellation_requested is not None and cancellation_requested():
+            raise ExecutionError("Sweep generation was cancelled.")
         if not isinstance(raw, dict):
             raise ConfigurationError(f"sweep.segments[{index}] must be a mapping.")
         is_single = "value" in raw
@@ -210,18 +233,18 @@ def generate_sweep_stage_points(
                 segment = SweepSegment(
                     start=parse_quantity(raw["start"], dimension),
                     stop=parse_quantity(raw["stop"], dimension),
-                    points=int(raw["points"]) if has_points else None,
+                    points=_point_count(raw["points"]) if has_points else None,
                     step=parse_quantity(raw["step"], dimension) if has_step else None,
                     spacing=str(raw.get("spacing", "linear")),
                 )
             except (KeyError, TypeError, ValueError) as exc:
                 raise ConfigurationError(f"Invalid sweep.segments[{index}]: {exc}") from exc
-            generated = generate_segment_points(segment)
+            generated = generate_segment_points(segment, cancellation_requested=cancellation_requested)
         if values and not is_single and deduplicate_boundaries and math.isclose(
             values[-1].si_value,
             generated[0].si_value,
-            rel_tol=1e-12,
-            abs_tol=1e-15,
+            rel_tol=0.0,
+            abs_tol=0.0,
         ):
             generated = generated[1:]
         values.extend(generated)

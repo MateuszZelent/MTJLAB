@@ -128,6 +128,7 @@ class MeasurementTreeView(TreeView):
         self._dragged_semantic_id: str | None = None
         self._drop_target: tuple[str, TreeDropPlacement] | None = None
         self._selection_model = None
+        self._collapsed_before_reset: set[str] = set()
         self._user_resized_columns = False
         self._user_column_widths: dict[int, int] = {}
         self._updating_column_widths = False
@@ -232,13 +233,9 @@ class MeasurementTreeView(TreeView):
                 and self.model() is not None
                 and self.model().hasChildren(index)
             ):
-                level = 0
-                parent = index.parent()
-                while parent.isValid():
-                    level += 1
-                    parent = parent.parent()
-                branch_left = level * self.indentation()
-                branch_right = (level + 1) * self.indentation()
+                # The visible gutter moves with horizontal scrolling.
+                branch_right = self.visualRect(index.siblingAtColumn(0)).left()
+                branch_left = branch_right - self.indentation()
                 if branch_left <= pos.x() < branch_right:
                     if self.isExpanded(index):
                         self.collapse(index)
@@ -261,6 +258,13 @@ class MeasurementTreeView(TreeView):
         return model if isinstance(model, MeasurementTreeModel) else None
 
     def setModel(self, model) -> None:  # noqa: N802
+        previous = self.tree_model
+        if previous is not None:
+            previous.modelAboutToBeReset.disconnect(self._remember_expansion)
+            previous.modelReset.disconnect(self._restore_expansion)
+        self._follow_timer.stop()
+        self._pending_follow_semantic_id = None
+        self._collapsed_before_reset.clear()
         if self._selection_model is not None:
             try:
                 self._selection_model.currentChanged.disconnect(self._emit_semantic_selection)
@@ -270,7 +274,8 @@ class MeasurementTreeView(TreeView):
         super().setModel(model)
         if isinstance(model, MeasurementTreeModel):
             model.set_read_only(self._interaction_mode is TreeInteractionMode.READ_ONLY)
-            model.modelReset.connect(self._expand_all_after_reset)
+            model.modelAboutToBeReset.connect(self._remember_expansion)
+            model.modelReset.connect(self._restore_expansion)
         self._selection_model = self.selectionModel()
         if self._selection_model is not None:
             self._selection_model.currentChanged.connect(self._emit_semantic_selection)
@@ -284,13 +289,23 @@ class MeasurementTreeView(TreeView):
         self._apply_column_widths()
         self.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.expandAll()
-        QTimer.singleShot(0, self, self.expandAll)
 
-    def _expand_all_after_reset(self) -> None:
-        """Expand now and once more after Qt has recalculated model geometry."""
+    def _remember_expansion(self) -> None:
+        model = self.tree_model
+        self._collapsed_before_reset = {
+            semantic_id for semantic_id, node in model.tree.by_id.items()
+            if node.children and not self.isExpanded(model.index_for_semantic_id(semantic_id))
+        } if model is not None else set()
 
+    def _restore_expansion(self) -> None:
+        """Keep operator-collapsed branches; expand newly authored branches."""
         self.expandAll()
-        QTimer.singleShot(0, self, self.expandAll)
+        model = self.tree_model
+        if model is not None:
+            for semantic_id in self._collapsed_before_reset:
+                index = model.index_for_semantic_id(semantic_id)
+                if index.isValid():
+                    self.collapse(index)
 
     def set_interaction_mode(self, mode: TreeInteractionMode) -> None:
         self._interaction_mode = TreeInteractionMode(mode)
@@ -666,7 +681,12 @@ class MeasurementTreeView(TreeView):
         is_axis_anchor = node_kind == "set_roi_value"
         now = time.monotonic()
         if not force and now - self._last_follow_s < 0.1:
+            self._pending_follow_semantic_id = semantic_id
+            if not self._follow_timer.isActive():
+                self._follow_timer.start(max(1, int((0.1 - (now - self._last_follow_s)) * 1000)))
             return
+        self._follow_timer.stop()
+        self._pending_follow_semantic_id = None
         self._last_follow_s = now
         # Ensure a nested same-device/multi-device point is reachable without
         # collapsing or rebuilding the rest of the tree.  Expanding only the
@@ -702,12 +722,13 @@ class MeasurementTreeView(TreeView):
         if needs_deferred_reveal:
             self._pending_follow_semantic_id = semantic_id
             if not self._follow_timer.isActive():
-                self._follow_timer.start()
+                self._follow_timer.start(0)
 
     def _flush_pending_follow(self) -> None:
         semantic_id = self._pending_follow_semantic_id
         self._pending_follow_semantic_id = None
         if semantic_id is not None:
+            self._last_follow_s = time.monotonic()
             self._reveal_semantic_id(semantic_id)
 
     def _reveal_semantic_id(self, semantic_id: str) -> None:
@@ -727,7 +748,7 @@ class MeasurementTreeView(TreeView):
             if self.currentIndex() != index:
                 self.setCurrentIndex(index)
             self.scrollTo(index, self.ScrollHint.PositionAtCenter)
-        elif node_kind == "set_roi_value" and self.currentIndex() != index:
+        elif (node_kind == "set_roi_value" or self._interaction_mode is TreeInteractionMode.EDITABLE) and self.currentIndex() != index:
             # Keep one stable ROI anchor selected while acquisition/wait rows
             # animate through semantic state. Repeated points reuse this index.
             self.setCurrentIndex(index)
