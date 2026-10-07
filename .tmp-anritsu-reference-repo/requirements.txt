@@ -26,4 +26,4 @@
 PyVISA==1.11.3 		# to communicate with hosts via ethernet
 PyVISA-py==0.5.2 		# to communicate with hosts over ethernet
 matplotlib==3.5.0 	# to generate plots with data
-numpy==1.21.4 		# to handle arrays more efficiently when searching for maxima
+numpy==1.22.0 		# to handle arrays more efficiently when searching for maxima
