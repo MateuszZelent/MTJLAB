@@ -1899,7 +1899,8 @@ root:
         page = RecipePage(simulation_settings())
         try:
             page._apply_builder_source("schema_version: 1\nname: library\nroot: {id: root, type: sequence, children: []}\n", "isolated library draft")
-            self.assertEqual(len(page._library_action_buttons), 29)
+            self.assertEqual(len(page._library_action_buttons), 30)
+            self.assertIn("Measure Keithley I/V", [button.text() for button in page._library_action_buttons])
             page.library_search.setText("spectrum analyzer")
             visible = [button.text() for button in page._library_action_buttons if not button.isHidden()]
             self.assertEqual(

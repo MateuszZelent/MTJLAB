@@ -129,12 +129,12 @@ class AutomatedFileNamingTests(unittest.TestCase):
             )
             self.assertEqual(
                 h5_path.name,
-                "20260906T120000.000000Z_INL_MTJ_02.2026_R20C1_100_nm_transfer_curve.h5",
+                "data.h5",
             )
             self.assertIsNotNone(csv_path)
             self.assertEqual(
                 csv_path.name,
-                "20260906T120000.000000Z_INL_MTJ_02.2026_R20C1_100_nm_transfer_curve.csv",
+                "data.csv",
             )
 
 

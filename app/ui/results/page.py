@@ -37,6 +37,7 @@ from app.ui.results.file_browser import FileBrowserPanel
 from app.ui.results.heatmap_tab import HeatmapResultsTab
 from app.ui.results.metadata_panel import MetadataPanel
 from app.ui.results.spectrum_tab import SpectrumResultsTab
+from app.ui.results.scalar_tab import ScalarResultsTab
 from app.ui.results.state_card import ResultsStateCard
 from app.ui.results.sweep_tree_panel import SweepTreePanel
 from app.ui.results.workers import ResultReadTask
@@ -79,10 +80,9 @@ def _read_result_payload(path: Path) -> _ResultPayload:
         references = Hdf5RunReader.references(path, metadata_only=True)
     except Exception:
         references = ()
-    try:
-        pythat_data = read_pythat_run_data(path)
-    except Exception:
-        pythat_data = None
+    # PyThat's inspection performs a full temporary conversion of all samples.
+    # Browsing requires only the lazy THATEC/HDF5 readers above.
+    pythat_data = None
     return _ResultPayload(
         path=path,
         thatec_run=thatec_run,
@@ -152,7 +152,9 @@ class _FluentResultSections(QWidget):
         route = f"result-section-{index}"
         self._routes.append(route)
         self._labels.append(label)
+        was_blocked = self.compact_navigation.blockSignals(True)
         self.compact_navigation.addItem(label, userData=index)
+        self.compact_navigation.blockSignals(was_blocked)
         self.navigation.addItem(
             route,
             label,
@@ -164,6 +166,8 @@ class _FluentResultSections(QWidget):
         return index
 
     def setCurrentIndex(self, index: int) -> None:
+        if not 0 <= index < self.stack.count() or self.navigation.widget(self._routes[index]).isHidden():
+            return
         self.stack.setCurrentIndex(index)
         self.navigation.setCurrentItem(self._routes[index])
         if self.compact_navigation.currentIndex() != index:
@@ -201,7 +205,7 @@ class _FluentResultSections(QWidget):
         items_width = sum(
             self.navigation.widget(r).sizeHint().width()
             for r in self._routes
-            if self.navigation.widget(r) is not None
+            if self.navigation.widget(r) is not None and not self.navigation.widget(r).isHidden()
         )
         required_width = max(420, items_width + 16)
         visible_width = self.visibleRegion().boundingRect().width()
@@ -227,8 +231,7 @@ class _FluentResultSections(QWidget):
                 (
                     candidate
                     for candidate in range(self.stack.count())
-                    if self.navigation.widget(self._routes[candidate]).isVisible()
-                    and self.compact_navigation.isItemEnabled(candidate)
+                    if not self.navigation.widget(self._routes[candidate]).isHidden()
                 ),
                 -1,
             )
@@ -275,6 +278,9 @@ class ResultsPage(QWidget):
         self._thatec_tree_available = False
         self._result_request_id = 0
         self._result_task: ResultReadTask | None = None
+        self._pythat_task = None
+        self._loaded_signature = None
+        self._requested_signature = None
         self._read_pool = QThreadPool(self)
         self._read_pool.setMaxThreadCount(1)
         self._pending_completed_result: Path | None = None
@@ -353,6 +359,11 @@ class ResultsPage(QWidget):
             self.sweep_tree, "Sweep tree", icon=FluentIcon.LEAF
         )
 
+        self.scalar_tab = ScalarResultsTab()
+        self._scalar_index = self.result_tabs.addTab(
+            self.scalar_tab, "I/V/P & scalars", icon=FluentIcon.VIEW
+        )
+
         # Tab: Spectrum
         self.spectrum_tab = SpectrumResultsTab()
         self._spectrum_index = self.result_tabs.addTab(
@@ -384,6 +395,7 @@ class ResultsPage(QWidget):
         # --- Connections ---
         self.file_browser.file_selected.connect(self._on_file_selected)
         self.file_browser.files_loaded.connect(self._on_file_list_loaded)
+        self.metadata_panel.pythat_requested.connect(self._inspect_pythat)
         self.resume_button.clicked.connect(self._request_resume)
         self.open_sweep_button.clicked.connect(self._request_open_sweep)
         self.result_state.action_requested.connect(self._run_result_state_action)
@@ -480,18 +492,7 @@ class ResultsPage(QWidget):
     # ------------------------------------------------------------------
 
     def refresh(self) -> None:
-        """Refresh the file list and clear result views."""
-        self._cancel_result_load()
-        self.resume_button.setEnabled(False)
-        self.open_sweep_button.setEnabled(False)
-        self._thatec_tree_available = False
-        self._thatec_tree = ()
-        self._selected_artifact = None
-        self.metadata_panel.clear()
-        self.sweep_tree.clear()
-        self.spectrum_tab.clear()
-        self.heatmap_tab.clear()
-        self._set_heatmap_visible(False)
+        """Refresh the catalogue; preserve unchanged result analysis and selection."""
         self.file_browser.refresh()
         if self._selected_path is not None or self._result_task is not None:
             return
@@ -543,6 +544,7 @@ class ResultsPage(QWidget):
             ".hdf5",
             ".csv",
             ".pdf",
+            ".json", ".jsonl", ".yml",
         }:
             return False
         try:
@@ -557,6 +559,15 @@ class ResultsPage(QWidget):
 
     def _on_file_selected(self, path_or_none: object) -> None:
         """Handle file selection from the file browser."""
+        if path_or_none is not None:
+            path = Path(str(path_or_none)).expanduser().resolve()
+            signature = self._file_signature(path)
+            if path == self._selected_path and (
+                self._result_task is not None or (
+                    self._loaded_signature is not None and signature == self._loaded_signature)
+            ):
+                return
+        self._loaded_signature = None
         self._cancel_result_load()
         self.resume_button.setEnabled(False)
         self.open_sweep_button.setEnabled(False)
@@ -566,6 +577,7 @@ class ResultsPage(QWidget):
         self.sweep_tree.clear()
         self.spectrum_tab.clear()
         self.heatmap_tab.clear()
+        self.scalar_tab.clear()
         self._set_heatmap_visible(False)
 
         if path_or_none is None:
@@ -589,19 +601,21 @@ class ResultsPage(QWidget):
 
         path = Path(str(path_or_none)).expanduser().resolve()
         self._selected_path = path
+        self._requested_signature = self._file_signature(path)
         self.result_selected.emit(path)
-        if path.suffix.lower() in {".csv", ".pdf"}:
+        if path.suffix.lower() in {".csv", ".pdf", ".json", ".jsonl", ".yml"}:
             self._selected_artifact = path
             kind = (
                 "CSV characterization data"
                 if path.suffix.lower() == ".csv"
-                else "PDF measurement report"
+                else "PDF measurement report" if path.suffix.lower() == ".pdf"
+                else "Sweep metadata and provenance"
             )
             self._show_result_state(
                 kind,
                 (
                     f"This file is stored in the sample catalogue:\n{path}\n\n"
-                    "Use Samples → Measurements & Curves for a curve preview."
+                    "Open file to inspect its contents."
                 ),
                 action_text="Open file",
             )
@@ -630,6 +644,10 @@ class ResultsPage(QWidget):
         if self._result_task is not None:
             self._result_task.cancel()
             self._result_task = None
+        if self._pythat_task is not None:
+            self._pythat_task.cancel()
+            self._pythat_task = None
+        self._read_pool.clear()
 
     def _on_result_loaded(self, request_id: int, payload: object) -> None:
         if request_id != self._result_request_id or not isinstance(payload, _ResultPayload):
@@ -653,6 +671,7 @@ class ResultsPage(QWidget):
         if request_id != self._result_request_id:
             return
         self._thatec_run = payload.thatec_run
+        self._loaded_signature = self._requested_signature
         self._thatec_tree = payload.tree
         self._thatec_tree_available = payload.tree_available
         self.open_sweep_button.setEnabled(payload.tree_available)
@@ -680,6 +699,7 @@ class ResultsPage(QWidget):
         else:
             self.metadata_panel.show_thatec_summary(payload.path, payload.thatec_run)
         self.metadata_panel.show_pythat(payload.pythat_data)
+        self.scalar_tab.load(payload.path, payload.thatec_run, payload.points)
         self.spectrum_tab.load(payload.path, payload.thatec_run, payload.points, references=payload.references)
         if find_heatmap_rows(payload.thatec_run):
             self._set_heatmap_visible(True)
@@ -687,6 +707,36 @@ class ResultsPage(QWidget):
         else:
             self._set_heatmap_visible(False)
         self.result_state.hide()
+
+    @staticmethod
+    def _file_signature(path):
+        try:
+            info = path.stat()
+            return (info.st_size, info.st_mtime_ns)
+        except OSError:
+            return None
+
+    def _inspect_pythat(self):
+        if self._selected_path is None or self._pythat_task is not None:
+            return
+        self.metadata_panel.pythat_button.setEnabled(False)
+        self.metadata_panel.pythat_data.setPlainText("# Inspecting compatibility with PyThat…")
+        task = ResultReadTask(self._result_request_id, read_pythat_run_data, self._selected_path)
+        self._pythat_task = task
+        task.signals.loaded.connect(self._pythat_loaded)
+        task.signals.failed.connect(self._pythat_failed)
+        self._read_pool.start(task)
+
+    def _pythat_loaded(self, request_id, data):
+        if request_id == self._result_request_id:
+            self._pythat_task = None
+            self.metadata_panel.show_pythat(data)
+
+    def _pythat_failed(self, request_id, message):
+        if request_id == self._result_request_id:
+            self._pythat_task = None
+            self.metadata_panel.pythat_button.setEnabled(True)
+            self.metadata_panel.pythat_data.setPlainText(f"# PyThat inspection failed\n{message}")
 
     @staticmethod
     def _sync_processing(tab, state) -> None:
@@ -711,13 +761,18 @@ class ResultsPage(QWidget):
         self.file_browser._read_pool.clear()
         self.spectrum_tab._invalidate_pending_reads()
         self.spectrum_tab._cancel_filter_read()
+        self.spectrum_tab.peak_tools.close()
+        self.spectrum_tab.spectrum_plot.close_windows()
         self.sweep_tree.cancel_detail_read()
         self.heatmap_tab._invalidate_pending_read()
+        self.scalar_tab.cancel_read()
+        self.scalar_tab._read_pool.clear()
         deadline = time.monotonic() + timeout_ms / 1000
         for pool in (self._read_pool, self.file_browser._read_pool,
                      self.spectrum_tab._read_pool, self.spectrum_tab._filter_pool,
+                     self.spectrum_tab.peak_tools.pool,
                      self.sweep_tree._detail_pool,
-                     self.heatmap_tab._read_pool):
+                     self.heatmap_tab._read_pool, self.scalar_tab._read_pool):
             remaining = max(0, int((deadline-time.monotonic()) * 1000))
             if not pool.waitForDone(remaining):
                 return False

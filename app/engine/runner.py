@@ -1260,19 +1260,20 @@ class RecipeRunner:
             )
         elif action.kind == "configure_rigol_output":
             config = payload["config"]
-            self._rigol.configure_output(config)
+            applied = self._rigol.configure_output(config) or config
             self._rigol_output_active[config.channel] = False
             self._confirm_output_state(f"rigol.{config.channel}", False)
             context = self._active_safety_context.get(
                 f"rigol.{config.channel}", {}
             )
             context["output_path"] = {
-                "polarity": config.polarity,
-                "mode": config.mode,
-                "gate_polarity": config.gate_polarity,
-                "sync_enabled": config.sync_enabled,
-                "sync_polarity": config.sync_polarity,
-                "sync_delay_s": config.sync_delay_s,
+                "output_load": applied.output_load,
+                "polarity": applied.polarity,
+                "mode": applied.mode,
+                "gate_polarity": applied.gate_polarity,
+                "sync_enabled": applied.sync_enabled,
+                "sync_polarity": applied.sync_polarity,
+                "sync_delay_s": applied.sync_delay_s,
             }
             self._active_safety_context[f"rigol.{config.channel}"] = context
             self._record_device_state(

@@ -157,7 +157,7 @@ root:
                 self.assertIsNone(result["result"].error)
                 self.assertEqual(result["result"].stored_points, 1)  # type: ignore[index,union-attr]
                 self.assertFalse(controller.running)
-                files = list((root / "measurements").glob("*.h5"))
+                files = list((root / "measurements").rglob("data.h5"))
                 self.assertEqual(len(files), 1)
                 with h5py.File(files[0], "r") as file:
                     self.assertEqual(file["run"].attrs["status"], "completed")
@@ -250,7 +250,7 @@ finally:
                 self.assertTrue(
                     any(name == "dry_run_output_action_suppressed" for name, _ in events)
                 )
-                files = list((root / "measurements").glob("*.h5"))
+                files = list((root / "measurements").rglob("data.h5"))
                 self.assertEqual(len(files), 1)
                 detail = Hdf5RunReader.detail(files[0])
                 self.assertEqual(detail.summary.status, "completed")
@@ -295,6 +295,12 @@ finally:
         emergency.assert_called_once_with(settings, simulation=True, device_names=frozenset({"anritsu"}), anritsu_rf_output=False)
 
     def test_run_controller_reuses_a_provided_connected_session(self) -> None:
+        self._assert_run_preserves_page_session(preconnected=True)
+
+    def test_run_controller_connects_and_preserves_a_disconnected_page_session(self) -> None:
+        self._assert_run_preserves_page_session(preconnected=False)
+
+    def _assert_run_preserves_page_session(self, *, preconnected: bool) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             raw = simulated_station_settings(loaded_settings()).model_dump(mode="python")
@@ -311,14 +317,18 @@ finally:
             )
             adapter = _RunLeaseAdapter()
             device_controller = DeviceController(adapter)
-            connected = QEventLoop()
-            device_controller.result.connect(
-                lambda operation, _result: operation == "connect" and connected.quit()
-            )
-            device_controller.call("connect")
-            QTimer.singleShot(2_000, connected.quit)
-            connected.exec()
-            self.assertEqual(adapter.connect_count, 1)
+            if preconnected:
+                connected = QEventLoop()
+                device_controller.result.connect(
+                    lambda operation, _result: operation == "connect" and connected.quit()
+                )
+                device_controller.call("connect")
+                QTimer.singleShot(2_000, connected.quit)
+                connected.exec()
+                self.assertEqual(adapter.connect_count, 1)
+            else:
+                self.assertFalse(adapter.connected)
+                self.assertEqual(adapter.connect_count, 0)
 
             controller = RunController()
             finished: list[object] = []
@@ -335,14 +345,17 @@ finally:
                     outputs_forced_off=True,
                     device_controllers={"anritsu": device_controller},
                 )
-                QTimer.singleShot(5_000, loop.quit)
+                QTimer.singleShot(10_000, loop.quit)
                 loop.exec()
                 self.assertFalse(failures)
                 self.assertEqual(len(finished), 1)
                 self.assertEqual(adapter.connect_count, 1)
-                self.assertGreaterEqual(adapter.abort_count, 1)
+                # The empty plan performs no acquisition to cancel. Reusing
+                # its session must not add a hidden analyzer command.
+                self.assertEqual(adapter.abort_count, 0)
                 self.assertEqual(adapter.emergency_off_count, 0)
-                self.assertGreaterEqual(adapter.disconnect_count, 1)
+                self.assertEqual(adapter.disconnect_count, 0)
+                self.assertTrue(adapter.connected)
             finally:
                 controller.close()
                 device_controller.close()

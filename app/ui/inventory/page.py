@@ -5,6 +5,7 @@ from __future__ import annotations
 from app.ui.dialogs import StationDialog
 
 from pathlib import Path
+import json
 from typing import Sequence
 
 from PySide6.QtCore import QSize, Qt, Signal
@@ -614,6 +615,12 @@ class SampleInventoryPage(QWidget):
         self.cell_notes_input.setMinimumHeight(85)
         self.cell_notes_input.setMaximumHeight(130)
         inspector_layout.addWidget(self.cell_notes_input)
+        inspector_layout.addWidget(CaptionLabel("DUT settings / metadata (JSON):", inspector_scroll_content))
+        self.cell_settings_input = PlainTextEdit(inspector_scroll_content)
+        self.cell_settings_input.setMinimumHeight(85)
+        self.cell_settings_input.setMaximumHeight(130)
+        self.cell_settings_input.setToolTip("Stored only for this sample coordinate. Does not program laboratory instruments.")
+        inspector_layout.addWidget(self.cell_settings_input)
 
         cell_btns = QHBoxLayout()
         cell_btns.setSpacing(6)
@@ -1127,6 +1134,8 @@ class SampleInventoryPage(QWidget):
 
         self._update_inspector_state_controls(state)
         self.cell_notes_input.setPlainText(notes)
+        self.cell_settings_input.setPlainText(json.dumps(self.store.device_settings(self._current_sample.sample_id, row, col),
+                                                       ensure_ascii=False, indent=2, allow_nan=False))
 
         # Update target button state
         active_target = self.store.get_active_target()
@@ -1187,6 +1196,14 @@ class SampleInventoryPage(QWidget):
         if not isinstance(new_state, str):
             new_state = "untested"
         new_notes = self.cell_notes_input.toPlainText().strip()
+        try:
+            settings = json.loads(self.cell_settings_input.toPlainText())
+            if not isinstance(settings, dict):
+                raise ValueError("DUT settings must be a JSON object.")
+            json.dumps(settings, allow_nan=False)
+        except (ValueError, TypeError) as exc:
+            InfoBar.error(title="Invalid DUT settings", content=str(exc), parent=self, duration=5000)
+            return
 
         updated = self._current_sample.with_cell_update(
             row, col, label=new_label, state=new_state, notes=new_notes
@@ -1200,8 +1217,12 @@ class SampleInventoryPage(QWidget):
             structure_changed = True
 
         self.store.save_sample(updated)
+        self.store.save_device_settings(updated.sample_id, row, col, settings)
         self._current_sample = updated
         self._refresh_stats(updated)
+        active = self.store.get_active_target()
+        if (active.sample_id, active.row, active.col) == (updated.sample_id, row, col):
+            self._set_selected_as_active_target()
 
         if structure_changed:
             all_runs = self.store.list_runs_for_sample(updated.sample_id)
@@ -1411,6 +1432,7 @@ class SampleInventoryPage(QWidget):
             tags=self._current_sample.tags,
         )
         self.store.set_active_target(target)
+        target = self.store.get_active_target()
         self._sync_active_target_display()
         self.active_target_changed.emit(target)
         self.status.emit(f"Active measurement target set: {target.display_text()}")

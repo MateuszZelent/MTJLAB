@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QThreadPool
+from PySide6.QtCore import Qt, Signal, QThreadPool, QAbstractTableModel, QModelIndex
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QSplitter,
@@ -21,6 +21,7 @@ from qfluentwidgets import (
     SegmentedWidget,
     SpinBox,
     TreeWidget,
+    TreeView,
 )
 
 from app.ui.widgets.fluent_code_viewer import FluentCodeViewer
@@ -51,6 +52,39 @@ from app.ui.measurement_tree import (
     MeasurementTreeView,
     TreeInteractionMode,
 )
+
+
+class _ScalarValuesModel(QAbstractTableModel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.series, self.timestamps = (), ()
+
+    def set_series(self, series=(), timestamps=()):
+        self.beginResetModel()
+        self.series, self.timestamps = series, timestamps
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.series)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else 3
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            return ("Checkpoint", "Value", "Timestamp (UTC epoch s)")[section]
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:
+            return None
+        row = index.row()
+        if index.column() == 0:
+            return str(row)
+        if index.column() == 1:
+            return f"{self.series[row]:.12g}"
+        if row < len(self.timestamps):
+            return str(self.timestamps[row])
+        return ""
 
 
 class SweepTreePanel(QWidget):
@@ -141,8 +175,10 @@ class SweepTreePanel(QWidget):
         checkpoint_bar.addStretch(1)
         bottom_layout.addLayout(checkpoint_bar)
 
-        self.values_tree = TreeWidget(self)
-        self.values_tree.setHeaderLabels(["Checkpoint", "Value", "Timestamp UTC"])
+        self.values_tree = TreeView(self)
+        self._values_model = _ScalarValuesModel(self)
+        self.values_tree.setModel(self._values_model)
+        self.values_tree.setRootIsDecorated(False)
         self.values_tree.setUniformRowHeights(True)
         self.values_tree.setAlternatingRowColors(True)
         self.values_tree.setMaximumHeight(150)
@@ -216,7 +252,7 @@ class SweepTreePanel(QWidget):
         self.tree.clear()
         self.tree_model.replace_tree(SemanticMeasurementTree((), {}, source_text=""))
         self.inspector.clear()
-        self.values_tree.clear()
+        self._values_model.set_series()
         self._run = None
         self._selected_path = None
         self._selected_thatec_row = None
@@ -296,7 +332,7 @@ class SweepTreePanel(QWidget):
         if node.data:
             lines.extend(("", "Parameters / Configuration:", _format_json(dict(node.data))))
         self.inspector.setPlainText("\n".join(lines))
-        self.values_tree.clear()
+        self._values_model.set_series()
 
         # Check if node corresponds to a THATEC row
         row_id = str(node.data.get("row_id") or "") if isinstance(node.data, dict) else ""
@@ -342,7 +378,7 @@ class SweepTreePanel(QWidget):
         self._checkpoint_pages.clear()
         self.tree.clear()
         self.inspector.clear()
-        self.values_tree.clear()
+        self._values_model.set_series()
         if self._run is None:
             return
         measurements = QTreeWidgetItem(["Measurements", "THATEC tree"])
@@ -541,7 +577,7 @@ class SweepTreePanel(QWidget):
                         }
                     )
                 )
-                self.values_tree.clear()
+                self._values_model.set_series()
                 return
             self.thatec_checkpoint.setMaximum(
                 max(0, record.shape[0] - 1 if record.shape else 0)
@@ -551,7 +587,7 @@ class SweepTreePanel(QWidget):
         elif isinstance(record, StoredPoint):
             self._selected_thatec_row = None
             self.thatec_checkpoint.setRange(0, 0)
-            self.values_tree.clear()
+            self._values_model.set_series()
             self._show_point_inspector(record)
             self._selected_stored_point = record
             self.show_spectrum_button.setEnabled(record.has_spectrum)
@@ -564,7 +600,7 @@ class SweepTreePanel(QWidget):
                 self._detail_pool.start(task)
         elif isinstance(record, (StoredReference, StoredReferenceSummary)):
             self._selected_thatec_row = None
-            self.values_tree.clear()
+            self._values_model.set_series()
             self.inspector.setPlainText(
                 _format_json(
                     {
@@ -587,7 +623,7 @@ class SweepTreePanel(QWidget):
         ):
             point, variant = record
             self._selected_thatec_row = None
-            self.values_tree.clear()
+            self._values_model.set_series()
             self.inspector.setPlainText(
                 _format_json(
                     {
@@ -619,6 +655,9 @@ class SweepTreePanel(QWidget):
         if request != self._detail_request:
             return
         self._detail_task = None
+        if isinstance(record, tuple):
+            self._values_model.set_series(*record)
+            return
         self._selected_stored_point = record
         self._show_point_inspector(record)
         self.node_selected.emit(record)
@@ -655,22 +694,17 @@ class SweepTreePanel(QWidget):
             )
         )
         if len(record.shape) >= 2:
-            self.values_tree.clear()
+            self._values_model.set_series()
             self.spectrum_requested.emit(record.id, checkpoint)
         else:
-            series, timestamps = ThatecRunReader.scalar_series(
-                self._selected_path, record.id
-            )
-            self.values_tree.clear()
-            for index, value in enumerate(series):
-                timestamp = (
-                    str(timestamps[index]) if index < len(timestamps) else ""
-                )
-                self.values_tree.addTopLevelItem(
-                    QTreeWidgetItem(
-                        [str(index), f"{float(value):.12g}", timestamp]
-                    )
-                )
+            self.cancel_detail_read()
+            self._values_model.set_series()
+            task = ResultReadTask(self._detail_request, ThatecRunReader.scalar_series,
+                                  self._selected_path, record.id)
+            self._detail_task = task
+            task.signals.loaded.connect(self._detail_loaded)
+            task.signals.failed.connect(self._detail_failed)
+            self._detail_pool.start(task)
 
     def _show_selected_spectrum(self) -> None:
         if self._selected_thatec_row is not None:

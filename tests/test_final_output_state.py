@@ -33,6 +33,13 @@ from tests.test_moke_voltage_control import mutations
 from app.devices.moke_box.protocol import decode_voltage
 
 
+@pytest.fixture(autouse=True)
+def isolated_recipe_autosave(tmp_path, monkeypatch):
+    from app.recipes.repository import RecipeRepository
+    autosave = RecipeRepository.autosave
+    monkeypatch.setattr(RecipeRepository, "autosave", lambda self, path, source: autosave(self, tmp_path / "recipe.yml", source))
+
+
 def recipe_for(device, *, output="hold", final=None, enabled=True):
     if device == "moke_box":
         children = [{"id": "source", "type": "set_moke_voltage", "channel": 2, "voltage": "5 mV"}]
@@ -334,7 +341,7 @@ def test_moke_point_two_volts_or_automatic_zero_commands(completion, outcome):
 
 
 @pytest.mark.parametrize("completion", ["hold", "automatic"])
-def test_worker_preserves_moke_point_two_or_disconnects_after_zero(completion, tmp_path):
+def test_worker_preserves_moke_session_after_hold_or_zero(completion, tmp_path):
     application = QApplication.instance() or QApplication([])
     settings, adapter, transport, _ = rig("moke_box")
     plan = RecipeCompiler(settings).compile(moke_completion_recipe(completion))
@@ -351,7 +358,7 @@ def test_worker_preserves_moke_point_two_or_disconnects_after_zero(completion, t
         loop.exec()
         assert not failures and len(successes) == 1
         assert not successes[0].get("cleanup_errors")
-        assert adapter.connected is (completion == "hold")
+        assert adapter.connected
         if completion == "hold":
             assert adapter.read_vouts()[2] == pytest.approx(0.2, abs=0.00031)
         values = [decode_voltage(frame.msb, frame.lsb) for frame in mutations(transport)]
@@ -510,10 +517,12 @@ def test_gui_worker_keeps_controller_connection_and_saves_completed_hdf5(device,
         assert not failures and len(successes) == 1
         result = successes[0]
         assert result["result"].state == (ApplicationState.FAULT if release_error else ApplicationState.HOLDING)
-        assert adapter.connected is (not release_error)
+        assert adapter.connected
         if release_error:
             assert result["cleanup_errors"]
-            if device != "moke_box":
+            if device == "moke_box":
+                assert adapter.read_vouts()[2] == pytest.approx(0, abs=0.00031)
+            else:
                 assert not any(session.output.values())
         elif device == "moke_box":
             assert adapter.read_vouts()[2] == pytest.approx(0.008, abs=0.0003)

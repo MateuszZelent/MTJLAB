@@ -300,6 +300,7 @@ def test_rendered_controls_sync_between_1d_and_heatmap_and_reset(
     page.layout().setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
     page.resize(width, 1000)
     page.show()
+    _wait(app, lambda: page.file_browser._refresh_task is None)
     page.runs.setCurrentItem(page.runs.topLevelItem(0))
     try:
         _wait(app, lambda: page.spectrum_tab.points.model().rowCount() == 2)
@@ -323,9 +324,15 @@ def test_rendered_controls_sync_between_1d_and_heatmap_and_reset(
         assert controls.state.operation == operation
         assert "reference" in controls.operation.currentText() if baseline == 0 else "background" in controls.operation.currentText()
         spectrum_values = page.spectrum_tab.spectrum_plot._traces["Post-processed spectrum"][1]
+        # Hidden Heatmaps shares the controls, but reads its matrix on demand.
+        assert page.heatmap_tab.heatmap._data is None
+        page.result_tabs.setCurrentIndex(page._heatmap_index)
+        _wait(app, lambda: page.heatmap_tab.heatmap._data is not None and not page.heatmap_tab._read_tasks)
         np.testing.assert_allclose(page.heatmap_tab.heatmap._data[0], spectrum_values)
         assert "(W)" in page.heatmap_tab.heatmap.color_bar.getAxis("right").label.toPlainText()
         assert not page.heatmap_tab.heatmap.color_bar.getAxis("left").label.toPlainText()
+        page.result_tabs.setCurrentIndex(page._spectrum_index)
+        app.processEvents()
         assert page.width() == width
         assert controls.isVisible() and controls.width() > 200
         for child in (
@@ -339,6 +346,7 @@ def test_rendered_controls_sync_between_1d_and_heatmap_and_reset(
         assert page.spectrum_tab.spectrum_plot.height() >= 150
         page.spectrum_tab.spectrum_plot.apply_theme("dark" if theme == Theme.DARK else "light")
         page.heatmap_tab.apply_theme("dark" if theme == Theme.DARK else "light")
+        page.result_tabs.setCurrentIndex(page._spectrum_index)
         page.grab().save(str(tmp_path / f"results-1d-{theme.value}-{width}.png"))
         page.result_tabs.setCurrentIndex(page._heatmap_index)
         app.processEvents()

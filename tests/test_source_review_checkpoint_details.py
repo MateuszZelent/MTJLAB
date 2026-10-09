@@ -65,8 +65,11 @@ def test_results_reads_full_selected_details_off_gui(archive, shell_qt_applicati
     monkeypatch.setattr(Hdf5RunReader, "point", read)
     page = ResultsPage(str(archive.parent))
     try:
+        wait_until(app, lambda: page.file_browser._refresh_task is None)
         page.runs.setCurrentItem(page.runs.topLevelItem(0))
         wait_until(app, lambda: page._result_task is None)
+        wait_until(app, lambda: not page.spectrum_tab._read_tasks)
+        indices.clear()  # Automatic initial checkpoint is already rendered.
         summaries = page.spectrum_tab._stored_points
         assert all(not point.details_loaded for point in summaries)
         page.spectrum_tab.show_stored_spectrum(1)

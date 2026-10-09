@@ -210,7 +210,7 @@ class RecipeCompiler:
         """Track physical state across loop exits without rescanning the plan."""
         for action in actions[self._planned_action_cursor:]:
             self._remember_literal_configuration(action, self._planned_context)
-            if action.kind == "configure_anritsu" and action.payload["config"].changed_fields is None:
+            if action.kind == "configure_anritsu" and action.payload["config"].is_complete_configuration:
                 self._planned_anritsu_mode = "SPECTRUM"
             elif action.kind == "configure_anritsu_sg":
                 self._planned_anritsu_mode = "SG"
@@ -643,7 +643,7 @@ class RecipeCompiler:
                 continue
             kind = action.kind
             payload = action.payload
-            if kind == "configure_anritsu" and payload["config"].changed_fields is None:
+            if kind == "configure_anritsu" and payload["config"].is_complete_configuration:
                 if output_enabled.get(("anritsu_sg", "RF"), False):
                     raise ConfigurationError(f"{action.node_id}: turn SG RF OFF explicitly before selecting Spectrum Analyzer mode.")
                 anritsu_mode = "spectrum"
@@ -2793,6 +2793,9 @@ class RecipeCompiler:
                         DIMENSION_TIME,
                         context,
                     ).si_value,
+                    changed_fields=tuple("sync_delay_s" if key == "sync_delay" else key
+                                         for key in data if key in {"output_load", "polarity", "mode", "gate_polarity",
+                                                                   "sync_enabled", "sync_polarity", "sync_delay"}),
                 )
             if config.polarity not in {"NORM", "INV"}:
                 raise ConfigurationError(
@@ -2831,6 +2834,12 @@ class RecipeCompiler:
             payload["request"] = replace(payload["request"], changed_fields=tuple(selected))
         elif node.type == "configure_anritsu":
             payload = self._compile_anritsu(data)
+            field_map = {"start_frequency": "start_hz", "stop_frequency": "stop_hz",
+                         "reference_level": "reference_level_dbm", "points": "points",
+                         "vbw_filter_mode": "vbw_mode"}
+            payload["config"] = replace(payload["config"], changed_fields=tuple(
+                field_map[key] for key in data if key in field_map
+            ))
         elif node.type == "configure_anritsu_advanced":
             payload = self._compile_anritsu_advanced(data, node.id)
         elif node.type == "configure_anritsu_sg":

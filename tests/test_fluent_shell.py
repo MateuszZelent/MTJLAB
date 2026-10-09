@@ -220,6 +220,12 @@ class MainWindowFluentShellTests(unittest.TestCase):
     def test_safety_strip_tracks_dashboard_readiness_changes(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
+            # Readiness starts blocked until the asynchronous filesystem
+            # probe delivers evidence through its Qt timer.
+            for _ in range(500):
+                if window.dashboard._storage_probe.result[1] != "Directory check pending":
+                    break
+                QTest.qWait(10)
             self.assertEqual(window.safety_strip.readiness.text(), "Station ready")
             window.dashboard.update_audit_health(False)
             self.assertEqual(window.safety_strip.readiness.text(), "Station blocked")

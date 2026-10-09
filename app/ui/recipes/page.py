@@ -106,6 +106,7 @@ from app.recipes import (
     parse_recipe_text,
     replace_recipe_node,
     wrap_recipe_nodes_in_repeat,
+    unwrap_recipe_repeat,
 )
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS as _SWEEPABLE_PARAMETERS
@@ -612,20 +613,21 @@ class RecipePage(QWidget):
         output_line.addWidget(self.output_directory, 0, 1)
         self.output_directory_button = PushButton("Browse...", self.document_card)
         output_line.addWidget(self.output_directory_button, 0, 2)
-        output_file_label = CaptionLabel("Result file name", self.document_card)
+        output_file_label = CaptionLabel("Sweep folder name", self.document_card)
         output_line.addWidget(output_file_label, 1, 0)
         self.output_file_stem = LineEdit(self.document_card)
         self.output_file_stem.setPlaceholderText("Auto from recipe name")
         self.output_file_stem.setClearButtonEnabled(True)
-        self.output_file_stem.setAccessibleName("Sweep result file name")
+        self.output_file_stem.setAccessibleName("Sweep folder name")
         self.output_file_stem.setToolTip(
-            "Automatic naming incorporates active sample, coordinates and recipe (e.g. {sample_id}_{coord}_{device}_{recipe}). "
-            "Leave blank for automatic naming or enter a custom name or template tokens."
+            "Each run gets a numbered folder under the active sample. Leave blank for the recipe name, "
+            "or enter a custom name/template, e.g. {recipe}_{coord}. Full sample details are saved in metadata."
         )
         output_line.addWidget(self.output_file_stem, 1, 1, 1, 2)
         self.output_file_preview = CaptionLabel(self.document_card)
         self.output_file_preview.setObjectName("muted")
         self.output_file_preview.setWordWrap(True)
+        self.output_file_preview.setMinimumHeight(3 * self.output_file_preview.fontMetrics().lineSpacing() + 4)
         self.output_file_preview.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -730,6 +732,10 @@ class RecipePage(QWidget):
             "Repeat the selected block, or all root steps when the root is selected",
             QStyle.StandardPixmap.SP_BrowserReload,
         )
+        self.unwrap_repeat_button = tool_button(
+            "Remove Repeat", "Remove the loop and keep its contents once (Undo available)",
+            QStyle.StandardPixmap.SP_ArrowLeft,
+        )
         builder_actions.addWidget(self.edit_device_button)
         builder_actions.addWidget(self.edit_generator_button)
         builder_actions.addWidget(self.add_baseline_button)
@@ -738,6 +744,7 @@ class RecipePage(QWidget):
         builder_actions.addWidget(self.move_up_button)
         builder_actions.addWidget(self.move_down_button)
         builder_actions.addWidget(self.wrap_repeat_button)
+        builder_actions.addWidget(self.unwrap_repeat_button)
         layout.addWidget(self.selection_card)
         self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.workspace_splitter.setObjectName("recipeWorkspaceSplitter")
@@ -911,6 +918,7 @@ class RecipePage(QWidget):
         self.move_up_button.clicked.connect(lambda: self._move_selected_sibling(-1))
         self.move_down_button.clicked.connect(lambda: self._move_selected_sibling(1))
         self.wrap_repeat_button.clicked.connect(self._wrap_selected_in_repeat)
+        self.unwrap_repeat_button.clicked.connect(self._unwrap_selected_repeat)
         self.open_editor_button.clicked.connect(self._open_current_node_editor)
         self.path.textChanged.connect(self._path_changed)
         self.path.editingFinished.connect(self._update_repository_state)
@@ -965,21 +973,24 @@ class RecipePage(QWidget):
         self.elab_upload_hint.setText(str(hint))
         self.save_to_elab_check.setToolTip(str(hint))
 
-    def set_active_sample_target(self, target: object) -> None:
+    def set_active_sample_target(self, target: object, *, output_directory: str | Path | None = None) -> None:
         """Update the active DUT sample and device target displayed on the sweeps page."""
         self._active_sample_target = target
+        if output_directory is not None and getattr(self, "_sample_output_directory", None) is None:
+            self._unassigned_output_directory = self.output_directory.text()
+        self._sample_output_directory = output_directory
+        self.output_directory.setReadOnly(output_directory is not None)
+        self.output_directory_button.setEnabled(output_directory is None)
+        if output_directory is not None:
+            self.output_directory.setText(str(output_directory))
+            self.output_directory.setToolTip("Sweep folders are created inside the active sample's results directory.")
+        else:
+            self.output_directory.setText(getattr(self, "_unassigned_output_directory", self.output_directory.text()))
+            self.output_directory.setToolTip("Result directory for sweeps without an active sample.")
         if hasattr(target, "is_active") and getattr(target, "is_active", False):
             self.sample_target_label.setText(f"DUT Target: {target.display_text()}")
             self.sample_target_label.setToolTip(f"Active DUT: {target.display_text()}")
-            pattern = None
-            if hasattr(self._settings, "storage") and isinstance(self._settings.storage, dict):
-                pattern = self._settings.storage.get("filename_pattern")
-            auto_name = automated_run_file_stem(
-                self._suggested_recipe_name(),
-                sample_target=target,
-                pattern=pattern,
-            )
-            self.output_file_stem.setPlaceholderText(f"Auto: {auto_name}")
+            self.output_file_stem.setPlaceholderText(f"Auto: {self._suggested_recipe_name()}")
         else:
             self.sample_target_label.setText("DUT Target: No active sample target (unassigned)")
             self.sample_target_label.setToolTip("Click Set Target... to choose a sample and device coordinate.")
@@ -990,6 +1001,9 @@ class RecipePage(QWidget):
         return str(self._settings.storage.get("output_directory", "./measurements"))
 
     def _requested_output_directory(self) -> str:
+        sample_directory = getattr(self, "_sample_output_directory", None)
+        if sample_directory is not None:
+            return str(sample_directory)
         text = self.output_directory.text().strip()
         return str(Path(text or self._default_output_directory()).expanduser())
 
@@ -1021,19 +1035,8 @@ class RecipePage(QWidget):
         if not hasattr(self, "output_file_preview"):
             return
         active_target = getattr(self, "_active_sample_target", None)
-        pattern = None
-        if hasattr(self._settings, "storage") and isinstance(self._settings.storage, dict):
-            pattern = self._settings.storage.get("filename_pattern")
         if not self.output_file_stem.text().strip():
-            if hasattr(active_target, "is_active") and getattr(active_target, "is_active", False):
-                auto_name = automated_run_file_stem(
-                    self._suggested_recipe_name(),
-                    sample_target=active_target,
-                    pattern=pattern,
-                )
-                self.output_file_stem.setPlaceholderText(f"Auto: {auto_name}")
-            else:
-                self.output_file_stem.setPlaceholderText("Auto from recipe name")
+            self.output_file_stem.setPlaceholderText(f"Auto: {self._suggested_recipe_name()}")
         try:
             result_path, csv_summary_path = planned_run_paths(
                 self._settings,
@@ -1045,10 +1048,14 @@ class RecipePage(QWidget):
         except Exception as exc:
             self.output_file_preview.setText(f"Run output preview unavailable: {exc}")
             return
-        preview_lines = [f"Next run file: {result_path}"]
+        preview_lines = [f"Next run folder: {result_path.parent}"]
+        files = f"Data: {result_path.name}"
         if csv_summary_path is not None:
-            preview_lines.append(f"CSV summary: {csv_summary_path}")
+            files += f" · CSV: {csv_summary_path.name}"
+        preview_lines.append(files)
         self.output_file_preview.setText("\n".join(preview_lines))
+        self.output_file_preview.setToolTip(str(result_path)
+            + (f"\n{csv_summary_path}" if csv_summary_path is not None else ""))
 
     def browse_output_directory(self) -> None:
         selected = QFileDialog.getExistingDirectory(
@@ -1312,7 +1319,16 @@ class RecipePage(QWidget):
             drag_kind="output:anritsu_sg",
         )
 
-        acquisition = group("Acquisition", "5")
+        acquisition = group("Acquisition", "6")
+        action(
+            acquisition,
+            "Measure Keithley I/V",
+            "Read current and voltage on channel A or B; store power, OUTPUT and compliance status with the sweep point. Choose the channel in Action settings.",
+            "keithley",
+            QStyle.StandardPixmap.SP_DialogApplyButton,
+            lambda: self._library_add_basic("measure_keithley"),
+            drag_kind="flow:measure_keithley",
+        )
         action(
             acquisition, "Set MOKE voltage", "Set a chosen VOUT voltage and keep it for background/reference or the next measurements.",
             "moke_box", QStyle.StandardPixmap.SP_DialogApplyButton,
@@ -3968,6 +3984,7 @@ class RecipePage(QWidget):
                 self.move_up_button,
                 self.move_down_button,
                 self.wrap_repeat_button,
+                self.unwrap_repeat_button,
                 self.edit_device_button,
                 self.edit_generator_button,
                 self.add_baseline_button,
@@ -4006,8 +4023,8 @@ class RecipePage(QWidget):
             and location[1] is not None
         )
 
-        can_move_up = bool(is_movable and index > 0 and not multi_selected)
-        can_move_down = bool(is_movable and count > 1 and index < count - 1 and not multi_selected)
+        can_move_up = bool(is_movable and (index > 0 or self._repeat_exit_destination(-1)) and not multi_selected)
+        can_move_down = bool(is_movable and (index < count - 1 or self._repeat_exit_destination(1)) and not multi_selected)
         can_delete = bool(
             editable
             and (
@@ -4074,6 +4091,15 @@ class RecipePage(QWidget):
             and not location[4]
             and (location[1] is not None or bool(node.children))
         )
+        if editable and multi_selected:
+            selected_ids = self._repeat_selected_ids()
+            selected_locations = [self._recipe_node_locations().get(identifier) for identifier in selected_ids]
+            can_wrap_repeat = bool(selected_locations and all(item is not None and item[1] is not None and not item[4]
+                                                            for item in selected_locations))
+            if can_wrap_repeat:
+                branches = {(item[1], item[2]) for item in selected_locations}
+                positions = sorted(item[3] for item in selected_locations)
+                can_wrap_repeat = len(branches) == 1 and positions == list(range(positions[0], positions[0] + len(positions)))
 
         self.edit_device_button.setEnabled(has_device)
         self.add_baseline_button.setEnabled(bool(
@@ -4087,17 +4113,19 @@ class RecipePage(QWidget):
         self.move_up_button.setEnabled(can_move_up)
         self.move_down_button.setEnabled(can_move_down)
         self.wrap_repeat_button.setEnabled(can_wrap_repeat)
+        self.unwrap_repeat_button.setEnabled(bool(editable and not multi_selected and node is not None
+                                                and node.type == "repeat" and not location[4]))
 
         # Dynamic tooltips for clear UI feedback
         if can_move_up:
-            self.move_up_button.setToolTip("Move the selected node up (Alt+Up)")
+            self.move_up_button.setToolTip("Move up; at the start of Repeat, move outside before it (Alt+Up)")
         elif is_movable and index == 0:
             self.move_up_button.setToolTip("The selected node is already at the top of its branch")
         else:
             self.move_up_button.setToolTip("Move the selected node up (Alt+Up)")
 
         if can_move_down:
-            self.move_down_button.setToolTip("Move the selected node down (Alt+Down)")
+            self.move_down_button.setToolTip("Move down; at the end of Repeat, move outside after it (Alt+Down)")
         elif is_movable and count > 0 and index >= count - 1:
             self.move_down_button.setToolTip("The selected node is already at the bottom of its branch")
         else:
@@ -4127,7 +4155,10 @@ class RecipePage(QWidget):
                     f"Delete the {len(selected_sids)} selected nodes (Delete)"
                 )
             else:
-                self.delete_node_button.setToolTip("Delete the selected node (Delete)")
+                self.delete_node_button.setToolTip(
+                    "Delete Repeat and all its contents; use Remove Repeat to retain them"
+                    if node is not None and node.type == "repeat" else "Delete the selected node (Delete)"
+                )
         else:
             self.delete_node_button.setToolTip(
                 "Delete is only available for movable recipe steps"
@@ -4731,7 +4762,8 @@ class RecipePage(QWidget):
 
     def _wrap_selected_in_repeat(self) -> None:
         """Wrap one subtree, or every root child, without an empty draft node."""
-
+        if not self._tree_editing_allowed():
+            return
         try:
             self._builder_source()
             location = self._selected_recipe_location()
@@ -4744,7 +4776,11 @@ class RecipePage(QWidget):
                 raise ConfigurationError(
                     "Finally safety actions cannot be wrapped in Repeat."
                 )
-            if parent_id is None:
+            selected_ids = self._repeat_selected_ids()
+            if len(selected_ids) > 1:
+                node_ids = selected_ids
+                selection_label = f"{len(node_ids)} selected sibling blocks"
+            elif parent_id is None:
                 node_ids = tuple(child.id for child in node.children)
                 selection_label = f"All {len(node_ids)} root step(s)"
             else:
@@ -4775,6 +4811,40 @@ class RecipePage(QWidget):
             )
         except Exception as exc:
             QMessageBox.warning(self, "Wrap in Repeat", str(exc))
+
+    def _repeat_selected_ids(self) -> tuple[str, ...]:
+        identifiers = []
+        for sid in self.measurement_tree.selected_semantic_ids():
+            semantic = self.tree_model.tree.by_id.get(sid)
+            if semantic is not None and semantic.source_node_id and semantic.kind not in {
+                SemanticNodeKind.LOOP_BODY, SemanticNodeKind.SET_ROI_VALUE, SemanticNodeKind.GENERATED_SAFETY,
+            } and semantic.source_node_id not in identifiers:
+                identifiers.append(semantic.source_node_id)
+        return tuple(identifiers)
+
+    def _unwrap_selected_repeat(self) -> None:
+        if not self._tree_editing_allowed():
+            return
+        node = self._selected_recipe_node()
+        if node is None or node.type != "repeat":
+            return
+        try:
+            source = unwrap_recipe_repeat(self._builder_source(), node_id=node.id)
+            selected = node.children[0].id if node.children else None
+            self._apply_builder_source(source, "Removed Repeat; contents retained once", selected_node_id=selected)
+        except Exception as exc:
+            QMessageBox.warning(self, "Remove Repeat", str(exc))
+
+    def _repeat_exit_destination(self, delta: int):
+        location = self._selected_recipe_location()
+        if location is None or location[1] is None or location[4]:
+            return None
+        locations = self._recipe_node_locations()
+        parent_location = locations.get(location[1])
+        if parent_location is None or parent_location[0].type != "repeat" or parent_location[1] is None:
+            return None
+        _, grandparent, branch, index, _ = parent_location
+        return grandparent, branch, index if delta < 0 else index + 1
 
     def _add_device_controls(self, device: str | None = None) -> None:
         try:
@@ -6821,6 +6891,7 @@ class RecipePage(QWidget):
             lambda: self._add_device_controls(),
         )
         add_action("Wrap in Repeat...", self._wrap_selected_in_repeat)
+        unwrap = add_action("Remove Repeat — keep contents", self._unwrap_selected_repeat)
         add_action("Set final output state", self._edit_selected_final_state)
         menu.addSeparator()
         edit_device = add_action(
@@ -6924,8 +6995,9 @@ class RecipePage(QWidget):
             and location is not None
             and location[1] is not None
         )
-        can_move_up = bool(is_movable and index > 0)
-        can_move_down = bool(is_movable and count > 1 and index < count - 1)
+        can_move_up = bool(is_movable and (index > 0 or self._repeat_exit_destination(-1)))
+        can_move_down = bool(is_movable and (index < count - 1 or self._repeat_exit_destination(1)))
+        unwrap.setEnabled(bool(editable and is_authored_node and node.type == "repeat" and not location[4]))
         duplicate.setEnabled(is_movable)
         delete.setEnabled(is_movable)
         move_up.setEnabled(can_move_up)
@@ -7222,7 +7294,12 @@ class RecipePage(QWidget):
         node, parent_id, branch, _index, _in_finally = location
         assert parent_id is not None
         index, count = self._selected_node_sibling_bounds()
-        if index < 0 or count <= 1:
+        if index < 0:
+            return
+        if (delta < 0 and index == 0) or (delta > 0 and index == count - 1):
+            destination = self._repeat_exit_destination(delta)
+            if destination is not None:
+                self._move_recipe_node(node.id, *destination)
             return
         if delta < 0:
             if index <= 0:

@@ -293,7 +293,7 @@ class KeithleyDualPlotsTests(unittest.TestCase):
         finally:
             page.close()
 
-    def test_keithley_advanced_ranges_open_in_modal(self) -> None:
+    def test_keithley_advanced_ranges_open_without_blocking_the_page(self) -> None:
         raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
         settings = StationSettings.model_validate(raw)
         controller = Mock()
@@ -311,12 +311,16 @@ class KeithleyDualPlotsTests(unittest.TestCase):
             self.assertFalse(page.measure_voltage_autorange.isVisible())
             self.assertFalse(page.max_abs_power_field.isVisible())
 
-            with patch.object(panel.advanced_ranges_dialog, "exec") as execute:
-                page.advanced_ranges_button.click()
-                execute.assert_called_once_with()
-
-            panel.advanced_ranges_dialog.show()
+            controller.reset_mock()
+            # Exercise the actual click handler. A patched exec() concealed
+            # application-wide modal blocking in the previous regression.
+            QTest.mouseClick(page.advanced_ranges_button, Qt.MouseButton.LeftButton)
             self.application.processEvents()
+            self.assertTrue(panel.advanced_ranges_dialog.isVisible())
+            self.assertFalse(panel.advanced_ranges_dialog.isModal())
+            self.assertIsNone(self.application.activeModalWidget())
+            self.assertIs(panel.advanced_ranges_dialog.parentWidget(), panel)
+            self.assertEqual(controller.mock_calls, [])
             self.assertGreater(panel.advanced_ranges_dialog.geometry().width(), 0)
             self.assertGreater(panel.advanced_ranges_dialog.geometry().height(), 0)
             self.assertTrue(page.source_autorange.isVisible())
@@ -329,7 +333,20 @@ class KeithleyDualPlotsTests(unittest.TestCase):
             self.assertIn("source", panel.advanced_ranges_summary.text())
             self.assertIn("power", panel.advanced_ranges_summary.text())
 
-            panel.advanced_ranges_dialog.close()
+            page.channel.setCurrentText("A")
+            self.application.processEvents()
+            self.assertEqual(page.channel.currentText(), "A")
+            self.assertTrue(panel.advanced_ranges_dialog.isVisible())
+            self.assertEqual(controller.mock_calls, [])
+
+            # Repeated opening reuses the same controls and draft.
+            page.advanced_ranges_button.click()
+            self.assertTrue(panel.advanced_ranges_dialog.isVisible())
+            QTest.keyClick(panel.advanced_ranges_dialog, Qt.Key.Key_Escape)
+            self.application.processEvents()
+            self.assertFalse(panel.advanced_ranges_dialog.isVisible())
+            self.assertTrue(page.advanced_ranges_button.isEnabled())
+
             page.resize(760, 720)
             self.application.processEvents()
             self.assertTrue(page.advanced_ranges_button.isVisible())

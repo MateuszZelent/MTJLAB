@@ -25,6 +25,11 @@ class SampleInventoryUITests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication([])
+        from PySide6.QtGui import QFont, QFontDatabase
+        font = Path("C:/Windows/Fonts/segoeui.ttf")
+        if font.is_file():
+            QFontDatabase.addApplicationFont(str(font))
+            cls.application.setFont(QFont("Segoe UI", 10))
 
     def setUp(self) -> None:
         self._temp_dir = tempfile.TemporaryDirectory()
@@ -35,6 +40,40 @@ class SampleInventoryUITests(unittest.TestCase):
     def tearDown(self) -> None:
         self.store.close()
         self._temp_dir.cleanup()
+
+    def test_per_dut_notes_settings_and_rendered_inspector(self) -> None:
+        import json
+        sample = self.store.save_sample(Sample(sample_id="wafer", name="wafer", rows=("20",), cols=("4", "5")))
+        page = SampleInventoryPage(self.store)
+        try:
+            page._set_current_sample(sample)
+            page._on_cell_selected("20", "4")
+            page._set_selected_as_active_target()
+            page.cell_notes_input.setPlainText("R20C4 only")
+            page.cell_settings_input.setPlainText('{"resistance_ohm": 1200}')
+            page._save_cell_changes()
+            target = self.store.get_active_target()
+            self.assertEqual(target.notes, "R20C4 only")
+            self.assertEqual(target.device_settings, {"resistance_ohm": 1200})
+            page._on_cell_selected("20", "5")
+            self.assertEqual(page.cell_notes_input.toPlainText(), "")
+            self.assertEqual(json.loads(page.cell_settings_input.toPlainText()), {})
+            page._on_cell_selected("20", "4")
+            for width in (1280, 1240):
+                page.resize(width, 800)
+                page.show()
+                self.application.processEvents()
+                self.assertEqual(page.width(), width)
+                self.assertGreater(page.cell_settings_input.width(), 100)
+                self.assertGreaterEqual(page.cell_settings_input.height(), 85)
+                self.assertTrue(page.cell_settings_input.isVisible())
+                destination = Path("docs/audits/2026-10-07-sample-device-layout")
+                destination.mkdir(parents=True, exist_ok=True)
+                self.assertTrue(page.grab().save(str(destination / f"inventory-{width}.png")))
+        finally:
+            page.close()
+            page.deleteLater()
+            self.application.processEvents()
 
     def test_sample_matrix_widget_renders_cells_and_signals(self) -> None:
         widget = SampleMatrixWidget()

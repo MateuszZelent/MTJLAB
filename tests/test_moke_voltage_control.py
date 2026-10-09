@@ -304,7 +304,7 @@ def test_zero_shutdown_is_permitted_outside_positive_working_range():
     stop = adapter.stop_vout()
     assert stop.safe_target_confirmed
     assert adapter.read_vouts()[2] == 0
-    assert adapter.state is DeviceState.UNKNOWN  # no power/current measurement
+    assert adapter.state is DeviceState.VERIFIED  # DAC session verified; not a power-off claim.
 
 
 def test_preexisting_cancel_still_returns_dac_to_zero_and_revokes_arm():

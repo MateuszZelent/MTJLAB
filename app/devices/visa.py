@@ -284,6 +284,9 @@ class FakeVisaSession:
         self.writes.append(command)
         response = self.responses.get(command)
         if response is None:
+            if command == "*OPC?":
+                # Fake writes finish immediately; explicit fault responses override this.
+                return "1"
             if command == "SYST:LANG?":
                 return "SCPI"
             if command == "FORM?":

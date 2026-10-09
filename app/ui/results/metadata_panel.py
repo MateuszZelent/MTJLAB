@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QTimer
+from PySide6.QtCore import QEvent, QTimer, Signal
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QSizePolicy,
@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import ComboBox, FluentIcon, SegmentedWidget
+from qfluentwidgets import ComboBox, FluentIcon, PushButton, SegmentedWidget
 
 from app.storage import RunDetail, ThatecRun
 from app.storage.pythat_reader import PyThatRunData
@@ -51,7 +51,9 @@ class _FluentMetadataSections(QWidget):
         route = f"metadata-section-{index}"
         self._routes.append(route)
         self._labels.append(label)
+        blocked = self.compact_navigation.blockSignals(True)
         self.compact_navigation.addItem(label, userData=index)
+        self.compact_navigation.blockSignals(blocked)
         self.navigation.addItem(
             route,
             label,
@@ -63,6 +65,8 @@ class _FluentMetadataSections(QWidget):
         return index
 
     def setCurrentIndex(self, index: int) -> None:
+        if not 0 <= index < self.stack.count():
+            return
         self.stack.setCurrentIndex(index)
         self.navigation.setCurrentItem(self._routes[index])
         if self.compact_navigation.currentIndex() != index:
@@ -113,6 +117,8 @@ class _FluentMetadataSections(QWidget):
 class MetadataPanel(QWidget):
     """Fluent detail navigation for metadata, snapshots and device state."""
 
+    pythat_requested = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -139,7 +145,15 @@ class MetadataPanel(QWidget):
         self.tabs.addTab(self.metadata, "Metadata")
         self.tabs.addTab(self.recipe_snapshot, "Recipe")
         self.tabs.addTab(self.settings_snapshot, "Settings")
-        self.tabs.addTab(self.pythat_data, "PyThat data")
+        pythat_page = QWidget(self)
+        pythat_layout = QVBoxLayout(pythat_page)
+        pythat_layout.setContentsMargins(0, 0, 0, 0)
+        self.pythat_button = PushButton("Inspect with PyThat", pythat_page)
+        self.pythat_button.setEnabled(False)
+        self.pythat_button.clicked.connect(self.pythat_requested)
+        pythat_layout.addWidget(self.pythat_button)
+        pythat_layout.addWidget(self.pythat_data, 1)
+        self.tabs.addTab(pythat_page, "PyThat data")
         self.tabs.addTab(self.device_state, "Device state")
         layout.addWidget(self.tabs)
 
@@ -216,9 +230,10 @@ class MetadataPanel(QWidget):
             )
         else:
             self.pythat_data.setPlainText(
-                "# Public THATEC file\n"
-                "message: Public THATEC tree loaded directly; no private application metadata required."
+                "# PyThat inspection\n"
+                "message: HDF5 is ready to browse. Inspect with PyThat performs the full compatibility conversion on demand."
             )
+        self.pythat_button.setEnabled(data is None)
 
     def show_device_state(self, device_states: dict) -> None:
         """Show device state JSON for a selected point."""
@@ -231,6 +246,7 @@ class MetadataPanel(QWidget):
         self.settings_snapshot.clear()
         self.pythat_data.clear()
         self.device_state.clear()
+        self.pythat_button.setEnabled(False)
 
 
 def _format_json(value: object) -> str:

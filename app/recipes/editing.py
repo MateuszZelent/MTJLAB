@@ -7,6 +7,7 @@ from io import StringIO
 from typing import Any
 
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedSeq
 
 from app.domain.errors import ConfigurationError
 from app.recipes.models import parse_recipe_text
@@ -54,12 +55,23 @@ def delete_recipe_nodes(source: str, *, node_ids: list[str] | tuple[str, ...]) -
     if not isinstance(finally_nodes, list):
         raise ConfigurationError("recipe.finally must be a list.")
 
-    for node_id in node_ids:
+    selected = []
+    for node_id in dict.fromkeys(node_ids):
+        location = _locate(raw["root"], node_id, section="root") or _locate_list(finally_nodes, node_id, section="finally")
+        if location is None:
+            raise ConfigurationError(f"Recipe node {node_id!r} was not found.")
+        selected.append(location[0])
+    # Selecting a container and its child means deleting that subtree once.
+    selected = [node for node in selected if not any(other is not node and _find(other, node["id"])
+                                                     for other in selected)]
+    for node in selected:
+        node_id = node["id"]
         detached = _detach(raw["root"], node_id, section="root")
         if detached is None and isinstance(finally_nodes, list):
             detached = _detach_list(finally_nodes, node_id, section="finally")
         if detached is None:
             raise ConfigurationError(f"Recipe node {node_id!r} was not found.")
+    _remove_empty_repeats(raw["root"])
     return _dump_validated(raw, "tree-builder delete")
 
 
@@ -164,9 +176,13 @@ def wrap_recipe_nodes_in_repeat(
             "Repeat can wrap only a contiguous range of sibling nodes."
         )
 
-    children = [
+    children = CommentedSeq([
         deepcopy(node) for node, _source_list, _index, _section in ordered
-    ]
+    ])
+    for new_index, old_index in enumerate(indices):
+        comment = getattr(first_list, "ca", None)
+        if comment is not None and old_index in comment.items:
+            children.ca.items[new_index] = deepcopy(comment.items[old_index])
     del first_list[indices[0] : indices[-1] + 1]
     first_list.insert(
         indices[0],
@@ -186,6 +202,40 @@ def _load(source: str) -> dict[str, Any]:
     if not isinstance(raw, dict) or not isinstance(raw.get("root"), dict):
         raise ConfigurationError("The recipe must contain a mapping root node.")
     return raw
+
+
+def unwrap_recipe_repeat(source: str, *, node_id: str) -> str:
+    """Remove only the loop, retaining ordered children and their identities."""
+    raw = _load(source)
+    root = raw["root"]
+    node = root if root.get("id") == node_id else _find(root, node_id)
+    if node is None or node.get("type") != "repeat":
+        raise ConfigurationError("Select an authored Repeat in the main measurement tree.")
+    children = node.get("children", [])
+    if node.get("disabled") is True:
+        for child in children:
+            child["disabled"] = True
+    if node is root:
+        node["type"] = "sequence"
+        node.pop("block_type", None)
+        node.pop("count", None)
+    else:
+        _, siblings, index, _ = _locate(root, node_id, section="root")
+        siblings[index:index + 1] = children
+        for offset in range(len(children)):
+            comments = getattr(children, "ca", None)
+            if comments is not None and offset in comments.items:
+                siblings.ca.items[index + offset] = deepcopy(comments.items[offset])
+    return _dump_validated(raw, "tree-builder unwrap repeat")
+
+
+def _remove_empty_repeats(node: dict[str, Any]) -> None:
+    for branch in ("children", "else"):
+        children = node.get(branch, [])
+        for child in tuple(children):
+            _remove_empty_repeats(child)
+            if child.get("type") == "repeat" and not child.get("children"):
+                children.remove(child)
 
 
 def _dump_validated(raw: dict[str, Any], origin: str) -> str:
@@ -220,6 +270,9 @@ def move_recipe_nodes(
     if not node_ids:
         return source
 
+    if len(set(node_ids)) != len(node_ids):
+        raise ConfigurationError("The move selection contains a duplicate node.")
+
     yaml = YAML()
     raw = _load(source)
     root_id = raw["root"].get("id")
@@ -239,6 +292,11 @@ def move_recipe_nodes(
         if loc is None:
             raise ConfigurationError(f"Recipe node {nid!r} was not found.")
         located_nodes.append(loc)
+
+    for item, _, _, _ in located_nodes:
+        if any(other is not item and _find(item, other.get("id")) is not None
+               for other, _, _, _ in located_nodes):
+            raise ConfigurationError("Move a parent or its children, not both in the same selection.")
 
     if destination_parent_id == "__finally__":
         target = finally_nodes
@@ -274,6 +332,9 @@ def move_recipe_nodes(
             raise ConfigurationError("Drag-and-drop cannot move nodes into or out of finally.")
 
     moved_dicts = [loc[0] for loc in located_nodes]
+    moved_comments = [deepcopy(getattr(source_list, "ca", None).items.get(source_index))
+                      if getattr(source_list, "ca", None) is not None else None
+                      for _, source_list, source_index, _ in located_nodes]
     index = int(destination_index)
 
     # Detach from source lists
@@ -301,6 +362,10 @@ def move_recipe_nodes(
     index = max(0, min(index - target_removals_before, len(target)))
     for offset, moved_dict in enumerate(moved_dicts):
         target.insert(index + offset, moved_dict)
+        if moved_comments[offset] is not None and hasattr(target, "ca"):
+            target.ca.items[index + offset] = moved_comments[offset]
+
+    _remove_empty_repeats(raw["root"])
 
     stream = StringIO()
     yaml.dump(raw, stream)

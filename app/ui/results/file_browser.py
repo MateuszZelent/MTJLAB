@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import datetime, timezone
+from dataclasses import dataclass
 import math
 from pathlib import Path
+import re
 
-from PySide6.QtCore import QSize, QThreadPool, Qt, Signal
+from PySide6.QtCore import QSize, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
@@ -23,6 +25,7 @@ from qfluentwidgets import (
     CaptionLabel,
     ComboBox,
     FluentIcon,
+    FlowLayout,
     LineEdit,
     PrimaryPushButton,
     PushButton,
@@ -40,6 +43,54 @@ COL_STATE = 2
 COL_OPERATOR = 3
 COL_SPECTRA = 4
 COL_POINTS = 5
+
+
+@dataclass(frozen=True)
+class _CatalogueIndex:
+    summaries: tuple
+    artifacts: tuple[Path, ...]
+    timestamps: dict
+
+
+def _discover_artifacts(directory, catalogue, cancelled):
+    if not catalogue or not directory.is_dir():
+        return ()
+    from app.storage.run_bundle import is_bundle_companion
+
+    artifacts = []
+    for path in directory.rglob("*"):
+        if cancelled():
+            raise InterruptedError("Result catalogue indexing cancelled")
+        if not path.is_file():
+            continue
+        bundle_file = (path.parent / "metadata.json").is_file() or is_bundle_companion(path)
+        allowed = {".csv", ".pdf"} | ({".json", ".jsonl", ".yml", ".h5"} if bundle_file else set())
+        if (path.suffix.lower() in allowed and path.name not in {"data.h5", "info.csv"}
+                and "measurements" in {part.casefold() for part in path.parts}):
+            artifacts.append(path)
+    return tuple(sorted(artifacts, key=lambda p: str(p).casefold()))
+
+
+def _read_catalogue(directory, catalogue, *, cancelled=lambda: False):
+    summaries = Hdf5RunReader.list_runs(directory, recursive=True, cancelled=cancelled)
+    artifacts = _discover_artifacts(directory, catalogue, cancelled)
+    return _CatalogueIndex(summaries, artifacts,
+                           {p: Hdf5RunReader._extract_timestamp(p, None) for p in artifacts})
+
+
+def _read_file_summary(target):
+    try:
+        return Hdf5RunReader.summary(target)
+    except Exception:
+        try:
+            run = ThatecRunReader.describe(target)
+        except Exception:
+            run = None
+        return RunSummary(target, Hdf5RunReader._extract_timestamp(target, None),
+                          "THATEC" if run else "unreadable",
+                          max((r.shape[0] for r in run.rows.values() if r.shape), default=0) if run else 0,
+                          sum(len(r.shape) >= 2 for r in run.rows.values()) if run else 0,
+                          None, None, None)
 
 
 def _mixed_item_sort_key(item: QTreeWidgetItem, column: int) -> tuple[int, str, str]:
@@ -102,7 +153,7 @@ class ResultFileItem(QTreeWidgetItem):
     def __init__(self, summary: RunSummary, formatted_date: str) -> None:
         super().__init__(
             [
-                summary.path.name,
+                summary.path.parent.name if summary.path.name == "data.h5" else summary.path.name,
                 formatted_date,
                 summary.status,
                 summary.operator or "—",
@@ -114,7 +165,7 @@ class ResultFileItem(QTreeWidgetItem):
         self.raw_timestamp = summary.created_at_utc or ""
         self.setData(COL_FILE, Qt.ItemDataRole.UserRole, str(summary.path))
         self.setData(COL_DATE, Qt.ItemDataRole.UserRole, str(summary.path))
-        self.setToolTip(COL_FILE, str(summary.path.resolve()))
+        self.setToolTip(COL_FILE, str(summary.path.absolute()))
         self.setToolTip(COL_DATE, f"Recorded (UTC): {summary.created_at_utc or 'Unknown'}")
         self.setToolTip(
             COL_STATE,
@@ -180,12 +231,16 @@ class CatalogueGroupItem(QTreeWidgetItem):
         super().__init__([f"{title} ({count})", "", "", "", "", ""])
         self.group_title = title
         self._title = title
+        match = re.match(r"^([1-9][0-9]*)_\d{8}T\d{6}Z_", title)
+        self._sweep_number = int(match[1]) if match else None
         self.setFont(0, self.font(0))
         self.setFlags(self.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         self.setIcon(0, FluentIcon.FOLDER.icon())
 
     def __lt__(self, other: QTreeWidgetItem) -> bool:
         if isinstance(other, CatalogueGroupItem):
+            if self._sweep_number is not None and other._sweep_number is not None:
+                return self._sweep_number < other._sweep_number
             return self._title.casefold() < other._title.casefold()
         tree = self.treeWidget()
         col = tree.sortColumn() if tree is not None else COL_FILE
@@ -197,18 +252,14 @@ class CatalogueArtifactItem(QTreeWidgetItem):
 
     _sort_priority = 10
 
-    def __init__(self, path: Path) -> None:
-        try:
-            recorded = Hdf5RunReader._extract_timestamp(path, None)
-        except OSError:
-            recorded = None
+    def __init__(self, path: Path, recorded=None) -> None:
         suffix = path.suffix.lower().lstrip(".").upper() or "FILE"
         super().__init__([path.name, format_timestamp(recorded), suffix, "—", "—", "—"])
         self.path = path
         self.setData(COL_FILE, Qt.ItemDataRole.UserRole, str(path))
         self.setData(COL_DATE, Qt.ItemDataRole.UserRole, str(path))
         self.setIcon(COL_FILE, FluentIcon.DOCUMENT.icon())
-        self.setToolTip(COL_FILE, f"Measurement artifact:\n{path.resolve()}")
+        self.setToolTip(COL_FILE, f"Measurement artifact:\n{path.absolute()}")
 
     def __lt__(self, other: QTreeWidgetItem) -> bool:
         tree = self.treeWidget()
@@ -223,8 +274,6 @@ class FileBrowserPanel(QWidget):
     file_opened = Signal(object)  # Path
     directory_changed = Signal(object)  # Path
     files_loaded = Signal(bool)
-    _ASYNC_REFRESH_FILE_COUNT = 8
-    _ASYNC_REFRESH_BYTES = 32 * 1024 * 1024
 
     def __init__(
         self,
@@ -234,9 +283,10 @@ class FileBrowserPanel(QWidget):
         catalogue_tree: bool = False,
     ) -> None:
         super().__init__(parent)
-        self._output_dir = Path(output_dir)
+        self._output_dir = Path(output_dir).expanduser().absolute()
         self._catalogue_tree_requested = catalogue_tree
         self._selected_path: Path | None = None
+        self._pending_selected_path: Path | None = None
         self._state_action: Callable[[], None] = self.browse_file
         self._refresh_request_id = 0
         self._refresh_task: ResultReadTask | None = None
@@ -246,6 +296,7 @@ class FileBrowserPanel(QWidget):
         self._all_summaries: list[RunSummary] = []
         self._filtered_summaries: list[RunSummary] = []
         self._catalogue_artifacts: list[Path] = []
+        self._artifact_timestamps = {}
         self._filtered_artifacts: list[Path] = []
         self._view_mode = "flat"  # "flat" or "grouped"
         self._current_page = 1
@@ -263,16 +314,19 @@ class FileBrowserPanel(QWidget):
         layout.addWidget(self.location)
 
         # --- Primary directory actions ---
-        actions = QHBoxLayout()
-        actions.setSpacing(8)
+        self.actions_host = QWidget(self)
+        actions = FlowLayout(self.actions_host, needAni=False)
+        self._actions_flow = actions
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setHorizontalSpacing(8)
+        actions.setVerticalSpacing(6)
         self.refresh_button = PushButton("Refresh", self)
         self.change_directory_button = PushButton("Change directory...", self)
         self.open_file_button = PrimaryPushButton("Open HDF5 / PyThat file...", self)
         actions.addWidget(self.refresh_button)
         actions.addWidget(self.change_directory_button)
         actions.addWidget(self.open_file_button)
-        actions.addStretch(1)
-        layout.addLayout(actions)
+        layout.addWidget(self.actions_host)
 
         # --- Search input ---
         self.search = LineEdit(self)
@@ -356,7 +410,7 @@ class FileBrowserPanel(QWidget):
         header.setSectionResizeMode(COL_SPECTRA, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(COL_POINTS, QHeaderView.ResizeMode.Interactive)
 
-        self.runs.setColumnWidth(COL_FILE, 220)
+        self.runs.setColumnWidth(COL_FILE, 380 if catalogue_tree else 220)
         self.runs.setColumnWidth(COL_DATE, 155)
         self.runs.setColumnWidth(COL_STATE, 95)
         self.runs.setColumnWidth(COL_OPERATOR, 110)
@@ -437,6 +491,17 @@ class FileBrowserPanel(QWidget):
     def minimumSizeHint(self) -> QSize:
         return QSize(280, 200)
 
+    def _sync_action_height(self):
+        self.actions_host.setMinimumHeight(self._actions_flow.heightForWidth(max(260, self.width())))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_action_height()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self, self._sync_action_height)
+
     @property
     def selected_path(self) -> Path | None:
         return self._selected_path
@@ -446,74 +511,62 @@ class FileBrowserPanel(QWidget):
         return self._output_dir
 
     def set_output_directory(self, output_dir: str | Path) -> None:
-        next_output_dir = Path(output_dir).expanduser()
+        next_output_dir = Path(output_dir).expanduser().absolute()
         if next_output_dir == self._output_dir:
             return
         self._output_dir = next_output_dir
         self._selected_path = None
+        self._pending_selected_path = None
         self.directory_changed.emit(self._output_dir)
         self.file_selected.emit(None)
         self.refresh()
 
     def refresh(self) -> None:
         """Reload known results and preserve selection only when it still exists."""
-        self.location.setText(f"Directory: {self._output_dir.resolve()}")
-        previous = self._selected_path
+        self.location.setText(f"Directory: {self._output_dir}")
         self._cancel_refresh()
-        if self._should_refresh_async():
-            self.runs.clear()
-            self.state_card.show_state(
-                title="Loading result files",
-                description="Reading the result index in the background...",
-                accessible_name="Loading result files",
-                loading=True,
-            )
-            self.content.setCurrentWidget(self.state_card)
-            request_id = self._refresh_request_id
-            task = ResultReadTask(
-                request_id,
-                Hdf5RunReader.list_runs,
-                self._output_dir,
-                recursive=True,
-            )
-            self._refresh_task = task
-            task.signals.loaded.connect(self._on_refresh_loaded)
-            task.signals.failed.connect(self._on_refresh_failed)
-            self._read_pool.start(task)
-            return
-        self._populate_summaries(
-            Hdf5RunReader.list_runs(self._output_dir, recursive=True), previous
+        self.state_card.show_state(
+            title="Loading result files",
+            description="Reading the result index in the background...",
+            accessible_name="Loading result files",
+            loading=True,
         )
-
-    def _should_refresh_async(self) -> bool:
-        try:
-            paths = tuple(self._output_dir.rglob("*.h5")) + tuple(
-                self._output_dir.rglob("*.hdf5")
-            )
-            total_bytes = sum(path.stat().st_size for path in paths if path.is_file())
-        except OSError:
-            return False
-        return len(paths) >= self._ASYNC_REFRESH_FILE_COUNT or total_bytes >= self._ASYNC_REFRESH_BYTES
+        if not self.has_files():
+            self.content.setCurrentWidget(self.state_card)
+        task = ResultReadTask(self._refresh_request_id, _read_catalogue,
+                              self._output_dir, self._catalogue_tree_requested, cooperative_cancel=True)
+        self._refresh_task = task
+        task.signals.loaded.connect(self._on_refresh_loaded)
+        task.signals.failed.connect(self._on_refresh_failed)
+        self._read_pool.start(task)
 
     def _cancel_refresh(self) -> None:
         self._refresh_request_id += 1
         if self._refresh_task is not None:
             self._refresh_task.cancel()
             self._refresh_task = None
+        self._read_pool.clear()
 
     def _on_refresh_loaded(self, request_id: int, summaries: object) -> None:
         if request_id != self._refresh_request_id:
             return
         self._refresh_task = None
-        if not isinstance(summaries, tuple):
+        if not isinstance(summaries, _CatalogueIndex):
             self._on_refresh_failed(request_id, "The result index returned an invalid payload.")
             return
-        self._populate_summaries(summaries, self._selected_path)
+        self._catalogue_artifacts = list(summaries.artifacts)
+        self._artifact_timestamps = summaries.timestamps
+        pending = self._pending_selected_path
+        self._pending_selected_path = None
+        self._populate_summaries(summaries.summaries, self._selected_path)
+        if pending is not None:
+            self.select_path(pending)
 
     def _on_refresh_failed(self, request_id: int, message: str) -> None:
         if request_id != self._refresh_request_id:
             return
         self._refresh_task = None
+        self._pending_selected_path = None
         self._state_action = self.refresh
         self.state_card.show_state(
             title="Cannot index result files",
@@ -525,7 +578,6 @@ class FileBrowserPanel(QWidget):
 
     def _populate_summaries(self, summaries: tuple[object, ...], previous: Path | None) -> None:
         self._all_summaries = [s for s in summaries if isinstance(s, RunSummary)]
-        self._catalogue_artifacts = self._discover_catalogue_artifacts()
 
         # Populate operator filter choices dynamically
         current_op = self.operator_filter.currentText()
@@ -541,6 +593,12 @@ class FileBrowserPanel(QWidget):
         self.operator_filter.blockSignals(False)
 
         self._filter_and_render(previous=previous)
+        if previous is not None:
+            if self._find_item_by_path(previous) is not None:
+                self.file_selected.emit(previous)
+            elif not previous.is_file():
+                self._selected_path = None
+                self.file_selected.emit(None)
         self.files_loaded.emit(self.has_files())
 
     def _on_filter_changed(self) -> None:
@@ -555,11 +613,17 @@ class FileBrowserPanel(QWidget):
         self._filter_and_render(previous=self._selected_path)
 
     def clear_filters(self) -> None:
+        controls = (self.search, self.state_filter, self.operator_filter, self.date_filter)
+        for control in controls:
+            control.blockSignals(True)
         self.search.clear()
-        self.state_filter.setCurrentIndex(0)
-        self.operator_filter.setCurrentIndex(0)
-        self.date_filter.setCurrentIndex(0)
+        for control in controls[1:]:
+            control.setCurrentIndex(0)
+        for control in controls:
+            control.blockSignals(False)
         self.clear_filter_btn.setEnabled(False)
+        self._current_page = 1
+        self._filter_and_render(previous=self._selected_path)
 
     def _on_view_mode_changed(self) -> None:
         self._view_mode = str(self.view_mode_combo.currentData() or "flat")
@@ -605,7 +669,7 @@ class FileBrowserPanel(QWidget):
             # Text filter
             if query:
                 searchable = (
-                    f"{s.path.name} {s.status} {s.operator or ''} {formatted_date} "
+                    f"{s.path.name} {s.path.parent.name} {s.status} {s.operator or ''} {formatted_date} "
                     f"{s.sample_id or ''} {s.sample_name or ''} {s.sample_row or ''} "
                     f"{s.sample_col or ''} {s.sample_coordinate_label or ''}"
                 ).casefold()
@@ -644,7 +708,7 @@ class FileBrowserPanel(QWidget):
                 if state_filter != "All states":
                     continue
                 if date_filter != "All time":
-                    timestamp = Hdf5RunReader._extract_timestamp(artifact, None)
+                    timestamp = self._artifact_timestamps.get(artifact)
                     if date_filter == "Today" and categorize_date(timestamp, now) != "Today":
                         continue
                     if date_filter == "Yesterday" and categorize_date(timestamp, now) != "Yesterday":
@@ -659,26 +723,6 @@ class FileBrowserPanel(QWidget):
                         continue
                 self._filtered_artifacts.append(artifact)
         self._render_page(previous=previous)
-
-    def _discover_catalogue_artifacts(self) -> list[Path]:
-        """Find durable sample measurement CSV/PDF files for the catalogue tree."""
-
-        if not self._catalogue_tree_requested or not self._output_dir.is_dir():
-            return []
-        artifacts: list[Path] = []
-        try:
-            candidates = self._output_dir.rglob("*")
-            for path in candidates:
-                if not path.is_file() or path.suffix.lower() not in {".csv", ".pdf"}:
-                    continue
-                if path.name.casefold() == "info.csv":
-                    continue
-                if "measurements" not in {part.casefold() for part in path.parts}:
-                    continue
-                artifacts.append(path)
-        except OSError:
-            return []
-        return sorted(artifacts, key=lambda item: str(item).casefold())
 
     def _render_page(self, previous: Path | None = None) -> None:
         total_items = len(self._filtered_summaries)
@@ -801,7 +845,7 @@ class FileBrowserPanel(QWidget):
         """Return path components relative to the configured catalogue root."""
 
         try:
-            relative = summary.path.resolve().relative_to(self._output_dir.resolve())
+            relative = summary.path.absolute().relative_to(self._output_dir.absolute())
             parts = tuple(part for part in relative.parts if part)
         except ValueError:
             parts = (summary.path.name,)
@@ -857,12 +901,12 @@ class FileBrowserPanel(QWidget):
                 leaf = ResultFileItem(summary, date_text)
                 absolute_path = summary.path
             else:
-                leaf = CatalogueArtifactItem(summary)
+                leaf = CatalogueArtifactItem(summary, self._artifact_timestamps.get(summary))
                 absolute_path = summary
             leaf.setText(COL_FILE, parts[-1])
             leaf.setToolTip(
                 COL_FILE,
-                f"Relative path: {Path(*parts)}\nAbsolute path: {absolute_path.resolve()}",
+                f"Relative path: {Path(*parts)}\nAbsolute path: {absolute_path.absolute()}",
             )
             if isinstance(parent, TreeWidget):
                 self.runs.addTopLevelItem(leaf)
@@ -873,7 +917,7 @@ class FileBrowserPanel(QWidget):
 
     def _relative_catalogue_parts(self, path: Path) -> tuple[str, ...]:
         try:
-            relative = path.resolve().relative_to(self._output_dir.resolve())
+            relative = path.absolute().relative_to(self._output_dir.absolute())
             parts = tuple(part for part in relative.parts if part)
         except ValueError:
             parts = (path.name,)
@@ -888,8 +932,9 @@ class FileBrowserPanel(QWidget):
         )
         if not selected:
             return
-        self._output_dir = Path(selected)
+        self._output_dir = Path(selected).expanduser().absolute()
         self._selected_path = None
+        self._pending_selected_path = None
         self.directory_changed.emit(self._output_dir)
         self.file_selected.emit(None)
         self.refresh()
@@ -907,7 +952,8 @@ class FileBrowserPanel(QWidget):
 
     def open_file(self, path: Path) -> None:
         """Add and select an arbitrary result without modifying it."""
-        target = Path(path).expanduser()
+        self._pending_selected_path = None
+        target = Path(path).expanduser().absolute()
         if not target.is_file():
             self._show_error(
                 "Result file not found",
@@ -924,34 +970,16 @@ class FileBrowserPanel(QWidget):
         # Check if already in summaries
         existing_summary = next((s for s in self._all_summaries if s.path == target), None)
         if existing_summary is None:
-            try:
-                summary = Hdf5RunReader.summary(target)
-            except Exception:
-                try:
-                    run = ThatecRunReader.describe(target)
-                    shapes = [row.shape[0] for row in run.rows.values() if row.shape]
-                    summary = RunSummary(
-                        path=target,
-                        created_at_utc=Hdf5RunReader._extract_timestamp(target, None),
-                        status="THATEC",
-                        point_count=max(shapes, default=0),
-                        spectrum_count=sum(len(row.shape) >= 2 for row in run.rows.values()),
-                        plan_sha256=None,
-                        application_version=None,
-                        operator=None,
-                    )
-                except Exception:
-                    summary = RunSummary(
-                        path=target,
-                        created_at_utc=Hdf5RunReader._extract_timestamp(target, None),
-                        status="unreadable",
-                        point_count=0,
-                        spectrum_count=0,
-                        plan_sha256=None,
-                        application_version=None,
-                        operator=None,
-                    )
-            self._all_summaries.insert(0, summary)
+            self._cancel_refresh()
+            self._selected_path = target
+            task = ResultReadTask(self._refresh_request_id, _read_file_summary, target)
+            self._refresh_task = task
+            task.signals.loaded.connect(self._file_summary_loaded)
+            task.signals.failed.connect(self._on_refresh_failed)
+            self._read_pool.start(task)
+            self.file_selected.emit(target)
+            self.file_opened.emit(target)
+            return
 
         self.clear_filters()
         self._selected_path = target
@@ -959,16 +987,34 @@ class FileBrowserPanel(QWidget):
         self._restore_selection(target)
         self.file_opened.emit(target)
 
+    def _file_summary_loaded(self, request_id, summary):
+        if request_id != self._refresh_request_id:
+            return
+        self._refresh_task = None
+        self._all_summaries.insert(0, summary)
+        self.clear_filters()
+        self._filter_and_render(previous=summary.path)
+        self.files_loaded.emit(self.has_files())
+        pending = self._pending_selected_path
+        self._pending_selected_path = None
+        if pending is not None:
+            self.select_path(pending)
+
     def select_path(self, path: str | Path) -> bool:
         """Select an already indexed result or catalogue artifact."""
 
-        target = Path(path).expanduser().resolve()
+        target = Path(path).expanduser().absolute()
         if not target.is_file():
             return False
-        if target.suffix.lower() not in {".h5", ".hdf5", ".csv", ".pdf"}:
+        if target.suffix.lower() not in {".h5", ".hdf5", ".csv", ".pdf", ".json", ".jsonl", ".yml"}:
             return False
-        if target.suffix.lower() in {".csv", ".pdf"}:
-            if target not in {artifact.resolve() for artifact in self._catalogue_artifacts}:
+        if self._refresh_task is not None:
+            # Keep the catalogue job when a completed run is selected just
+            # after refresh; a one-file summary would lose the other results.
+            self._pending_selected_path = target
+            return True
+        if target.suffix.lower() in {".csv", ".pdf", ".json", ".jsonl", ".yml"}:
+            if target not in {artifact.absolute() for artifact in self._catalogue_artifacts}:
                 return False
             self.clear_filters()
             self._selected_path = target
@@ -976,7 +1022,7 @@ class FileBrowserPanel(QWidget):
             self._restore_selection(target)
             self.file_selected.emit(target)
             return True
-        if not any(summary.path.resolve() == target for summary in self._all_summaries):
+        if not any(summary.path.absolute() == target for summary in self._all_summaries):
             self.open_file(target)
             return True
         self.clear_filters()
@@ -1002,7 +1048,8 @@ class FileBrowserPanel(QWidget):
         path_str = str(item.data(COL_DATE, Qt.ItemDataRole.UserRole) or item.data(COL_FILE, Qt.ItemDataRole.UserRole) or "")
         if not path_str:
             return
-        path = Path(path_str).expanduser().resolve()
+        path = Path(path_str).expanduser().absolute()
+        self._pending_selected_path = None
         self._selected_path = path
         self.file_selected.emit(path)
 
@@ -1014,7 +1061,7 @@ class FileBrowserPanel(QWidget):
                     or item.data(COL_FILE, Qt.ItemDataRole.UserRole)
                     or ""
                 )
-                if p_str and Path(p_str).expanduser().resolve() == target.resolve():
+                if p_str and Path(p_str).expanduser().absolute() == target.absolute():
                     return item
             for index in range(item.childCount()):
                 found = walk(item.child(index))

@@ -121,3 +121,10 @@ docs/audits/*
 !docs/audits/2026-10-06-source-review/
 !docs/audits/2026-10-06-source-review/*.md
 !docs/audits/2026-10-06-source-review/*.json
+
+# Offline Results analysis: scientific rationale and rendered regression evidence.
+!docs/audits/2026-10-08-results-offline-analysis-heatmaps.md
+!docs/audits/2026-10-08-results-analysis-artifacts/
+!docs/audits/2026-10-08-results-analysis-artifacts/*.png
+!docs/audits/2026-10-08-results-analysis-artifacts/*.json
+!docs/audits/2026-10-08-results-analysis-artifacts/*.py

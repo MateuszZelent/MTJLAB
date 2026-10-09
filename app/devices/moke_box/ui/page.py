@@ -892,7 +892,7 @@ class MokeBoxPage(QWidget):
             self.field_timestamp.setText("No current readback")
         self._set_measurement_controls(available and self._pending_operation is None)
         if state == "verified" and self._pending_operation is None:
-            self.field_status.setText("Ready. Start with one Hall-voltage sample.")
+            self.field_status.setText("DAC/Hall communication verified. Kepco power/current are not monitored. Ready for a Hall-voltage sample.")
         elif state == "disconnected":
             self.field_status.setText("Connect MOKE Box to enable the Hall-voltage read.")
         elif state == "unknown" and available:

@@ -833,6 +833,49 @@ def test_copied_keithley_edit_button_changes_operator_range_without_hardware_wri
     assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == 0
 
 
+def test_confirmed_manual_moke_control_allows_sweep_readiness(application, tmp_path):
+    settings_path = tmp_path / "settings.yml"
+    write_engineer_settings(settings_path)
+    repository = SettingsRepository(settings_path)
+    raw = repository.load().raw
+    raw["storage"]["output_directory"] = str(tmp_path / "measurements")
+    raw["storage"]["catalogue_directory"] = str(tmp_path / "catalogue")
+    raw["devices"]["moke_box"]["calibration_directory"] = str(tmp_path / "calibrations")
+    repository.save_raw(raw)
+    window = MainWindow(settings_path, simulation=True, authenticated_username=TEST_ENGINEER)
+    window.recipe_page._close_discard_confirmed = True
+    gate = None
+    try:
+        window.resize(1360, 880)
+        window.show()
+        window._navigate_to("moke_box")
+        window.moke_box_page.views.setCurrentIndex(2)
+        workflow = window.moke_box_page.field_workflow
+        window._controllers["moke_box"].call("connect")
+        wait_for(application, lambda: workflow._profile is not None and len(workflow._initialized_voltage_channels) == 8)
+        workflow.target.setText("100 mV")
+        assert workflow.set_button.isEnabled()
+        workflow.set_button.click()
+        wait_for(application, lambda: not workflow.busy)
+        assert "readback confirmed" in workflow.manual_status.text()
+        assert window._device_states["moke_box"] == "verified"
+        assert "unknown" in window.safety_strip.outputs.text()
+        readiness = window.dashboard.evaluate_readiness(display_only=True)
+        assert not any(item.key == "device.moke_box" for item in readiness.blocking_items)
+        gate = window._open_sweep_readiness(
+            SimpleNamespace(required_devices={"moke_box"}), execution_mode="dry_run")
+        application.processEvents()
+        assert gate.start_button.isEnabled() and gate.start_button.isVisible()
+        assert gate.width() > 0 and gate.height() > 0
+        assert gate.grab().save(str(tmp_path / "moke-verified-readiness.png"))
+    finally:
+        if gate is not None:
+            gate.close()
+        window.close()
+        window.deleteLater()
+        application.processEvents()
+
+
 def test_full_fluent_shell_binds_control_calibration_and_voltage_sweep(application, tmp_path):
     settings_path = tmp_path / "settings.yml"
     write_engineer_settings(settings_path)

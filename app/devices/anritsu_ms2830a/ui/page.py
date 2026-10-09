@@ -962,6 +962,12 @@ class _AnritsuSpectrumWindow(StationDialog):
         layout = self.modal_content_layout(spacing=8)
         header = QHBoxLayout()
         header.addWidget(StrongBodyLabel("Current spectrum", surface))
+        self.start_live = PrimaryPushButton("Start Live", surface)
+        self.stop_live = PushButton("Stop Live", surface)
+        self.peak_table = PushButton("Add / select peaks", surface)
+        header.addWidget(self.start_live)
+        header.addWidget(self.stop_live)
+        header.addWidget(self.peak_table)
         header.addStretch(1)
         self.tools_toggle = CheckBox("Analysis tools", surface)
         self.tools_toggle.setChecked(True)
@@ -1207,6 +1213,7 @@ class AnritsuPage(QWidget):
         self._analysis_settings_dialog: SpectrumAnalysisSettingsDialog | None = None
         self._peak_table_dialog: PeakTableDialog | None = None
         self._peak_tracking_window: PeakTrackingWindow | None = None
+        self._additional_peak_trackers = {}
         self._tracked_peak_target_hz: float | None = None
         self._tracked_peak_gate_hz: float | None = None
         self._tracking_started_monotonic: float | None = None
@@ -2262,7 +2269,8 @@ class AnritsuPage(QWidget):
     def _ordinary_preview_active(self):
         return ((self.analysis_tabs.currentIndex() == 0 and self._preview_page_active())
                 or (self._spectrum_window is not None and self._spectrum_window.isVisible())
-                or (self._peak_tracking_window is not None and self._peak_tracking_window.isVisible()))
+                or (self._peak_tracking_window is not None and self._peak_tracking_window.isVisible())
+                or any(window.isVisible() for window in self._additional_peak_trackers))
 
     def _spectrogram_preview_active(self):
         return ((self.analysis_tabs.currentIndex() == 1 and self._preview_page_active())
@@ -2270,7 +2278,7 @@ class AnritsuPage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        QTimer.singleShot(0, self._resume_visible_preview)
+        QTimer.singleShot(0, self, self._resume_visible_preview)
 
     def _resume_visible_preview(self):
         self._analysis_tab_changed()
@@ -3190,6 +3198,15 @@ class AnritsuPage(QWidget):
         self._update_advanced_availability()
         self._update_manual_save_controls()
 
+        self._sync_floating_live_controls()
+
+    def _sync_floating_live_controls(self):
+        if self._spectrum_window is not None:
+            live = self._page_state == AnritsuPageState.LIVE
+            enabled = self.live.isEnabled() and not self._execution_controlled and not self._live_transition_pending
+            self._spectrum_window.start_live.setEnabled(enabled and not live)
+            self._spectrum_window.stop_live.setEnabled(enabled and live)
+
     def _update_manual_save_controls(self) -> None:
         if self._manual_archive_thread is not None:
             self.configure_manual_spectrum.setEnabled(False)
@@ -3462,6 +3479,7 @@ class AnritsuPage(QWidget):
                 self._finish_temporal_averaging(resume_live=False)
             self.live.setText("Start Live")
         self.execution_badge.setVisible(controlled)
+        self._sync_floating_live_controls()
         if not controlled and not self._timer.isActive():
             self._set_live_indicator("off")
 
@@ -4221,6 +4239,8 @@ class AnritsuPage(QWidget):
             self._peak_table_dialog.set_peaks((), method="none")
         if self._peak_tracking_window is not None:
             self._peak_tracking_window.clear()
+        for window in tuple(self._additional_peak_trackers):
+            window.close()
 
         self._switching_trace_checkboxes = True
         try:
@@ -4273,7 +4293,9 @@ class AnritsuPage(QWidget):
         if reference is None:
             self.banner.show_message("There is no reference spectrum to save.")
             return
-        directory = str(self._station_settings.storage.get("output_directory", "./measurements"))
+        directory = str(getattr(self, "_manual_sample_directory", None) / "baselines"
+                        if getattr(self, "_manual_sample_directory", None) is not None
+                        else self._station_settings.storage.get("output_directory", "./measurements"))
         selected, _filter = QFileDialog.getSaveFileName(
             self,
             "Save Anritsu reference",
@@ -4302,7 +4324,9 @@ class AnritsuPage(QWidget):
         self.status.emit(f"Anritsu reference saved: {path}")
 
     def load_reference_file(self) -> None:
-        directory = str(self._station_settings.storage.get("output_directory", "./measurements"))
+        directory = str(getattr(self, "_manual_sample_directory", None) / "baselines"
+                        if getattr(self, "_manual_sample_directory", None) is not None
+                        else self._station_settings.storage.get("output_directory", "./measurements"))
         selected, _filter = QFileDialog.getOpenFileName(
             self,
             "Load Anritsu reference",
@@ -4398,10 +4422,30 @@ class AnritsuPage(QWidget):
             return self._manual_save_options.destination
         if self._manual_last_mode is ManualSpectrumSaveMode.APPEND and self._manual_archive_last_path:
             return self._manual_archive_last_path
-        directory = Path(
+        directory = getattr(self, "_manual_sample_directory", None) or Path(
             str(self._station_settings.storage.get("output_directory", "./measurements"))
         ).expanduser()
-        return directory / "manual_spectrum.h5"
+        return directory / (f"manual_{datetime.now(timezone.utc):%Y%m%dT%H%M%S.%fZ}.h5"
+                            if getattr(self, "_manual_sample_directory", None) is not None else "manual_spectrum.h5")
+
+    def set_sample_measurement_context(self, directory: Path | None, target: dict) -> None:
+        """Detach an old append policy when the physical DUT changes."""
+        if self._manual_archive_thread is not None:
+            self._pending_manual_sample_context = (directory, deepcopy(target))
+            return
+        previous = getattr(self, "_manual_sample_target", {})
+        if (directory == getattr(self, "_manual_sample_directory", None)
+                and all(target.get(key) == previous.get(key) for key in ("sample_id", "row", "col"))):
+            self._manual_sample_target = deepcopy(target)
+            return
+        self.close_manual_archive_session()
+        self._manual_sample_directory = directory
+        self._manual_sample_target = deepcopy(target)
+        self.correction_workspace.set_measurement_directory(directory / "baselines" if directory is not None else None)
+        self._manual_save_options = None
+        self._manual_archive_last_path = None
+        self._manual_last_mode = None
+        self.manual_save_status.setText("DUT changed. Configure a new archive for this device before saving.")
 
     def _show_manual_save_dialog(self) -> None:
         choices = self._manual_trace_choices()
@@ -4526,6 +4570,7 @@ class AnritsuPage(QWidget):
                     "device_idn": deepcopy(device_idn),
                     "operator_context": deepcopy(operator_context),
                     "simulation": self._manual_simulation,
+                    "sample_target": deepcopy(getattr(self, "_manual_sample_target", {})),
                 },
             )
             self._start_manual_archive_job("save", payload, options=options, metadata_count=len(metadata_values))
@@ -4629,6 +4674,10 @@ class AnritsuPage(QWidget):
             self._manual_save_completed(result, **context)
         else:
             self._manual_close_completed(context["path"])
+        pending = getattr(self, "_pending_manual_sample_context", None)
+        if pending is not None:
+            self._pending_manual_sample_context = None
+            self.set_sample_measurement_context(*pending)
 
     def prepare_manual_archive_shutdown(self) -> bool:
         if self._manual_archive_thread is not None:
@@ -5172,6 +5221,8 @@ class AnritsuPage(QWidget):
             interference_calibration=(self.correction_workspace.interference_mode.currentData()
                                       if "background" in mode else None),
             tracking_context=self._tracking_context(),
+            additional_tracking_contexts=tuple(state["context"] for window, state in self._additional_peak_trackers.items()
+                                              if not window.paused.isChecked()),
         )
         if self._cleanup_result is None and self._analysis_error is None:
             self._set_analysis_status(
@@ -5432,8 +5483,18 @@ class AnritsuPage(QWidget):
         data = self._analysis_values()
         if data is None:
             return
-        self._tracking_session = getattr(self, "_tracking_session", 0) + 1
         frequencies_hz = np.asarray(data[0], dtype=float)
+        if len(frequencies_hz) < 2:
+            return
+        if self._peak_tracking_window is not None and self._tracked_peak_target_hz is None:
+            self._peak_tracking_window.close()
+        if self._peak_tracking_window is not None and self._tracked_peak_target_hz is not None:
+            self._additional_peak_trackers[self._peak_tracking_window] = {
+                "context": (self._tracking_session, self._tracked_peak_target_hz, self._tracked_peak_gate_hz), "revision": self._tracked_peak_revision,
+                "generation": self._tracked_peak_generation, "started": self._tracking_started_monotonic,
+            }
+        self._peak_tracking_window = None
+        self._tracking_session = getattr(self, "_tracking_session", 0) + 1
         spacing_hz = float(np.median(np.abs(np.diff(frequencies_hz))))
         width_hz = peak.fit_fwhm_hz or peak.fwhm_hz
         self._tracked_peak_target_hz = peak.frequency_hz
@@ -5446,10 +5507,15 @@ class AnritsuPage(QWidget):
         self._tracking_started_monotonic = time.monotonic()
         if self._peak_tracking_window is None:
             window = PeakTrackingWindow(self)
-            window.closed.connect(self._peak_tracking_closed)
-            window.history_cleared.connect(self._peak_tracking_history_cleared)
+            window.closed.connect(lambda current=window: self._peak_tracking_closed(current))
+            window.history_cleared.connect(lambda current=window: self._peak_tracking_history_cleared(current))
+            window.gate_changed.connect(lambda gate, current=window: self._peak_tracking_gate_changed(current, gate))
+            window.paused.toggled.connect(lambda paused, current=window: self._peak_tracking_paused(current, paused))
             self._peak_tracking_window = window
         tracking = self._peak_tracking_window
+        tracking.setWindowTitle(f"Anritsu — track {self._tracking_session}: {format_quantity_auto(peak.frequency_hz, DIMENSION_FREQUENCY)}")
+        tracking.gate.setText(format_quantity_auto(self._tracked_peak_gate_hz, DIMENSION_FREQUENCY))
+        tracking.gate_hz = self._tracked_peak_gate_hz
         tracking.clear()
         tracking.append(
             0.0,
@@ -5466,12 +5532,27 @@ class AnritsuPage(QWidget):
 
     def _tracking_context(self):
         if (self._peak_tracking_window is None or self._tracked_peak_target_hz is None
-                or self._tracked_peak_gate_hz is None):
+                or self._tracked_peak_gate_hz is None
+                or self._peak_tracking_window.paused.isChecked()):
             return None
         return (getattr(self, "_tracking_session", 0), self._tracked_peak_target_hz,
                 self._tracked_peak_gate_hz)
 
     def _update_peak_tracking(self, now: float, result: SpectrumAnalysisOutcome) -> None:
+        for context, peak in getattr(result, "additional_tracked_peaks", ()):
+            for window, state in tuple(getattr(self, "_additional_peak_trackers", {}).items()):
+                if (window.paused.isChecked() or state["context"] != context
+                        or result.frame_id <= state["revision"]
+                        or self._applied_analysis_generation <= state["generation"]):
+                    continue
+                state["revision"] = result.frame_id
+                state["generation"] = self._applied_analysis_generation
+                elapsed = max(0., now - state["started"])
+                if peak is None:
+                    window.mark_lost(target_hz=context[1], gate_hz=context[2], elapsed_s=elapsed)
+                else:
+                    state["context"] = (context[0], peak.frequency_hz, context[2])
+                    window.append(elapsed, peak, source=self._peak_measurement_method())
         target_hz = self._tracked_peak_target_hz
         gate_hz = self._tracked_peak_gate_hz
         tracking = self._peak_tracking_window
@@ -5490,7 +5571,8 @@ class AnritsuPage(QWidget):
         self._tracked_peak_generation = current_gen
         nearest = result.tracked_peak
         if nearest is None or abs(nearest.frequency_hz - target_hz) > gate_hz:
-            tracking.mark_lost(target_hz=target_hz, gate_hz=gate_hz)
+            tracking.mark_lost(target_hz=target_hz, gate_hz=gate_hz,
+                               elapsed_s=max(0., now - (self._tracking_started_monotonic or now)))
             return
         self._tracked_peak_target_hz = nearest.frequency_hz
         started = self._tracking_started_monotonic or now
@@ -5500,7 +5582,11 @@ class AnritsuPage(QWidget):
             source=self._peak_measurement_method(),
         )
 
-    def _peak_tracking_closed(self) -> None:
+    def _peak_tracking_closed(self, window=None) -> None:
+        if window is not None and window is not self._peak_tracking_window:
+            self._additional_peak_trackers.pop(window, None)
+            window.deleteLater()
+            return
         tracking = self._peak_tracking_window
         self._peak_tracking_window = None
         self._tracked_peak_target_hz = None
@@ -5512,9 +5598,40 @@ class AnritsuPage(QWidget):
             tracking.deleteLater()
         self.status.emit("Anritsu local peak tracking stopped")
 
-    def _peak_tracking_history_cleared(self) -> None:
+    def _peak_tracking_history_cleared(self, window=None) -> None:
         self._tracking_session = getattr(self, "_tracking_session", 0) + 1
+        if window is not None and window is not self._peak_tracking_window:
+            state = self._additional_peak_trackers.get(window)
+            if state is not None:
+                _, target, gate = state["context"]
+                state["context"] = (self._tracking_session, target, gate)
+                state["started"] = time.monotonic()
+            return
         self._tracking_started_monotonic = time.monotonic()
+
+    def _peak_tracking_gate_changed(self, window, gate_hz):
+        if window is self._peak_tracking_window:
+            self._tracked_peak_gate_hz = gate_hz
+            self._tracking_session = getattr(self, "_tracking_session", 0) + 1
+        elif window in self._additional_peak_trackers:
+            state = self._additional_peak_trackers[window]
+            self._tracking_session = getattr(self, "_tracking_session", 0) + 1
+            state["context"] = (self._tracking_session, state["context"][1], gate_hz)
+        self._analyze_current_spectrum(force=True)
+
+    def _peak_tracking_paused(self, window, paused):
+        self._tracking_session = getattr(self, "_tracking_session", 0) + 1
+        state = self._additional_peak_trackers.get(window)
+        if state is not None:
+            state["context"] = (self._tracking_session, state["context"][1], state["context"][2])
+        if paused:
+            target = state["context"][1] if state else self._tracked_peak_target_hz
+            gate = state["context"][2] if state else self._tracked_peak_gate_hz
+            started = state["started"] if state else self._tracking_started_monotonic
+            if target is not None and started is not None:
+                window.mark_lost(target_hz=target, gate_hz=gate, elapsed_s=time.monotonic() - started)
+            window.status.setText("Peak tracking paused. Spectrum acquisition is unchanged.")
+        self._analyze_current_spectrum(force=True)
 
     @staticmethod
     def _set_combo_data(combo: ComboBox, value: object) -> None:
@@ -5573,17 +5690,21 @@ class AnritsuPage(QWidget):
             floating.deleteLater()
 
     def _open_spectrum_window(self) -> None:
-        """Show a non-controlling mirror of the current spectrum display."""
+        """Mirror completed traces with controls for the same page-owned Live session."""
 
         if self._spectrum_window is None:
             floating = _AnritsuSpectrumWindow(self)
             floating.closed.connect(self._spectrum_window_closed)
+            floating.start_live.clicked.connect(lambda: self.toggle_live() if not self._timer.isActive() else None)
+            floating.stop_live.clicked.connect(lambda: self.toggle_live() if self._timer.isActive() else None)
+            floating.peak_table.clicked.connect(self._open_peak_table)
             floating.spectrum.status_changed.connect(self.status.emit)
             floating.spectrum.display_resumed.connect(self._refresh_spectrum_display)
             floating.spectrum.display_resumed.connect(self._sync_peak_markers)
             self._spectrum_window = floating
         floating = self._spectrum_window
         floating.show()
+        self._apply_page_state()
         self._refresh_spectrum_display()
         if self._latest_trace is not None:
             self._update_signal_analysis(self._latest_trace)
@@ -6132,7 +6253,7 @@ class AnritsuPage(QWidget):
                 self._finish_temporal_averaging(resume_live=False)
                 self.info.setText(f"Averaging stopped: {error}")
         if operation in {
-            "read_configuration", "configure", "start_live", "fetch_trace", "fetch_current_trace",
+            "read_configuration", "configure", "start_live", "stop_live", "fetch_trace", "fetch_current_trace",
             "fetch_current_trace_fast", "acquire_fresh_trace", "single_sweep", "emergency_off",
         }:
             self._live_transition_pending = False
@@ -6185,6 +6306,10 @@ class AnritsuPage(QWidget):
             self.status.emit("Waiting for spectrum archives and analysis workers to finish. Retry close when processing ends.")
             event.ignore()
             return
+        for window in tuple(self._additional_peak_trackers):
+            window.close()
+        if self._peak_tracking_window is not None:
+            self._peak_tracking_window.close()
         super().closeEvent(event)
 
 

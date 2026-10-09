@@ -45,10 +45,11 @@ class PlanEstimate:
     spectrum_values: int
     warnings: tuple[str, ...]
     public_import_upper_bytes: int = 0
+    companion_bytes: int = 0
 
     @property
     def total_upper_bytes(self) -> int:
-        return self.uncompressed_hdf5_bytes + self.csv_bytes
+        return self.uncompressed_hdf5_bytes + self.csv_bytes + self.companion_bytes
 
 
 class PlanEstimator:
@@ -93,6 +94,8 @@ class PlanEstimator:
         public_spectrum_values = 0
         spectrum_extra_bytes = 0
         prepared_plan_bytes = 0
+        baseline_companion_bytes = 0
+        serialized_plan_bytes = 3 * len(plan.recipe_source.encode("utf-8"))
         energized = any(action_can_energize(action) for action in plan.actions)
         nplc_by_channel = {}
         active_smu_channels = set()
@@ -107,6 +110,9 @@ class PlanEstimator:
             # snapshots contain only the bounded current voltage/profile.
             snapshot_payload = {key: value for key, value in action.payload.items() if key != "plan"}
             payload_size = len(json.dumps(RecipeCompiler._canonicalize(snapshot_payload), ensure_ascii=False).encode("utf-8"))
+            serialized_plan_bytes += 4 * (payload_size
+                + len(json.dumps(action.setpoints_si).encode("utf-8"))
+                + len(action.node_id.encode("utf-8")) + 1024)
             if action.kind == "configure_moke_box" and "plan" in action.payload:
                 prepared_plan_bytes += 3 * len(json.dumps(RecipeCompiler._canonicalize(action.payload["plan"])).encode("utf-8"))
             module = next((name for name in ("rigol", "keithley", "anritsu", "moke") if name in action.kind), action.kind)
@@ -135,6 +141,10 @@ class PlanEstimator:
                 latest_spectrum_points = int(action.payload["config"].points)
                 spectrum_points_known = True
             elif action.kind in {"acquire_reference", "acquire_spectrum"}:
+                if action.kind == "acquire_reference":
+                    # One portable mean (private + public arrays), provenance,
+                    # and a JSON sidecar; raw frames remain in the main archive.
+                    baseline_companion_bytes += 4 * latest_spectrum_points * 8 + 1024 * 1024
                 if not spectrum_points_known and not unknown_points_reported:
                     warnings.append(
                         f"Analyzer point count is not established by the plan; "
@@ -248,4 +258,8 @@ class PlanEstimator:
             spectrum_values=spectrum_values,
             warnings=tuple(warnings),
             public_import_upper_bytes=public_import_upper,
+            companion_bytes=(baseline_companion_bytes
+                + (len(plan.actions) * events_per_action + 32) * (snapshot_budget + 4096)
+                + serialized_plan_bytes + prepared_plan_bytes
+                + 1024 * 1024),
         )

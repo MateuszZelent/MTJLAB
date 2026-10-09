@@ -530,7 +530,7 @@ class MainWindow(FluentWindow):
         self.inventory_page.active_target_changed.connect(self._on_active_sample_target_changed)
         self.inventory_page.open_result_requested.connect(self._open_inventory_result)
         self.recipe_page.change_target_requested.connect(lambda: self._navigate_to("inventory"))
-        self.recipe_page.set_active_sample_target(self.inventory_store.get_active_target())
+        self._bind_sweep_sample_target(self.inventory_store.get_active_target())
         self.keithley_characterization_page.set_inventory_store(self.inventory_store)
         self.inventory_page.active_target_changed.connect(
             self.keithley_characterization_page.set_active_sample_target
@@ -850,7 +850,7 @@ class MainWindow(FluentWindow):
         self.inventory_page.active_target_changed.connect(self._on_active_sample_target_changed)
         self.inventory_page.open_result_requested.connect(self._open_inventory_result)
         self.elab_page.upload_completed_record.connect(self._on_elab_upload_completed)
-        self.recipe_page.set_active_sample_target(self.inventory_store.get_active_target())
+        self._bind_sweep_sample_target(self.inventory_store.get_active_target())
         self.results_page.resume_requested.connect(self._resume_run)
         self.results_page.open_sweep_requested.connect(self._open_historical_thatec_sweep)
         self.results_page.result_selected.connect(self.elab_page.set_selected_result)
@@ -1423,6 +1423,9 @@ class MainWindow(FluentWindow):
                 plot.apply_theme(theme)
             for heatmap in top_level.findChildren(HeatmapResultsTab):
                 heatmap.apply_theme(theme)
+            from app.ui.results.scalar_tab import ScalarResultsTab
+            for scalars in top_level.findChildren(ScalarResultsTab):
+                scalars.apply_theme(theme)
         if changed:
             self.theme_changed.emit(theme)
         self._configured_theme_mode = mode
@@ -1969,6 +1972,9 @@ class MainWindow(FluentWindow):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+        # Verify missing sessions on the page controllers so the run can borrow
+        # them and return them to the UI without closing the transport.
+        self._connect_sweep_devices(dialog.connectable_devices)
         return dialog
 
     def _clear_sweep_readiness_dialog(self, dialog: SweepDeviceReadinessDialog) -> None:
@@ -2046,7 +2052,7 @@ class MainWindow(FluentWindow):
             if sample_target.is_active and sample_target.sample_id:
                 output_dir_override = str(
                     self.inventory_store.measurement_directory_for(
-                        sample_target.sample_id, "sweeps"
+                        sample_target.sample_id, "sweeps", row=sample_target.row, col=sample_target.col,
                     )
                 )
             self._run_controller.start(
@@ -2659,9 +2665,17 @@ class MainWindow(FluentWindow):
             self._log("Run Engine completed the measurement")
 
     def _on_active_sample_target_changed(self, target: ActiveSampleTarget) -> None:
-        self.recipe_page.set_active_sample_target(target)
+        self._bind_sweep_sample_target(target)
         self.keithley_characterization_page.set_active_sample_target(target)
         self._refresh_safety_strip()
+
+    def _bind_sweep_sample_target(self, target: ActiveSampleTarget) -> None:
+        directory = (self.inventory_store.measurement_directory_for(target.sample_id, "sweeps", row=target.row, col=target.col)
+                     if target.is_active else None)
+        self.recipe_page.set_active_sample_target(target, output_directory=directory)
+        manual_directory = (self.inventory_store.measurement_directory_for(target.sample_id,
+            "single_measurements", "Anritsu_MS2830A", row=target.row, col=target.col) if target.is_active else None)
+        self.anritsu_page.set_sample_measurement_context(manual_directory, target.as_dict())
 
     def _open_inventory_result(self, run_path: str) -> None:
         path = Path(run_path)

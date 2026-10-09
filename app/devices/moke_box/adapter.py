@@ -274,6 +274,8 @@ class MokeBoxAdapter(DeviceAdapter):
                 except Exception:
                     failed = True  # Attempt every approved channel even if one shutdown fails.
             if not failed:
+                # E-STOP does not establish Kepco power-off even with valid DAC zero.
+                self._state = DeviceState.UNKNOWN
                 return
         if self._connected:
             try:
@@ -582,7 +584,9 @@ class MokeBoxAdapter(DeviceAdapter):
             self._next_target += 1
             if self._next_target == len(plan.targets_v):
                 self._armed = False
-            self._state = DeviceState.UNKNOWN
+            # Confirmed DAC communication is distinct from unmonitored Kepco power.
+            # UNKNOWN is reserved for uncertain/faulted operations, not normal control.
+            self._state = DeviceState.VERIFIED
             return MokeVoltageResult(channel, requested, applied, actual, profile.fingerprint)
 
     def _ramp(self, target_v: float, *, cancel: threading.Event | None, stopping: bool,
@@ -684,7 +688,11 @@ class MokeBoxAdapter(DeviceAdapter):
                 next_v = envelope.applied_voltage(next_v)
             if next_v == actual and not math.isclose(target_v, actual, rel_tol=0, abs_tol=1e-12):
                 raise DeviceError("MOKE DAC ramp cannot progress within its limits.")
-            delay = max(profile.step_interval_s, abs(next_v - actual) / profile.maximum_slew_v_s)
+            # Fresh readback may already equal the quantized target. Keep the
+            # settling/cancellation path, but do not repeat the same DAC SET.
+            # Shutdown after an uncertain earlier write still needs a SET.
+            needs_write = next_v != actual or (stopping and profile.channel in self._changed_channels)
+            delay = max(profile.step_interval_s, abs(next_v - actual) / profile.maximum_slew_v_s) if needs_write else 0.0
             if not profile.simulation:
                 if delay > deadline - time.monotonic():
                     raise TimeoutError("MOKE ramp deadline cannot accommodate the next step.")
@@ -703,10 +711,11 @@ class MokeBoxAdapter(DeviceAdapter):
             if remaining <= 0:
                 raise TimeoutError("MOKE voltage ramp exceeded its qualified deadline.")
             try:
-                with self.io_timeout(remaining):
-                    actual = self._write_vout(profile.channel, next_v, deadline=deadline,
-                                              cancel=cancel, stopping=stopping,
-                                              recovery_from_v=actual if recovering else None)
+                if needs_write:
+                    with self.io_timeout(remaining):
+                        actual = self._write_vout(profile.channel, next_v, deadline=deadline,
+                                                  cancel=cancel, stopping=stopping,
+                                                  recovery_from_v=actual if recovering else None)
             except (ConfirmedRampError, RunInterrupted):
                 report(phase, force=True)
                 raise
@@ -763,7 +772,7 @@ class MokeBoxAdapter(DeviceAdapter):
                     self._changed_channels.discard(profile.channel)
                 self._output_changed = bool(self._changed_channels)
                 self._safe_target_confirmed = confirmed and not self._output_changed
-                self._state = DeviceState.UNKNOWN  # Kepco power/current are not monitored.
+                self._state = DeviceState.VERIFIED  # Verified DAC session; never a power-off claim.
                 return MokeVoltageResult(profile.channel, profile.safe_v, profile.safe_v,
                                          actual, profile.fingerprint, confirmed)
             except Exception as exc:

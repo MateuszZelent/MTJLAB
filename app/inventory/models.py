@@ -94,6 +94,7 @@ class ActiveSampleTarget:
     col_label: str | None = None
     description: str | None = None
     tags: tuple[str, ...] = ()
+    device_settings: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def is_active(self) -> bool:
@@ -129,6 +130,7 @@ class ActiveSampleTarget:
             "col_label": self.col_label,
             "description": self.description,
             "tags": list(self.tags),
+            "device_settings": dict(self.device_settings),
         }
 
     @classmethod
@@ -148,6 +150,7 @@ class ActiveSampleTarget:
             col_label=str(data.get("col_label") or "") or None,
             description=str(data.get("description") or "") or None,
             tags=tags,
+            device_settings=dict(data.get("device_settings") or {}),
         )
 
 

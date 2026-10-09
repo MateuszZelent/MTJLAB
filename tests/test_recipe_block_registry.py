@@ -130,6 +130,33 @@ def test_ui_library_and_inspector_share_registry(tmp_path):
             identity = button.property("recipeBlockType")
             assert identity in BLOCKS
             assert identity in button.toolTip()
+        measurement_button, = (
+            button for button in page._library_action_buttons
+            if button.property("recipeBlockType") == "recipe.measure_keithley"
+        )
+        assert measurement_button.isVisible()
+        assert measurement_button.width() > 0 and measurement_button.height() > 0
+        page._select_source_node("main")
+        measurement_button.click()
+        app.processEvents()
+        measurement = parse_recipe_text(page._builder_source()).root.children[-1]
+        assert measurement.type == "measure_keithley"
+        assert measurement.block_type == "recipe.measure_keithley"
+        assert measurement.data == {"channel": "B"}
+        from app.ui.recipes.common_dialogs import ActionNodeEditorDialog
+        dialog = ActionNodeEditorDialog(measurement, page)
+        try:
+            dialog.show()
+            app.processEvents()
+            channel_editor, _ = dialog._editors["channel"]
+            assert channel_editor.isVisible()
+            assert channel_editor.width() > 0 and channel_editor.height() > 0
+            assert dialog.node_fields()["channel"] == "B"
+            channel_editor.setCurrentIndex(channel_editor.findData("A"))
+            assert dialog.node_fields()["channel"] == "A"
+            assert dialog.grab().save(str(tmp_path / "keithley-measurement-dialog.png"))
+        finally:
+            dialog.close()
         assert "block_type:" in page._builder_source()
         assert page.measurement_tree.isVisible()
         assert page.grab().save(str(tmp_path / "block-registry-ui.png"))

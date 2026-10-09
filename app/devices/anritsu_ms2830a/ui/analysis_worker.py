@@ -49,6 +49,7 @@ class SpectrumAnalysisRequest:
     reference_operation: str = "none"
     interference_calibration: object = None
     tracking_context: tuple[int, float, float] | None = None
+    additional_tracking_contexts: tuple[tuple[int, float, float], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +118,7 @@ class SpectrumAnalysisOutcome:
     statistics: PreviewStatistics | None = None
     tracking_context: tuple[int, float, float] | None = None
     tracked_peak: SpectrumPeak | None = None
+    additional_tracked_peaks: tuple[tuple[tuple[int, float, float], SpectrumPeak | None], ...] = ()
 
 
 def _tracking_peak(frequencies, values, unit, context):
@@ -323,6 +325,12 @@ class _SpectrumAnalysisWorker(QObject):
             tracked_peak = _tracking_peak(request.frequencies_hz,
                 cleanup.values if request.parameters.peak_measure_filtered or cleanup.input_values is None
                 else cleanup.input_values, cleanup.unit, request.tracking_context)
+            additional = []
+            for context in request.additional_tracking_contexts:
+                self._check_interruption()
+                additional.append((context, _tracking_peak(request.frequencies_hz,
+                    cleanup.values if request.parameters.peak_measure_filtered or cleanup.input_values is None
+                    else cleanup.input_values, cleanup.unit, context)))
             self._check_interruption()
             self.completed.emit(
                 SpectrumAnalysisOutcome(
@@ -340,6 +348,7 @@ class _SpectrumAnalysisWorker(QObject):
                     statistics,
                     request.tracking_context,
                     tracked_peak,
+                    tuple(additional),
                 )
             )
         except Exception as exc:  # noqa: BLE001 - report failures through Qt

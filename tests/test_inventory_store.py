@@ -57,7 +57,7 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(retrieved.cell_state("2", "3"), "untested")
         sample_dir = self.store.sample_directory("SAMPLE-XYZ")
         self.assertTrue((sample_dir / "attachments").is_dir())
-        self.assertTrue((sample_dir / "measurements" / "sweeps").is_dir())
+        self.assertTrue((sample_dir / "devices").is_dir())
         self.assertTrue((sample_dir / "info.csv").is_file())
 
         # Update cell
@@ -217,6 +217,7 @@ class InventoryStoreTests(unittest.TestCase):
     def test_move_catalogue_resumes_an_identical_partial_copy(self) -> None:
         sample = self.store.save_sample(Sample(sample_id="RESUME", name="Resume"))
         source_file = self.store.sample_directory(sample.sample_id) / "measurements" / "run.dat"
+        source_file.parent.mkdir(parents=True, exist_ok=True)
         source_file.write_bytes(b"measurement")
         new_root = self.root / "PartialCatalogue"
         partial_file = new_root / sample.folder_name / "measurements" / "run.dat"
@@ -232,6 +233,7 @@ class InventoryStoreTests(unittest.TestCase):
     def test_move_catalogue_does_not_overwrite_different_partial_data(self) -> None:
         sample = self.store.save_sample(Sample(sample_id="CONFLICT", name="Conflict"))
         source_file = self.store.sample_directory(sample.sample_id) / "measurements" / "run.dat"
+        source_file.parent.mkdir(parents=True, exist_ok=True)
         source_file.write_bytes(b"source measurement")
         new_root = self.root / "ConflictingCatalogue"
         partial_file = new_root / sample.folder_name / "measurements" / "run.dat"

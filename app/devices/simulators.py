@@ -264,17 +264,17 @@ class RigolSimulator(_BaseSimulator):
         if match:
             self.output_mode[int(match.group(1))] = match.group(2).upper()
             return
-        match = re.match(r"^:OUTP([12]):GAT:POL\s+(NORM|INV)$", command, re.IGNORECASE)
+        match = re.match(r"^:OUTP([12]):GAT:POL\s+(NORM|INV|POS|NEG)$", command, re.IGNORECASE)
         if match:
-            self.gate_polarity[int(match.group(1))] = match.group(2).upper()
+            self.gate_polarity[int(match.group(1))] = {"POS": "NORM", "NEG": "INV"}.get(match.group(2).upper(), match.group(2).upper())
             return
         match = re.match(r"^:OUTP([12]):SYNC\s+(ON|OFF)$", command, re.IGNORECASE)
         if match:
             self.sync[int(match.group(1))] = match.group(2).upper() == "ON"
             return
-        match = re.match(r"^:OUTP([12]):SYNC:POL\s+(NORM|INV)$", command, re.IGNORECASE)
+        match = re.match(r"^:OUTP([12]):SYNC:POL\s+(NORM|INV|POS|NEG)$", command, re.IGNORECASE)
         if match:
-            self.sync_polarity[int(match.group(1))] = match.group(2).upper()
+            self.sync_polarity[int(match.group(1))] = {"POS": "NORM", "NEG": "INV"}.get(match.group(2).upper(), match.group(2).upper())
             return
         match = re.match(
             rf"^:OUTP([12]):SYNC:DEL\s+({_SCPI_NUMBER})$",
@@ -332,12 +332,18 @@ class RigolSimulator(_BaseSimulator):
             self.phase[int(match.group(1))] = float(match.group(2))
             return
         match = re.match(
-            rf"^:SOUR([12]):VOLT\s+({_SCPI_NUMBER})$",
+            rf"^:SOUR([12]):VOLT\s+({_SCPI_NUMBER}|MIN)$",
             command,
             re.IGNORECASE,
         )
         if match:
-            channel, amplitude = int(match.group(1)), float(match.group(2))
+            channel = int(match.group(1))
+            value = match.group(2).upper()
+            if value == "MIN":
+                load = self.load[channel]
+                amplitude = .002 if str(load).upper() in {"HIGHZ", "INF"} else .002 * float(load) / (float(load) + 50)
+            else:
+                amplitude = float(value)
             offset = (self.high[channel] + self.low[channel]) / 2.0
             self.high[channel] = offset + amplitude / 2.0
             self.low[channel] = offset - amplitude / 2.0
@@ -389,6 +395,9 @@ class RigolSimulator(_BaseSimulator):
     def _query(self, command: str) -> str:
         if command == "*IDN?":
             return "Rigol Technologies,DG1032Z,SIM000001,sim-1.0"
+        if command == "*OPC?":
+            # This simulator applies each write synchronously.
+            return "1"
         if command == ":SYST:VERS?":
             return "1999.0"
         if command == ":SYST:CHAN:NUM?":

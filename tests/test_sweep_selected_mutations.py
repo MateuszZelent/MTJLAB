@@ -38,7 +38,7 @@ def test_selected_keithley_level_preserves_full_baseline_and_commands(tmp_path):
         session.commands.clear()
         applied = adapter.configure_source(selected)
         mutations = [command for command in session.commands if " = " in command]
-        assert mutations == ["smub.source.output = smub.OUTPUT_OFF", "smub.source.leveli = 0.002"]
+        assert mutations == ["smub.source.leveli = 0.002"]
         assert applied == replace(baseline, level_si=.002, changed_fields=None)
     finally:
         adapter.disconnect()
@@ -180,7 +180,8 @@ def test_recovery_restores_actual_unspecified_fields_instead_of_request_defaults
             "keithley": {"channel_B": {"actual": state}},
         })
         restored = prelude[0].payload["request"]
-        assert restored == actual
+        assert replace(restored, changed_fields=None) == actual
+        assert restored.changed_fields is not None
         assert restored.nplc == 8 and restored.sense_mode == "2wire"
         adapter.configure_source(replace(actual, nplc=1, sense_mode="2wire"))
         assert adapter.configure_source(restored) == actual

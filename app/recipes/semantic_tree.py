@@ -927,17 +927,18 @@ def normalize_recipe_tree(
                 )
             )
 
-    safeguard_id = "__finally__.automatic_safeguards"
-    add_id(safeguard_id)
-    finally_children.append(SemanticTreeNode(
-        safeguard_id, SemanticNodeKind.GENERATED_SAFETY, "__finally__",
-        "Automatic engine safeguards",
-        _mapping({"detail": "Derived from this plan; YAML unchanged" if safe_shutdown_actions is not None
-                  else "Validate to preview safeguards for the devices used by this plan",
-                  "safeguards": tuple(label for _, label in generated_shutdown),
-                  "guaranteed": True}),
-        None, tuple(safeguard_children) if show_safeguard_steps else (), False, False,
-    ))
+    if show_safeguard_steps:
+        safeguard_id = "__finally__.automatic_safeguards"
+        add_id(safeguard_id)
+        finally_children.append(SemanticTreeNode(
+            safeguard_id, SemanticNodeKind.GENERATED_SAFETY, "__finally__",
+            "Automatic engine safeguards",
+            _mapping({"detail": "Derived from this plan; YAML unchanged" if safe_shutdown_actions is not None
+                      else "Validate to preview safeguards for the devices used by this plan",
+                      "safeguards": tuple(label for _, label in generated_shutdown),
+                      "guaranteed": True}),
+            None, tuple(safeguard_children), False, False,
+        ))
 
     cleanup_ids = tuple(str(node.id) for node in recipe.finally_nodes)
     generated_ids = tuple(action_id for action_id, _label_text in generated_shutdown)

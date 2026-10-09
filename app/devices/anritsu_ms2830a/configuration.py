@@ -18,6 +18,11 @@ class SpectrumConfig:
     changed_fields: tuple[str, ...] | None = None
     prepare_current_buffer: bool = True
 
+    @property
+    def is_complete_configuration(self) -> bool:
+        """An authored basic baseline remains complete even with a field mask."""
+        return self.changed_fields is None or {"start_hz", "stop_hz", "reference_level_dbm", "points"} <= set(self.changed_fields)
+
 
 @dataclass(frozen=True, slots=True)
 class SignalGeneratorConfig:

@@ -90,6 +90,50 @@ def append_recipe_sweep(writer, record):
     return ordinal
 
 
+def _decode_recipe_record(group, metadata, text):
+    for name, unit in (("frequency_hz", "Hz"), ("power_dbm", "dBm")):
+        axis = group[name]
+        if (not isinstance(axis, h5py.Dataset) or axis.ndim != 1 or axis.dtype.kind not in "fiu"
+                or not 2 <= axis.shape[0] <= 1048576 or axis.attrs.get("unit") != unit):
+            raise ExecutionError("Recipe raw sweep requires bounded arrays with explicit Hz/dBm units.")
+    metadata["role"] = SpectrumFrameRole(metadata["role"])
+    metadata["evidence"] = SweepEvidence(metadata["evidence"])
+    metadata["setpoints_si"] = tuple(tuple(pair) for pair in metadata["setpoints_si"])
+    for key in ("requested_setpoints_si", "applied_setpoints_si", "readback_setpoints_si", "safety_measurements_si"):
+        if key in metadata:
+            metadata[key] = tuple(tuple(pair) for pair in metadata[key])
+    record = RecipeSpectrumSweep(group["frequency_hz"][:], group["power_dbm"][:], **metadata)
+    if _identity(text, record) != group.attrs["sha256"]:
+        raise ExecutionError("Recipe raw sweep content identity is corrupted.")
+    return record
+
+
+def read_recipe_sweep(file, ordinal):
+    """Read one committed source without traversing a large acquisition history."""
+    if type(ordinal) is not int or ordinal < 0:
+        raise ExecutionError("Recipe sweep ordinal must be a nonnegative integer.")
+    if ROOT not in file or str(ordinal) not in file[ROOT]:
+        raise ExecutionError(f"Recorded recipe source sweep {ordinal} is missing.")
+    if file[ROOT].attrs.get("schema") != SCHEMA:
+        raise ExecutionError("Unsupported recipe raw sweep archive schema.")
+    try:
+        group = file[ROOT][str(ordinal)]
+        text, complete = group.attrs["metadata_json"], group.attrs.get("complete")
+        if (type(text) is not str or len(text.encode("utf-8")) > MAX_RECIPE_SWEEP_JSON_BYTES
+                or not isinstance(complete, (bool, np.bool_)) or not complete):
+            raise ExecutionError("Recipe raw sweep metadata is incomplete or exceeds its budget.")
+        metadata = json.loads(text)
+        if (type(metadata) is not dict or type(metadata.get("ordinal")) is not int
+                or metadata.pop("ordinal") != ordinal):
+            raise ExecutionError("Recipe raw sweep identity differs from its archive position.")
+        boundary = metadata.pop("checkpoint_count_at_capture")
+        if type(boundary) is not int or not 0 <= boundary <= 2**63 - 1:
+            raise ExecutionError("Recipe raw sweep checkpoint boundary is inconsistent.")
+        return _decode_recipe_record(group, metadata, text)
+    except (KeyError, ValueError, TypeError) as exc:
+        raise ExecutionError(f"Malformed recipe raw sweep archive: {exc}") from exc
+
+
 def iter_recipe_sweeps(file, *, selected_indices=None):
     if ROOT not in file:
         return
@@ -128,15 +172,7 @@ def iter_recipe_sweeps(file, *, selected_indices=None):
             if selected_indices is not None and ordinal not in selected_indices:
                 boundaries[execution] = point
                 continue
-            metadata["role"] = SpectrumFrameRole(metadata["role"])
-            metadata["evidence"] = SweepEvidence(metadata["evidence"])
-            metadata["setpoints_si"] = tuple(tuple(pair) for pair in metadata["setpoints_si"])
-            for key in ("requested_setpoints_si", "applied_setpoints_si", "readback_setpoints_si", "safety_measurements_si"):
-                if key in metadata:
-                    metadata[key] = tuple(tuple(pair) for pair in metadata[key])
-            record = RecipeSpectrumSweep(group["frequency_hz"][:], group["power_dbm"][:], **metadata)
-            if _identity(text, record) != group.attrs["sha256"]:
-                raise ExecutionError("Recipe raw sweep content identity is corrupted.")
+            record = _decode_recipe_record(group, metadata, text)
             boundaries[execution] = point
             yield ordinal, point, record
     except (KeyError, ValueError, TypeError) as exc:

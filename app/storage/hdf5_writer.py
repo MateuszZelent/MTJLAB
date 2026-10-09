@@ -95,7 +95,8 @@ class Hdf5RunWriter:
             self._file = h5py.File(self.path, "x", libver="latest")
         except (FileExistsError, OSError) as exc:
             raise ExecutionError(
-                f"The result file already exists or cannot be created: {self.path}"
+                f"{'The result file already exists' if self.path.exists() else 'Cannot create the result file'}: "
+                f"{self.path}. Filesystem error: {exc}"
             ) from exc
         try:
             self._points = self._file.create_group("points")

@@ -99,6 +99,9 @@ class StoredReference:
     powers_dbm: tuple[float, ...]
     purpose: str = "reference"
     configuration_fingerprint: str | None = None
+    source_sweep_indices: tuple[int, ...] = ()
+    selected_sweep: int | None = None
+    collection_average_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +115,7 @@ class StoredReferenceSummary:
     source_point_count: int
     purpose: str
     configuration_fingerprint: str | None
+    source_sweep_indices: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,7 +265,7 @@ class Hdf5RunReader:
 
     @staticmethod
     def list_runs(
-        directory: str | Path, *, recursive: bool = False
+        directory: str | Path, *, recursive: bool = False, cancelled=None
     ) -> tuple[RunSummary, ...]:
         """Index immutable HDF5 runs below ``directory``.
 
@@ -272,12 +276,34 @@ class Hdf5RunReader:
         recursive scan without changing the reader's compatibility surface.
         """
         output_dir = Path(directory)
+        cancelled = cancelled or (lambda: False)
+        def check_cancelled():
+            if cancelled():
+                raise InterruptedError("Result catalogue indexing cancelled")
+
+        check_cancelled()
         if not output_dir.exists():
             return ()
         summaries: list[RunSummary] = []
         glob = output_dir.rglob if recursive else output_dir.glob
-        paths = {*glob("*.h5"), *glob("*.hdf5")}
-        for path in sorted(paths, key=lambda item: item.stat().st_mtime, reverse=True):
+        paths = set()
+        for extension in ("*.h5", "*.hdf5"):
+            for path in glob(extension):
+                check_cancelled()
+                paths.add(path)
+        from app.storage.run_bundle import is_bundle_companion
+        ordered = []
+        for path in paths:
+            check_cancelled()
+            if is_bundle_companion(path):
+                continue
+            try:
+                modified = path.stat().st_mtime
+            except OSError:
+                modified = 0
+            ordered.append((modified, str(path), path))
+        for _, _, path in sorted(ordered, reverse=True):
+            check_cancelled()
             try:
                 summaries.append(Hdf5RunReader.summary(path))
             except ExecutionError:
@@ -586,6 +612,7 @@ class Hdf5RunReader:
                         int(group.attrs.get("average_count", 1)), int(frequency.shape[0]),
                         Hdf5RunReader._attribute_text(group.attrs.get("purpose")) or "reference",
                         Hdf5RunReader._reference_fingerprint(group),
+                        Hdf5RunReader._reference_source_indices(group),
                     ))
                     continue
                 frequencies, powers = Hdf5RunReader._read_spectrum_axes(group, f"Reference {index}")
@@ -605,7 +632,9 @@ class Hdf5RunReader:
                         frequencies_hz=frequencies,
                         powers_dbm=powers,
                         purpose=Hdf5RunReader._attribute_text(group.attrs.get("purpose")) or "reference",
-                configuration_fingerprint=Hdf5RunReader._reference_fingerprint(group),
+                        configuration_fingerprint=Hdf5RunReader._reference_fingerprint(group),
+                        source_sweep_indices=Hdf5RunReader._reference_source_indices(group),
+                        collection_average_count=int(group.attrs.get("average_count", 1)),
                     )
                 )
             return tuple(result)
@@ -661,7 +690,73 @@ class Hdf5RunReader:
                 powers_dbm=powers,
                 purpose=Hdf5RunReader._attribute_text(group.attrs.get("purpose")) or "reference",
                 configuration_fingerprint=Hdf5RunReader._reference_fingerprint(group),
+                source_sweep_indices=Hdf5RunReader._reference_source_indices(group),
+                collection_average_count=int(group.attrs.get("average_count", 1)),
             )
+
+    @staticmethod
+    def _reference_source_indices(group) -> tuple[int, ...]:
+        """Legacy/imported means can legitimately have no individual sources."""
+        if "source_recipe_sweep_indices" not in group:
+            return ()
+        source = group["source_recipe_sweep_indices"]
+        count = int(group.attrs.get("average_count", 1))
+        if (not hasattr(source, "dtype") or source.ndim != 1 or source.dtype.kind not in "iu"
+                or not 1 <= count <= 9999 or source.shape != (count,)):
+            raise ExecutionError("Reference source sweep identities are malformed.")
+        indices = tuple(int(value) for value in source[:])
+        if any(not 0 <= value < 2**63 for value in indices) or tuple(sorted(set(indices))) != indices:
+            raise ExecutionError("Reference source sweep identities are not unique and ordered.")
+        return indices
+
+    @staticmethod
+    def reference_sweep(path: str | Path, index: int, sweep: int) -> StoredReference:
+        """Read one linked raw repeat, retaining its collection and source identity."""
+        from datetime import UTC, datetime
+        from .recipe_spectrum_store import read_recipe_sweep
+        from .reference_transaction import require_committed_reference
+        from app.domain.spectrum_correction import SpectrumFrameRole
+        from app.spectrum.processing import frequency_grids_match
+
+        if type(index) is not int or index < 0 or type(sweep) is not int or sweep < 0:
+            raise ExecutionError("Reference and repeat indices must be nonnegative integers.")
+        with Hdf5RunReader._open(path) as file:
+            container = file.get("references")
+            group = container.get(str(index)) if container is not None else file.get("reference") if index == 0 else None
+            if group is None:
+                raise ExecutionError(f"Recorded reference {index} is missing.")
+            require_committed_reference(group)
+            indices = Hdf5RunReader._reference_source_indices(group)
+            if not indices:
+                raise ExecutionError("Individual repeats are not stored for this baseline; use its stored mean.")
+            if sweep >= len(indices):
+                raise ExecutionError(f"Repeat {sweep + 1} is outside this baseline's {len(indices)} recorded repeats.")
+            record = read_recipe_sweep(file, indices[sweep])
+            frequencies, _mean = Hdf5RunReader._read_spectrum_axes(group, f"Reference {index}")
+            fingerprint = Hdf5RunReader._reference_fingerprint(group)
+            acquisition = json.loads(Hdf5RunReader._attribute_text(group.attrs.get("acquisition_metadata_json")) or "{}")
+            if not isinstance(acquisition, dict):
+                raise ExecutionError("Reference acquisition metadata is malformed.")
+            duration = acquisition.get("minimum_duration_s", 0.)
+            first = record if sweep == 0 else read_recipe_sweep(file, indices[0])
+            def identity(item):
+                return item.execution_id, item.recipe_node_id, item.configuration_generation, item.setpoints_si
+            if (record.role != SpectrumFrameRole.REFERENCE or first.role != SpectrumFrameRole.REFERENCE
+                    or first.average_index != 0 or record.average_index != sweep
+                    or record.average_count != (None if duration else len(indices))
+                    or first.average_count != record.average_count or first.minimum_duration_s != duration
+                    or record.minimum_duration_s != duration
+                    or acquisition.get("recipe_node_id", record.recipe_node_id) != record.recipe_node_id
+                    or identity(record) != identity(first)
+                    or acquisition.get("configuration_generation", record.configuration_generation) != record.configuration_generation):
+                raise ExecutionError("Selected raw repeat does not belong to this reference acquisition block.")
+            if not frequency_grids_match(frequencies, record.frequencies_hz):
+                raise ExecutionError("Individual reference repeat has a different frequency grid from its stored mean.")
+            return StoredReference(index, Hdf5RunReader._attribute_text(group.attrs.get("trace_name")) or "TRAC1",
+                datetime.fromtimestamp(record.acquired_at_s, UTC).isoformat(), "single", 1,
+                tuple(float(value) for value in record.frequencies_hz), tuple(float(value) for value in record.powers_dbm),
+                Hdf5RunReader._attribute_text(group.attrs.get("purpose")) or "reference",
+                fingerprint, (indices[sweep],), sweep, len(indices))
 
     @staticmethod
     def _read_spectrum_axes(group: Any, label: str) -> tuple[tuple[float, ...], tuple[float, ...]]:

@@ -94,12 +94,12 @@ def test_interrupted_background_keeps_raw_without_publishing_partial_mean(tmp_pa
     original = AnritsuAdapter.acquire_single_sweep
     calls = 0
 
-    def fail_during_background(adapter, trace):
+    def fail_during_background(adapter, trace, **kwargs):
         nonlocal calls
         calls += 1
         if calls >= 6:
             raise DeviceError("Injected acquisition failure")
-        return original(adapter, trace)
+        return original(adapter, trace, **kwargs)
 
     monkeypatch.setattr(AnritsuAdapter, "acquire_single_sweep", fail_during_background)
     settings = audit_settings(tmp_path)

@@ -66,6 +66,7 @@ class ResultsBrowserTests(unittest.TestCase):
             writer.close("completed")
 
             page = ResultsPage(temporary)
+            wait_until(self.application, lambda: page.file_browser._refresh_task is None)
             try:
                 page.runs.setCurrentItem(page.runs.topLevelItem(0))
                 wait_until(self.application, lambda: page._result_task is None)
@@ -208,6 +209,7 @@ class ResultsBrowserTests(unittest.TestCase):
                     ThatecRunReader.describe(path),
                     Hdf5RunReader.points(path),
                 )
+                wait_until(self.application, lambda: not tab._read_tasks)
 
                 self.assertEqual(tab.variant_combo.currentData(), "raw")
                 self.assertGreaterEqual(tab.variant_combo.findData("processed"), 0)
@@ -221,6 +223,7 @@ class ResultsBrowserTests(unittest.TestCase):
                 tab.x_axis_combo.setCurrentIndex(tab.x_axis_combo.findData("frequency"))
                 self.application.processEvents()
                 tab.load_heatmap_for_row(str(tab.row_combo.currentData()))
+                wait_until(self.application, lambda: not tab._read_tasks)
                 self.assertTrue(np.allclose(tab.heatmap._data[0], (-50.0, -40.0, -45.0)))
                 self.assertIn(
                     "Keithley B current",
@@ -232,6 +235,7 @@ class ResultsBrowserTests(unittest.TestCase):
                 )
                 self.application.processEvents()
                 tab.load_heatmap_for_row(str(tab.row_combo.currentData()))
+                wait_until(self.application, lambda: not tab._read_tasks)
                 self.assertTrue(np.allclose(tab.heatmap._data[0], (-1.0, -2.0, -3.0)))
                 self.assertEqual(
                     tab.heatmap.color_bar.getAxis("right").label.toPlainText().strip(),
@@ -277,6 +281,7 @@ class ResultsBrowserTests(unittest.TestCase):
                     ThatecRunReader.describe(path),
                     Hdf5RunReader.points(path),
                 )
+                wait_until(self.application, lambda: not tab._read_tasks)
                 self.application.processEvents()
 
                 self.assertIn("keithley.B.current", tab._range_combos)
@@ -296,6 +301,7 @@ class ResultsBrowserTests(unittest.TestCase):
 
                 minimum.setCurrentIndex(1)
                 tab.load_heatmap_for_row(str(tab.row_combo.currentData()))
+                wait_until(self.application, lambda: not tab._read_tasks)
                 self.assertTrue(np.allclose(tab.heatmap._y_values, (0.001, 0.002)))
             finally:
                 tab.close()
@@ -314,6 +320,7 @@ class ResultsBrowserTests(unittest.TestCase):
                     ThatecRunReader.describe(path),
                     Hdf5RunReader.points(path),
                 )
+                wait_until(self.application, lambda: not tab._read_tasks)
                 tab.y_axis_combo.setCurrentIndex(
                     tab.y_axis_combo.findData("keithley.B.current")
                 )
@@ -323,6 +330,7 @@ class ResultsBrowserTests(unittest.TestCase):
                 self.assertEqual(minimum.currentData(), 1.0)
                 self.assertEqual(maximum.currentData(), 1.0)
                 tab.load_heatmap_for_row(str(tab.row_combo.currentData()))
+                wait_until(self.application, lambda: not tab._read_tasks)
                 tab._read_pool.waitForDone(30_000)
                 self.application.processEvents()
                 self.assertEqual(tab.heatmap._data.shape, (2, 2))
@@ -335,6 +343,7 @@ class ResultsBrowserTests(unittest.TestCase):
             _write_public_fixture(path)
 
             page = ResultsPage(temporary)
+            wait_until(self.application, lambda: page.file_browser._refresh_task is None)
             try:
                 page.runs.setCurrentItem(page.runs.topLevelItem(0))
                 wait_until(self.application, lambda: page._result_task is None)
@@ -392,6 +401,7 @@ class ResultsBrowserTests(unittest.TestCase):
 
             browser = FileBrowserPanel(temporary)
             browser.refresh()
+            wait_until(self.application, lambda: browser._refresh_task is None)
             try:
                 self.application.processEvents()
                 self.assertEqual(browser.runs.topLevelItemCount(), 2)
@@ -438,6 +448,7 @@ class ResultsBrowserTests(unittest.TestCase):
 
             browser = FileBrowserPanel(temporary)
             browser.refresh()
+            wait_until(self.application, lambda: browser._refresh_task is None)
             try:
                 self.application.processEvents()
                 self.assertEqual(browser.runs.topLevelItemCount(), 6)
@@ -507,6 +518,7 @@ class ResultsBrowserTests(unittest.TestCase):
 
             browser = FileBrowserPanel(str(catalogue), catalogue_tree=True)
             browser.refresh()
+            wait_until(self.application, lambda: browser._refresh_task is None)
             try:
                 browser.resize(1000, 700)
                 browser.show()
@@ -583,6 +595,7 @@ class ResultsBrowserTests(unittest.TestCase):
             csv_path.write_text("Current (A),Voltage (V)\n0.001,0.1\n", encoding="utf-8")
 
             page = ResultsPage(str(catalogue), catalogue_tree=True)
+            wait_until(self.application, lambda: page.file_browser._refresh_task is None)
             try:
                 self.application.processEvents()
                 self.assertTrue(page.file_browser.select_path(csv_path))

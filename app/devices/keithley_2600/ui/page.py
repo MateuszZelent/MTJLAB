@@ -356,8 +356,9 @@ class KeithleyConfigurationPanel(CardWidget):
         )
         self.advanced_ranges_button.setIcon(FluentIcon.SETTING)
         self.advanced_ranges_button.setObjectName("keithleyAdvancedRangesToggle")
+        self.advanced_ranges_button.setProperty("executionReadOnlyNavigation", True)
         self.advanced_ranges_button.setToolTip(
-            "Open source and measurement ranges in a separate modal. Opening this "
+            "Open source and measurement ranges without blocking the main window. Opening this "
             "window does not communicate with the instrument or change OUTPUT."
         )
         self.advanced_ranges_button.clicked.connect(self._toggle_advanced_ranges)
@@ -370,16 +371,21 @@ class KeithleyConfigurationPanel(CardWidget):
             self.measure_current_autorange,
             self.measure_current_range_field,
         )
-        self.advanced_ranges_dialog = StationDialog(self)
-        self.advanced_ranges_dialog.setWindowTitle(
-            "Keithley — advanced source settings"
-        )
-        self.advanced_ranges_dialog.resize(720, 520)
-        advanced_surface = self.advanced_ranges_dialog.use_modal_shell_content().surface
-        advanced_layout = self.advanced_ranges_dialog.modal_content_layout(spacing=10)
-        advanced_title = StrongBodyLabel("Advanced source and measurement settings")
-        advanced_title.setObjectName("sectionTitle")
-        advanced_layout.addWidget(advanced_title)
+        # Build ordinary child controls now, but create the native dialog only
+        # after the page has reached its final Fluent host. FramelessDialog
+        # creates an HWND in its constructor; Windows can destroy that owned
+        # HWND when an intermediate page window is reparented into the shell,
+        # leaving Qt with a visible flag and a stale, invisible native window.
+        self._advanced_ranges_dialog: StationDialog | None = None
+        self._advanced_settings_content = QWidget(self)
+        self._advanced_settings_content.hide()
+        advanced_layout = QVBoxLayout(self._advanced_settings_content)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.setSpacing(10)
+        self.advanced_ranges_title = StrongBodyLabel()
+        self.advanced_ranges_title.setObjectName("sectionTitle")
+        self.advanced_ranges_title.setWordWrap(True)
+        advanced_layout.addWidget(self.advanced_ranges_title)
         advanced_note = BodyLabel(
             "These values configure ranges and acquisition behaviour for the selected "
             "channel. Changes remain a draft until Apply settings is pressed; this "
@@ -388,7 +394,7 @@ class KeithleyConfigurationPanel(CardWidget):
         advanced_note.setObjectName("muted")
         advanced_note.setWordWrap(True)
         advanced_layout.addWidget(advanced_note)
-        advanced_form_host = QWidget(advanced_surface)
+        advanced_form_host = QWidget(self._advanced_settings_content)
         self.advanced_ranges_form = QFormLayout(advanced_form_host)
         self.advanced_ranges_form.setContentsMargins(0, 0, 0, 0)
         self.advanced_ranges_form.setHorizontalSpacing(12)
@@ -406,13 +412,15 @@ class KeithleyConfigurationPanel(CardWidget):
         self.advanced_ranges_form.addRow(
             "Measure I range", self.measure_current_range_field
         )
-        self.coupled_range_note = BodyLabel(advanced_surface)
+        self.coupled_range_note = BodyLabel(self._advanced_settings_content)
         self.coupled_range_note.setWordWrap(True)
         self.advanced_ranges_form.addRow(self.coupled_range_note)
         advanced_layout.addWidget(advanced_form_host)
         advanced_layout.addStretch(1)
-        advanced_done = PrimaryPushButton("Done", advanced_surface)
-        advanced_done.clicked.connect(self.advanced_ranges_dialog.accept)
+        advanced_done = PrimaryPushButton("Done", self._advanced_settings_content)
+        advanced_done.setObjectName("keithleyAdvancedSourceSettingsDone")
+        advanced_done.setProperty("executionReadOnlyNavigation", True)
+        advanced_done.clicked.connect(self._close_advanced_ranges)
         advanced_layout.addWidget(advanced_done, 0, Qt.AlignmentFlag.AlignRight)
 
         self.advanced_ranges_summary = CaptionLabel(self)
@@ -631,9 +639,53 @@ class KeithleyConfigurationPanel(CardWidget):
         self.source_autorange.setEnabled(False)
         self.source_range.setEnabled(not enabled)
 
+    @property
+    def advanced_ranges_dialog(self) -> StationDialog:
+        if self._advanced_ranges_dialog is None:
+            dialog = StationDialog(self)
+            # Draft settings must keep the shell's emergency controls usable.
+            dialog.setModal(False)
+            dialog.setWindowModality(Qt.WindowModality.NonModal)
+            dialog.setObjectName("keithleyAdvancedSourceSettings")
+            dialog.setWindowTitle(
+                f"Keithley Channel {self.channel.currentText()} — advanced source settings"
+            )
+            dialog.resize(720, 520)
+            dialog.titleBar.closeBtn.setProperty("executionReadOnlyNavigation", True)
+            dialog.modal_content_layout().addWidget(self._advanced_settings_content)
+            self._advanced_settings_content.show()
+            self._advanced_ranges_dialog = dialog
+        return self._advanced_ranges_dialog
+
+    def _close_advanced_ranges(self) -> None:
+        if self._advanced_ranges_dialog is not None:
+            self._advanced_ranges_dialog.accept()
+
     def _toggle_advanced_ranges(self) -> None:
         self.update_advanced_ranges_visibility()
-        self.advanced_ranges_dialog.exec()
+        dialog = self.advanced_ranges_dialog
+        if not dialog.isVisible():
+            owner = self.window()
+            # Resolve the current native owner without moving controls out of
+            # the page's ownership tree, which execution interlocks inspect.
+            handle = dialog.windowHandle()
+            owner_handle = owner.windowHandle()
+            if handle is not None and owner_handle is not None and handle.transientParent() is not owner_handle:
+                handle.setTransientParent(owner_handle)
+            screen = owner.screen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                dialog.resize(
+                    min(720, available.width() - 32),
+                    min(520, available.height() - 32),
+                )
+                position = owner.frameGeometry().center() - dialog.rect().center()
+                position.setX(max(available.left(), min(position.x(), available.right() - dialog.width() + 1)))
+                position.setY(max(available.top(), min(position.y(), available.bottom() - dialog.height() + 1)))
+                dialog.move(position)
+            dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def set_advanced_ranges_expanded(self, expanded: bool) -> None:
         # Snapshot loading still calls this legacy entry point. Advanced
@@ -685,6 +737,14 @@ class KeithleyConfigurationPanel(CardWidget):
         self._update_ranges_summary()
 
     def _update_ranges_summary(self) -> None:
+        channel = self.channel.currentText()
+        self.advanced_ranges_title.setText(
+            f"Channel {channel} · advanced source and measurement settings"
+        )
+        if self._advanced_ranges_dialog is not None:
+            self._advanced_ranges_dialog.setWindowTitle(
+                f"Keithley Channel {channel} — advanced source settings"
+            )
         src_auto = self.source_autorange.isChecked()
         v_auto = self.measure_voltage_autorange.isChecked()
         i_auto = self.measure_current_autorange.isChecked()
@@ -959,7 +1019,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         if full_configuration:
             parameter_scroll.hide()
             self.comparison_note.setText(
-                "Configuration node: authored fields are programmed with OUTPUT OFF. "
+                "Authored targets are checked against hardware; only differences are programmed with OUTPUT OFF. "
                 "Editing an omitted field adds it explicitly. Compared with device-page settings "
                 "at opening, not fresh hardware readback. Green: same; orange: changes; grey: preserved / unknown."
             )
@@ -3658,7 +3718,7 @@ class KeithleyPage(QWidget):
             self.compliance: ("Opposite-quantity safety limit", "The protection limit shown directly below the source setpoint. Current mode exposes Voltage limit (compliance); Voltage mode exposes Current limit (compliance). Reaching it means the requested source value cannot be maintained."),
             self.nplc: ("NPLC", "Number of power-line cycles integrated for one measurement. Higher values reduce noise but make readings slower. For 50 Hz mains, NPLC 1 integrates for approximately 20 ms."),
             self.settle: ("Software settling time", "Application wait used for generated recipe points and ramp dwell. It does not program source.delay or measure.delay. Explicit Wait blocks have their own duration."),
-            self.advanced_ranges_button: ("Advanced range settings", "Expands or collapses manual source and measurement range settings. By default, Keithley manages all ranges automatically (recommended)."),
+            self.advanced_ranges_button: ("Advanced source settings", "Opens a draft settings window without blocking the main window. Changes take effect only after Apply settings. Source autorange follows the station policy; measurement autorange is selected separately."),
             self.source_autorange: ("Source autorange", "Controlled only in Settings, separately for A and B. OFF requires a fixed source range. Actual instrument state is shown by readback."),
             self.source_range: ("Manual source range", "Maximum magnitude supported by the selected fixed source range. A fixed range is mandatory when source autorange is OFF. A manual value does not set the output; it selects instrument resolution/headroom."),
             self.measure_voltage_autorange: ("Voltage measurement autorange", "Automatically selects the voltage measurement range. Usually the safest default when the expected voltage is not precisely known."),

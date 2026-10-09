@@ -1,0 +1,56 @@
+{
+  "writes": [
+    ":OUTP1:SYNC OFF",
+    ":OUTP2:SYNC OFF"
+  ],
+  "identity": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+  "before": {
+    "1": "OFF",
+    "2": "OFF"
+  },
+  "after": {
+    "1": {
+      "output": "OFF",
+      "load": "9.900000E+37",
+      "polarity": "NORMAL",
+      "mode": "",
+      "sync": "OFF",
+      "waveform": "DC",
+      "dc_offset_v": "8.200000E-02"
+    },
+    "2": {
+      "output": "OFF",
+      "load": "9.900000E+37",
+      "polarity": "NORMAL",
+      "mode": "",
+      "sync": "OFF",
+      "waveform": "SIN",
+      "dc_offset_v": "0.000000E+00"
+    }
+  },
+  "status": "verified_by_adapter_readback",
+  "verified_output_configuration": {
+    "1": {
+      "channel": 1,
+      "output_load": "HIGHZ",
+      "polarity": "NORM",
+      "mode": "NORM",
+      "gate_polarity": "NORM",
+      "sync_enabled": false,
+      "sync_polarity": "NORM",
+      "sync_delay_s": 0.0,
+      "changed_fields": null
+    },
+    "2": {
+      "channel": 2,
+      "output_load": "HIGHZ",
+      "polarity": "NORM",
+      "mode": "NORM",
+      "gate_polarity": "NORM",
+      "sync_enabled": false,
+      "sync_polarity": "NORM",
+      "sync_delay_s": 0.0,
+      "changed_fields": null
+    }
+  }
+}

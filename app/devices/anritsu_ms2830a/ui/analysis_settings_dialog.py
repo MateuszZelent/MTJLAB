@@ -90,6 +90,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         source_unit: str = "dBm",
         section: str = "all",
         allow_temporal_average: bool = True,
+        selected_trace_only: bool = False,
     ) -> None:
         super().__init__(
             parent,
@@ -108,6 +109,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         self.resize(720, 680)
 
         self._initial_parameters = current_parameters or SpectrumAnalysisParameters()
+        self._selected_trace_only = selected_trace_only
         surface = self.use_modal_shell_content().surface
 
         root_layout = self.modal_content_layout(spacing=10)
@@ -500,8 +502,14 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         average_card.setVisible(section != "peaks" and allow_temporal_average)
         self.peak_measure_filtered = CheckBox("Filtered preview", peak_card)
         self.peak_measure_filtered.setFixedWidth(150)
-        self.peak_measure_filtered.setChecked(self._initial_parameters.peak_measure_filtered)
-        peak_layout.addWidget(_create_setting_row("Peak measurement source", "Unchecked: measure after averaging/correction, before display filters. Markers may differ from the filtered curve.", self.peak_measure_filtered, peak_card))
+        self.peak_measure_filtered.setChecked(selected_trace_only or self._initial_parameters.peak_measure_filtered)
+        self.peak_measure_filtered.setEnabled(not selected_trace_only)
+        if selected_trace_only:
+            self.peak_measure_filtered.setText("Selected trace")
+        peak_layout.addWidget(_create_setting_row("Peak measurement source",
+            "Results measures the selected measurement trace. Choose Raw, a corrected comparison, or Analysis in the axes/markers inspector."
+            if selected_trace_only else "Unchecked: measure after averaging/correction, before display filters. Markers may differ from the filtered curve.",
+            self.peak_measure_filtered, peak_card))
         self.section = section
         for control in (self.peak_snr, self.peak_prominence):
             control.parentWidget().setVisible(not linear_source)
@@ -560,7 +568,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         defaults = SpectrumAnalysisParameters()
         self.temporal_frames.setValue(defaults.temporal_average_frames)
         self.temporal_gap.setText(format_quantity_auto(defaults.temporal_max_gap_s, DIMENSION_TIME))
-        self.peak_measure_filtered.setChecked(defaults.peak_measure_filtered)
+        self.peak_measure_filtered.setChecked(self._selected_trace_only or defaults.peak_measure_filtered)
         self.additional_bands.clear()
         self.denoise_window.setValue(defaults.denoise_window)
         self.emi_threshold.setValue(defaults.emi_threshold_db)

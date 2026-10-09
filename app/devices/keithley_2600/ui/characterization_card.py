@@ -2804,7 +2804,7 @@ class KeithleyCharacterizationCard(QWidget):
         )
         if sample is not None and self._inventory_store is not None:
             root = self._inventory_store.measurement_directory_for(
-                sample.sample_id, "Keithley_2600", "characterization"
+                sample.sample_id, "characterization", "Keithley_2600", row=row, col=col,
             )
         else:
             root = Path(
@@ -2815,7 +2815,7 @@ class KeithleyCharacterizationCard(QWidget):
             f"R{row}C{col}" if row and col else "unassigned", fallback="unassigned"
         )
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        return root.resolve() / coord / timestamp
+        return root.resolve() / timestamp if sample is not None else root.resolve() / coord / timestamp
 
     def _publish_completed_measurement(self, dataset, result, target) -> None:
         """Publish prepared artifacts; dataset processing and file I/O are finished."""

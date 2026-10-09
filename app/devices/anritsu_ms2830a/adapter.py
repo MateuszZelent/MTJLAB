@@ -634,9 +634,9 @@ class AnritsuAdapter(DeviceAdapter):
             self._settings, frequency_hz=config.frequency_hz, power_dbm=config.power_dbm,
         )
         try:
-            if "frequency_hz" in selected:
+            if "frequency_hz" in selected and not math.isclose(before.frequency_hz, config.frequency_hz, rel_tol=1e-12, abs_tol=1e-6):
                 session.write(f"FREQ {config.frequency_hz:.12g}HZ")
-            if "power_dbm" in selected:
+            if "power_dbm" in selected and not math.isclose(before.power_dbm, config.power_dbm, rel_tol=0, abs_tol=1e-9):
                 session.write(f"POW {config.power_dbm:.12g}")
             actual = self.read_signal_generator_configuration()
         except Exception:
@@ -1003,37 +1003,55 @@ class AnritsuAdapter(DeviceAdapter):
         )
         self._assert_advanced_firmware_qualified()
         session = self._require_session()
-        self._configuration_generation += 1
-        self._cached_grid = None
+        changed = set()
+        for item in fields(requested):
+            target = getattr(requested, item.name)
+            current = getattr(before, item.name)
+            if target is None:
+                continue
+            if item.name == "detector":
+                target, current = normalize_anritsu_detector(target), normalize_anritsu_detector(current)
+            same = math.isclose(target, current, rel_tol=1e-12, abs_tol=1e-12) if type(target) is float and type(current) is float else target == current
+            if not same:
+                changed.add(item.name)
+        for mode, value in (("rbw_auto", "rbw_hz"), ("vbw_mode", "vbw_hz"),
+                            ("attenuation_auto", "attenuation_db"), ("sweep_time_auto", "sweep_time_s")):
+            if mode in changed and getattr(requested, value) is not None:
+                changed.add(value)
         has_preamp = bool(ANRITSU_PREAMPLIFIER_OPTIONS.intersection(options))
         detector = normalize_anritsu_detector(config.detector)
         vbw_mode = config.vbw_mode.strip().lower()
+        if before.preamplifier_enabled and {"attenuation_auto", "attenuation_db"} & changed and config.preamplifier_enabled:
+            raise SafetyViolation("Disable the Anritsu preamplifier explicitly before changing input attenuation.")
+        if changed:
+            self._configuration_generation += 1
+            self._cached_grid = None
         try:
-            if has_preamp and requested.preamplifier_enabled is not None:
+            if has_preamp and "preamplifier_enabled" in changed and config.preamplifier_enabled is False:
                 session.write("POW:GAIN OFF")
-            if requested.attenuation_auto is not None:
+            if "attenuation_auto" in changed:
                 session.write("POW:ATT:AUTO ON" if config.attenuation_auto else "POW:ATT:AUTO OFF")
-            if requested.attenuation_db is not None:
+            if "attenuation_db" in changed:
                 session.write(f"POW:ATT {config.attenuation_db:.12g}DB")
-            if requested.detector is not None:
+            if "detector" in changed:
                 session.write(f"DET {detector}")
-            if requested.rbw_auto is not None:
+            if "rbw_auto" in changed:
                 session.write("BAND:AUTO ON" if config.rbw_auto else "BAND:AUTO OFF")
-            if requested.rbw_hz is not None:
+            if "rbw_hz" in changed:
                 session.write(f"BAND {config.rbw_hz:.12g}HZ")
-            if requested.vbw_mode is not None:
+            if "vbw_mode" in changed:
                 session.write("BAND:VID:AUTO ON" if vbw_mode == "auto" else "BAND:VID:AUTO OFF")
                 if vbw_mode == "off":
                     session.write("BAND:VID OFF")
-            if requested.vbw_filter_mode is not None:
+            if "vbw_filter_mode" in changed:
                 session.write(f"BAND:VID:MODE {requested.vbw_filter_mode}")
-            if requested.vbw_hz is not None:
+            if "vbw_hz" in changed:
                 session.write(f"BAND:VID {config.vbw_hz:.12g}HZ")
-            if requested.sweep_time_auto is not None:
+            if "sweep_time_auto" in changed:
                 session.write("SWE:TIME:AUTO ON" if config.sweep_time_auto else "SWE:TIME:AUTO OFF")
-            if requested.sweep_time_s is not None:
+            if "sweep_time_s" in changed:
                 session.write(f"SWE:TIME {config.sweep_time_s:.12g}S")
-            if has_preamp and requested.preamplifier_enabled is True:
+            if has_preamp and "preamplifier_enabled" in changed and config.preamplifier_enabled is True:
                 session.write("POW:GAIN ON")
             actual = self.read_advanced_spectrum_configuration()
             self._verify_advanced_spectrum_readback(config, actual)
@@ -1116,23 +1134,40 @@ class AnritsuAdapter(DeviceAdapter):
         session = self._require_session()
         fields = config.changed_fields
         if fields is not None:
-            allowed = {"start_hz", "stop_hz", "reference_level_dbm", "points"}
+            allowed = {"start_hz", "stop_hz", "reference_level_dbm", "points", "vbw_mode"}
             if not fields or len(fields) != len(set(fields)) or set(fields) - allowed:
                 raise SafetyViolation("Spectrum changes require explicit distinct supported fields.")
             before = self.read_current_configuration()
             if "SPECT" not in before.instrument_mode.upper():
                 raise DeviceError("Spectrum parameter changes require confirmed Spectrum Analyzer mode.")
-            for name in allowed - set(fields):
+            for name in allowed - set(fields) - {"vbw_mode"}:
                 if not math.isclose(float(getattr(before, name)), float(getattr(config, name)), rel_tol=1e-9, abs_tol=1e-9):
                     raise DeviceError(f"Anritsu unselected {name} differs from the planned baseline; re-read and recompile.")
+            changed = []
+            for name in fields:
+                if name == "vbw_mode":
+                    same = self._read_vbw_filter_mode() == config.vbw_mode
+                elif name == "points":
+                    same = before.points == config.points
+                else:
+                    same = math.isclose(float(getattr(before, name)), float(getattr(config, name)), rel_tol=1e-12, abs_tol=1e-9)
+                if not same:
+                    changed.append(name)
+            fields = tuple(changed)
         else:
             self._enter_spectrum_mode_with_rf_off()
-        self._configuration_generation += 1
-        self._cached_grid = None
-        if fields is None or "start_hz" in fields:
-            session.write(f"FREQ:STAR {config.start_hz:.12g}HZ")
-        if fields is None or "stop_hz" in fields:
-            session.write(f"FREQ:STOP {config.stop_hz:.12g}HZ")
+        if fields is None or fields:
+            self._configuration_generation += 1
+            self._cached_grid = None
+        frequency_fields = ("start_hz", "stop_hz")
+        if fields is not None and config.start_hz >= before.stop_hz:
+            # Move the upper endpoint first when shifting the entire window
+            # upwards, so the analyser cannot clamp an invalid interim range.
+            frequency_fields = ("stop_hz", "start_hz")
+        for name in frequency_fields:
+            if fields is None or name in fields:
+                header = "FREQ:STAR" if name == "start_hz" else "FREQ:STOP"
+                session.write(f"{header} {getattr(config, name):.12g}HZ")
         if fields is None or "reference_level_dbm" in fields:
             session.write(f"DISP:WIND:TRAC:Y:RLEV {config.reference_level_dbm:.12g}")
         if fields is None or "points" in fields:
@@ -1142,7 +1177,7 @@ class AnritsuAdapter(DeviceAdapter):
         elif fields is None and config.rbw_auto is False and config.rbw_hz is not None:
             session.write("BAND:AUTO OFF")
             session.write(f"BAND {config.rbw_hz:.12g}HZ")
-        if fields is None and config.vbw_mode in {"VID", "POW"}:
+        if (fields is None or "vbw_mode" in fields) and config.vbw_mode in {"VID", "POW"}:
             session.write(f"BAND:VID:MODE {config.vbw_mode}")
         if fields is None and config.vbw_auto is True:
             session.write("BAND:VID:AUTO ON")
@@ -1152,7 +1187,6 @@ class AnritsuAdapter(DeviceAdapter):
         elif fields is None and config.vbw_auto is False:
             session.write("BAND:VID:AUTO OFF")
             session.write("BAND:VID OFF")
-        self._cached_grid = None
         # TRAC? TRAC1 reads Trace A.  In VIEW mode that buffer is documented
         # to remain unchanged even while the analyser continues measuring.
         # An explicit Apply action therefore restores Trace A to WRITE so the
@@ -1168,7 +1202,7 @@ class AnritsuAdapter(DeviceAdapter):
             session.write("INIT:MODE:CONT")
         actual = self.read_current_configuration()
         mismatches: list[str] = []
-        if fields is None and config.vbw_mode is not None and self._read_vbw_filter_mode() != config.vbw_mode:
+        if config.vbw_mode is not None and (config.changed_fields is None or "vbw_mode" in config.changed_fields) and self._read_vbw_filter_mode() != config.vbw_mode:
             mismatches.append("VBW Video/Power mode")
         if not math.isclose(actual.start_hz, config.start_hz, rel_tol=0.0, abs_tol=1.0):
             mismatches.append(f"start requested={config.start_hz:g} Hz actual={actual.start_hz:g} Hz")

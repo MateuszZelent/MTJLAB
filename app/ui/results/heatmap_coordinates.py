@@ -101,6 +101,8 @@ class HeatmapMatrix:
     z_label: str
     z_unit: str
     missing_checkpoints: int
+    input_values: np.ndarray | None = None
+    input_unit: str = ""
 
 
 def build_heatmap_coordinates(
@@ -151,6 +153,7 @@ def read_heatmap_matrix(
     *,
     cancelled: Callable[[], bool] | None = None,
     processor=None,
+    capture_input: bool = False,
 ) -> HeatmapMatrix:
     """Build one exact coordinate plane; never aggregate duplicate checkpoints."""
 
@@ -204,7 +207,9 @@ def read_heatmap_matrix(
     if not selected:
         raise ValueError("No stored checkpoint matches the selected heatmap filters.")
 
-    traces: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    traces: dict[int, np.ndarray] = {}
+    input_traces: dict[int, np.ndarray] = {}
+    input_unit = ""
     raw_frequency_grid: np.ndarray | None = None
     x_frequency: np.ndarray | None = None
     frequency_mask: np.ndarray | None = None
@@ -247,8 +252,15 @@ def read_heatmap_matrix(
             x_frequency = frequencies[frequency_mask]
         elif not np.array_equal(raw_frequency_grid, frequencies):
             raise ValueError("Spectrum frequency grids differ between selected checkpoints.")
+        elif spectrum_unit != z_unit:
+            raise ValueError("Spectrum power units differ between selected checkpoints.")
         assert frequency_mask is not None
-        traces[checkpoint] = (frequencies[frequency_mask], values[frequency_mask])
+        traces[checkpoint] = values[frequency_mask]
+        if capture_input:
+            input_traces[checkpoint] = np.asarray(spectrum.traces[0].values, dtype=float)[frequency_mask]
+            if input_unit and input_unit != spectrum.y_unit:
+                raise ValueError("Input power units differ between selected checkpoints.")
+            input_unit = spectrum.y_unit
     if x_frequency is None or x_frequency.size == 0:
         raise ValueError("No readable spectrum matches the selected heatmap filters.")
 
@@ -256,8 +268,9 @@ def read_heatmap_matrix(
         varying_dimension = y_dimension if x_dimension.is_frequency else x_dimension
         axis_values = _unique_values(varying_dimension, selected)
         matrix = np.full((len(axis_values), len(x_frequency)), np.nan, dtype=float)
+        input_matrix = np.full(matrix.shape, np.nan) if capture_input else None
         cell_checkpoints = np.full(matrix.shape, -1, dtype=int)
-        for checkpoint, (_frequencies, values) in traces.items():
+        for checkpoint, values in traces.items():
             coordinate = _checkpoint_value(varying_dimension, checkpoint)
             row_index = _value_index(axis_values, coordinate)
             if np.any(cell_checkpoints[row_index] >= 0):
@@ -265,11 +278,15 @@ def read_heatmap_matrix(
                     "Multiple checkpoints map to one heatmap cell; refine the filters."
                 )
             matrix[row_index, :] = values
+            if input_matrix is not None:
+                input_matrix[row_index, :] = input_traces[checkpoint]
             cell_checkpoints[row_index, :] = checkpoint
         if x_dimension.is_frequency:
             x_values, y_values = x_frequency, axis_values
         else:
             matrix = matrix.T
+            if input_matrix is not None:
+                input_matrix = input_matrix.T
             cell_checkpoints = cell_checkpoints.T
             x_values, y_values = axis_values, x_frequency
     else:
@@ -279,8 +296,9 @@ def read_heatmap_matrix(
         x_values = _unique_values(x_dimension, selected)
         y_values = _unique_values(y_dimension, selected)
         matrix = np.full((len(y_values), len(x_values)), np.nan, dtype=float)
+        input_matrix = np.full(matrix.shape, np.nan) if capture_input else None
         cell_checkpoints = np.full(matrix.shape, -1, dtype=int)
-        for checkpoint, (_frequencies, values) in traces.items():
+        for checkpoint, values in traces.items():
             x_index = _value_index(x_values, _checkpoint_value(x_dimension, checkpoint))
             y_index = _value_index(y_values, _checkpoint_value(y_dimension, checkpoint))
             if cell_checkpoints[y_index, x_index] >= 0:
@@ -288,6 +306,8 @@ def read_heatmap_matrix(
                     "Multiple checkpoints map to one heatmap cell; refine the filters."
                 )
             matrix[y_index, x_index] = values[frequency_index]
+            if input_matrix is not None:
+                input_matrix[y_index, x_index] = input_traces[checkpoint][frequency_index]
             cell_checkpoints[y_index, x_index] = checkpoint
 
     finite = matrix[np.isfinite(matrix)]
@@ -305,6 +325,8 @@ def read_heatmap_matrix(
         z_label=z_label,
         z_unit=z_unit,
         missing_checkpoints=missing,
+        input_values=input_matrix,
+        input_unit=input_unit,
     )
 
 

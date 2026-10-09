@@ -822,7 +822,7 @@ class KeithleyAdapter(DeviceAdapter):
     def _configure_selected_source_fields(
         self, request: KeithleySourceRequest,
     ) -> KeithleySourceRequest:
-        """Apply only authored fields; never establish a baseline implicitly."""
+        """Check authored targets, then write only differences from verified hardware."""
         allowed = {
             "mode", "level_si", "compliance_si", "nplc", "settle_time_s", "sense_mode",
             "source_autorange", "source_range_si", "measure_voltage_autorange",
@@ -872,43 +872,70 @@ class KeithleyAdapter(DeviceAdapter):
         try:
             output_before = self._output_is_enabled(request.channel)
             self._verify_applied_configuration(before, expected_output=output_before)
+            # The editor snapshot is not evidence of the current instrument
+            # state. The preceding readback validates this baseline before it
+            # can be used to suppress any write. Keep authored targets in the
+            # recipe even when they happen to match the editor snapshot.
+            changed = {
+                key for key in selected
+                if not self._same_configuration_field(key, before, updated)
+            }
+            if before.mode != updated.mode:
+                # Source function selects different level/compliance/range
+                # registers. Equal numbers in different banks are not equal
+                # settings. Never invent missing targets for the new bank.
+                required = {"level_si", "compliance_si", "source_autorange"}
+                if not updated.source_autorange:
+                    required.add("source_range_si")
+                if updated.mode != "measure_only" and not required <= selected:
+                    raise SafetyViolation("Changing Keithley source mode requires explicit level, compliance and source range policy.")
+                changed.update(selected & {"level_si", "compliance_si", "source_autorange", "source_range_si",
+                                           "measure_voltage_range_si", "measure_current_range_si"})
+            for auto_key, range_key in (
+                ("source_autorange", "source_range_si"),
+                ("measure_voltage_autorange", "measure_voltage_range_si"),
+                ("measure_current_autorange", "measure_current_range_si"),
+            ):
+                if auto_key in changed and range_key in selected:
+                    changed.add(range_key)
             session = self._require_session()
             smu = self._smu(request.channel)
             suffix = "i" if updated.mode == "current" else "v"
             if self._query_boolean(f"{smu}.source.highc"):
                 raise SafetyViolation("Keithley high-C mode is not qualified for recipe configuration.")
-            session.write(f"{smu}.source.output = {smu}.OUTPUT_OFF")
+            if output_before:
+                session.write(f"{smu}.source.output = {smu}.OUTPUT_OFF")
             if self._output_is_enabled(request.channel):
                 raise DeviceError(
                     f"Keithley channel {request.channel} OUTPUT OFF was not confirmed "
                     "before selected configuration; no parameters were programmed."
                 )
             self._output_states[request.channel] = False
-            if "mode" in selected and updated.mode != "measure_only":
+            if "mode" in changed and updated.mode != "measure_only":
                 value = "OUTPUT_DCAMPS" if updated.mode == "current" else "OUTPUT_DCVOLTS"
                 session.write(f"{smu}.source.func = {smu}.{value}")
-            if "source_autorange" in selected:
+            if "source_autorange" in changed:
                 value = "AUTORANGE_ON" if updated.source_autorange else "AUTORANGE_OFF"
                 session.write(f"{smu}.source.autorange{suffix} = {smu}.{value}")
-            if "source_range_si" in selected and updated.source_range_si is not None:
+            if "source_range_si" in changed and updated.source_range_si is not None:
                 session.write(f"{smu}.source.range{suffix} = {updated.source_range_si:.12g}")
             for quantity, auto_key, range_key in (
                 ("v", "measure_voltage_autorange", "measure_voltage_range_si"),
                 ("i", "measure_current_autorange", "measure_current_range_si"),
             ):
-                if auto_key in selected:
+                if auto_key in changed:
                     value = "AUTORANGE_ON" if getattr(updated, auto_key) else "AUTORANGE_OFF"
                     session.write(f"{smu}.measure.autorange{quantity} = {smu}.{value}")
-                if range_key in selected and getattr(updated, range_key) is not None and (updated.mode == "measure_only" or quantity != suffix):
+                if range_key in changed and getattr(updated, range_key) is not None and (updated.mode == "measure_only" or quantity != suffix):
                     session.write(f"{smu}.measure.range{quantity} = {getattr(updated, range_key):.12g}")
-            if "sense_mode" in selected:
+            if "sense_mode" in changed:
                 session.write(f"{smu}.sense = {smu}.SENSE_LOCAL")
-            if "compliance_si" in selected:
+            if "compliance_si" in changed:
                 limit = "limitv" if updated.mode == "current" else "limiti"
                 session.write(f"{smu}.source.{limit} = {updated.compliance_si:.12g}")
-            if "level_si" in selected:
+            if "level_si" in changed:
                 session.write(f"{smu}.source.level{suffix} = {updated.level_si:.12g}")
-            if "nplc" in selected:
+            if "nplc" in changed:
                 session.write(f"{smu}.measure.nplc = {updated.nplc:.12g}")
             self._check_errors()
             self._verify_applied_configuration(updated)
@@ -920,6 +947,26 @@ class KeithleyAdapter(DeviceAdapter):
         self._last_request[request.channel] = updated
         self._update_aggregate_output_state()
         return updated
+
+    def _same_configuration_field(
+        self, key: str, before: KeithleySourceRequest, after: KeithleySourceRequest,
+    ) -> bool:
+        old, new = getattr(before, key), getattr(after, key)
+        if key in {"level_si", "compliance_si", "source_range_si"} and before.mode != after.mode:
+            return False
+        if key in {"level_si", "compliance_si"}:
+            old = getattr(self._quantize_source_request(before), key)
+            # Compare representable wire values, not a blanket absolute
+            # tolerance that would swallow a 1 pA step on the 100 nA range.
+            return f"{old:.12g}" == f"{new:.12g}"
+        if key.endswith("range_si") and old is not None and new is not None:
+            current_range = key == "measure_current_range_si" or (key == "source_range_si" and after.mode == "current")
+            ranges = self._MODEL_2602A_CURRENT_RANGES if current_range else self._MODEL_2602A_VOLTAGE_RANGES
+            old = self._selected_hardware_range(old, ranges)
+            new = self._selected_hardware_range(new, ranges)
+        if type(old) is float and type(new) is float:
+            return f"{old:.12g}" == f"{new:.12g}"
+        return old == new
 
     def _verify_applied_configuration(
         self, expected: KeithleySourceRequest, *, expected_output: bool = False
@@ -956,7 +1003,8 @@ class KeithleyAdapter(DeviceAdapter):
                     f"{response!r}."
                 ) from exc
             if not math.isclose(
-                actual, expected_value, rel_tol=1e-9, abs_tol=1e-12
+                actual, expected_value, rel_tol=1e-9,
+                abs_tol=0.0 if ".source.level" in field or ".source.limit" in field else 1e-12,
             ):
                 mismatches.append(
                     f"{field} {actual:.12g} != {expected_value:.12g}"
@@ -1294,7 +1342,7 @@ class KeithleyAdapter(DeviceAdapter):
             self._fail_measurement_output_invariant(
                 "Keithley OUTPUT state changed during a source-level update."
             )
-        if not math.isclose(actual, updated.level_si, rel_tol=1e-9, abs_tol=1e-12):
+        if not math.isclose(actual, updated.level_si, rel_tol=1e-9, abs_tol=0.0):
             self.emergency_off()
             if self._state is not DeviceState.UNKNOWN:
                 self._state = DeviceState.FAULT
@@ -1381,7 +1429,7 @@ class KeithleyAdapter(DeviceAdapter):
                 "Keithley OUTPUT state changed during a compliance update."
             )
         if not math.isclose(
-            actual, updated.compliance_si, rel_tol=1e-9, abs_tol=1e-12
+            actual, updated.compliance_si, rel_tol=1e-9, abs_tol=0.0
         ):
             self.emergency_off()
             if self._state is not DeviceState.UNKNOWN:

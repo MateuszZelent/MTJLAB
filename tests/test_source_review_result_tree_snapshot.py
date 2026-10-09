@@ -15,6 +15,7 @@ def test_open_historical_sweep_never_reopens_hdf5_on_gui(shell_qt_application, t
     requested = []
     page.open_sweep_requested.connect(lambda run, tree: requested.append((run, tree)))
     try:
+        wait_until(app, lambda: page.file_browser._refresh_task is None)
         page.runs.setCurrentItem(page.runs.topLevelItem(0))
         wait_until(app, lambda: page._result_task is None)
         assert page.open_sweep_button.isEnabled()

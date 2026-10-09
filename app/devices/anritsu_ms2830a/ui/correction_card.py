@@ -389,6 +389,9 @@ class SpectrumCorrectionWorkspace(QWidget):
             raise ValueError("Cannot change backend provenance during a recording.")
         self._simulation_mode = mode
 
+    def set_measurement_directory(self, directory: Path | None) -> None:
+        self._sample_measurement_directory = directory
+
     def set_available(self, available: bool, *, device_idn: str | None = None):
         self._allowed = available
         if device_idn is not None:
@@ -490,7 +493,7 @@ class SpectrumCorrectionWorkspace(QWidget):
             self._show_start_issue(exc)
             return
         self._start_feedback.clear_message()
-        directory = Path(str(self._settings.storage.get("output_directory", "./measurements")))
+        directory = getattr(self, "_sample_measurement_directory", None) or Path(str(self._settings.storage.get("output_directory", "./measurements")))
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
         destination, _filter = StationFileDialog.getSaveFileName(
             self, "Record every raw spectrum", str(directory / f"spectrum_{kind}_{stamp}.h5"),

@@ -34,6 +34,8 @@ from app.ui.recipes import SweepGeneratorDialog
 from tests.helpers import simulation_settings
 from tests.test_recipe_compiler import authored_source
 from app.settings import SettingsRepository
+from tests.shell_test_isolation import isolated_shell_persistence as isolated_shell_persistence
+from tests.shell_test_isolation import shell_qt_application as shell_qt_application
 
 
 class FluentRecipeAndExecutionPageTests(unittest.TestCase):
@@ -90,7 +92,7 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             )
             self.assertEqual(page.path.accessibleName(), "Recipe file path")
             self.assertEqual(page.output_directory.accessibleName(), "Sweep result directory")
-            self.assertEqual(page.output_file_stem.accessibleName(), "Sweep result file name")
+            self.assertEqual(page.output_file_stem.accessibleName(), "Sweep folder name")
             self.assertIn(".h5", page.output_file_preview.text())
             self.assertEqual(page.execution_mode.currentData(), "measurement")
             page.execution_mode.setCurrentIndex(1)
@@ -101,7 +103,8 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             self.assertIn("MOKE VOUT writes are skipped", page.execution_mode_hint.text())
             page.output_file_stem.setText("operator-check")
             self.application.processEvents()
-            self.assertIn("operator-check.h5", page.output_file_preview.text())
+            self.assertIn("_operator-check", page.output_file_preview.text())
+            self.assertIn("data.h5", page.output_file_preview.text())
             page.set_settings(
                 simulation_settings()
             )

@@ -239,7 +239,9 @@ class RunRecoveryManager:
                     # every omitted field; never substitute request defaults.
                     is_initial_keithley = action.kind == "configure_keithley" and "mode" in changed_fields
                     is_initial_rigol = action.kind == "configure_rigol" and {"waveform", "frequency_hz", "high_level_v", "low_level_v"} <= set(changed_fields)
-                    if not (is_initial_keithley or is_initial_rigol):
+                    is_initial_anritsu = action.kind == "configure_anritsu" and {"start_hz", "stop_hz", "reference_level_dbm", "points"} <= set(changed_fields)
+                    is_initial_output_path = action.kind == "configure_rigol_output"
+                    if not (is_initial_keithley or is_initial_rigol or is_initial_anritsu or is_initial_output_path):
                         raise ExecutionError("Recovery selected-field operation lacks its baseline.")
                 else:
                     baseline = previous[1].payload[payload_key]
@@ -273,6 +275,15 @@ class RunRecoveryManager:
                     request = replace(request, **values, changed_fields=None)
                 elif request.changed_fields is not None:
                     raise ExecutionError("Recovery requires the confirmed Keithley configuration snapshot; request defaults are insufficient.")
+                # Recovery must use the same verified-delta path as a sweep,
+                # not the manual full-reset path (which also sets offmode).
+                source_only = {"level_si", "compliance_si", "source_autorange", "source_range_si"}
+                request = replace(request, changed_fields=tuple(
+                    field.name for field in dataclass_fields(request)
+                    if field.name not in {"channel", "changed_fields"}
+                    and getattr(request, field.name) is not None
+                    and not (request.mode == "measure_only" and field.name in source_only)
+                ))
             elif action.kind == "configure_rigol" and request.changed_fields is not None:
                 actual = (confirmed_states or {}).get("rigol", {}).get(f"channel_{key[1]}", {}).get("actual", {})
                 names = {field.name for field in dataclass_fields(request)} - {"channel", "changed_fields"}
@@ -282,6 +293,12 @@ class RunRecoveryManager:
                 # mode rather than issuing the manual full-reset transaction.
                 request = replace(request, **{name: actual[name] for name in names},
                     changed_fields=tuple(name for name in names if actual[name] is not None))
+            elif action.kind == "configure_rigol_output" and request.changed_fields is not None:
+                actual = (confirmed_states or {}).get("rigol", {}).get(f"channel_{key[1]}", {}).get("actual", {}).get("output_path", {})
+                names = {field.name for field in dataclass_fields(request)} - {"channel", "changed_fields"}
+                if not names <= actual.keys():
+                    raise ExecutionError("Recovery requires the confirmed Rigol output-path snapshot; request defaults are insufficient.")
+                request = replace(request, **{name: actual[name] for name in names}, changed_fields=tuple(sorted(names)))
             result.append(replace(action, payload={**action.payload, payload_key: request}))
         advanced = (confirmed_states or {}).get("anritsu", {}).get("advanced_spectrum", {}).get("actual")
         if isinstance(advanced, dict) and ("anritsu", "spectrum") in latest:

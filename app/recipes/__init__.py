@@ -15,6 +15,7 @@ from app.recipes.editing import (
     move_recipe_nodes,
     replace_recipe_node,
     wrap_recipe_nodes_in_repeat,
+    unwrap_recipe_repeat,
 )
 from app.recipes.repository import RecipeRepository, SavedRecipe
 from app.recipes.sweep_points import (
@@ -49,6 +50,7 @@ __all__ = [
     "parse_recipe_text",
     "replace_recipe_node",
     "wrap_recipe_nodes_in_repeat",
+    "unwrap_recipe_repeat",
     "estimate_sweep_point_count",
     "generate_sweep_points",
     "generate_sweep_stage_points",

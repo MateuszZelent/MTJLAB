@@ -24,6 +24,7 @@ from app.devices.rigol_dg1000z import (
     RigolBurstConfig, RigolChannelConfig, RigolCounterConfig, RigolCounterReading, RigolFrequencySweepConfig,
     RigolModulationConfig, RigolOutputConfig,
 )
+from app.devices.rigol_dg1000z.ui.load_estimate import SampleLoadEstimateWidget
 from app.domain.errors import SafetyViolation
 from app.domain.manual_metadata import ManualMetadataValue
 from app.domain.quick_controls import (
@@ -280,6 +281,9 @@ class RigolPage(QWidget):
             (configure,),
         )
         self.basic_form = self.basic_scroll.widget().findChild(QFormLayout)
+        self.sample_load_estimate = SampleLoadEstimateWidget(self.basic_scroll.widget())
+        basic_layout = self.basic_scroll.widget().layout()
+        basic_layout.insertWidget(basic_layout.count() - 1, self.sample_load_estimate)
         shape_apply = PrimaryPushButton("Apply shape parameters")
         self.shape_scroll = self._form_page(
             "Waveform shape",
@@ -510,6 +514,11 @@ class RigolPage(QWidget):
             field.textChanged.connect(self._update_preview)
         for field in (self.high_level, self.low_level, self.vpp, self.offset):
             field.textChanged.connect(self._update_combined_voltage_usage)
+        self.sample_load_estimate.inputs_changed.connect(self._update_sample_load_estimate)
+        self.load.textChanged.connect(self._update_sample_load_estimate)
+        self.output_mode.currentTextChanged.connect(self._update_sample_load_estimate)
+        for checkbox in (self.mod_enabled, self.sweep_enabled, self.burst_enabled):
+            checkbox.stateChanged.connect(self._update_sample_load_estimate)
         self.waveform.currentTextChanged.connect(self._update_combined_voltage_usage)
         self.level_mode.currentTextChanged.connect(self._update_combined_voltage_usage)
         for field in (
@@ -1496,6 +1505,7 @@ class RigolPage(QWidget):
 
     def _advanced_defaults_snapshot(self) -> dict[str, object]:
         return {
+            **self.sample_load_estimate.input_defaults(),
             "modulation_enabled": self.mod_enabled.isChecked(),
             "modulation_type": self.mod_type.currentText(),
             "modulation_source": self.mod_source.currentText(),
@@ -1538,6 +1548,7 @@ class RigolPage(QWidget):
         def text(name: str, fallback: str) -> str:
             return str(defaults.get(name, fallback))
 
+        self.sample_load_estimate.load_defaults(defaults)
         self.mod_enabled.setChecked(bool(defaults.get("modulation_enabled", False)))
         self.mod_type.setCurrentText(text("modulation_type", "AM"))
         self.mod_source.setCurrentText(text("modulation_source", "INT"))
@@ -2003,6 +2014,8 @@ class RigolPage(QWidget):
             checkbox.style().polish(checkbox)
         self._refresh_manual_trigger_controls()
 
+        self._update_sample_load_estimate()
+
     def _refresh_manual_trigger_controls(self, *_args: object) -> None:
         if not all(
             hasattr(self, name)
@@ -2331,7 +2344,27 @@ class RigolPage(QWidget):
             quantize_rigol_voltage(parse_quantity(self.low_level.text(), DIMENSION_VOLTAGE).si_value),
         )
 
+    def _update_sample_load_estimate(self, *_args: object) -> None:
+        # Advisory form preview only: never submits a command or widens a limit.
+        states = self._confirmed_advanced_states[int(self.channel.currentText())]
+        if self.output_mode.currentText() != "NORM" or any(
+            checkbox.isChecked() for checkbox in (self.mod_enabled, self.sweep_enabled, self.burst_enabled)
+        ) or any(value is True for value in states.values()):
+            self.sample_load_estimate.clear(
+                "Estimate unavailable with modulation, sweep, burst or gated output enabled."
+            )
+            return
+        try:
+            high, low = self._effective_levels()
+            self.sample_load_estimate.update_estimate(
+                high_v=high, low_v=low, output_load=self.load.text().strip(),
+                waveform=self.waveform.currentText(),
+            )
+        except (ValueError, SafetyViolation) as exc:
+            self.sample_load_estimate.clear(f"Estimate unavailable: {exc}")
+
     def _update_preview(self, *_args: object) -> None:
+        self._update_sample_load_estimate()
         try:
             high, low = self._effective_levels()
         except Exception:

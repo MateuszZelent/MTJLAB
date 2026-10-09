@@ -1,0 +1,38 @@
+[
+  {
+    "component": "median_power",
+    "line_mask": false,
+    "shape": [
+      405,
+      10001
+    ],
+    "elapsed_s": 0.4283,
+    "additional_peak_mib": 65.75,
+    "output_unit": "W",
+    "masked_frequency_bins": 0
+  },
+  {
+    "component": "median_power",
+    "line_mask": true,
+    "shape": [
+      405,
+      10001
+    ],
+    "elapsed_s": 2.1232,
+    "additional_peak_mib": 93.27,
+    "output_unit": "W",
+    "masked_frequency_bins": 3
+  },
+  {
+    "component": "median_db",
+    "line_mask": false,
+    "shape": [
+      405,
+      10001
+    ],
+    "elapsed_s": 0.1702,
+    "additional_peak_mib": 92.8,
+    "output_unit": "dB",
+    "masked_frequency_bins": 0
+  }
+]

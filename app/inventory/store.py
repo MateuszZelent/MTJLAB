@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import csv
 from datetime import datetime, timezone
+from dataclasses import replace
 import hashlib
 import json
 import logging
@@ -465,6 +466,7 @@ class InventoryStore:
                 ("col_label", "TEXT"),
                 ("description", "TEXT"),
                 ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("device_settings_json", "TEXT NOT NULL DEFAULT '{}'"),
             ):
                 if col_name not in existing_cols:
                     cursor.execute(f"ALTER TABLE active_target ADD COLUMN {col_name} {col_type};")
@@ -806,13 +808,72 @@ class InventoryStore:
         return self.catalogue_root / folder
 
     def measurement_directory_for(
-        self, sample_id: str, device_name: str, measurement_type: str = ""
+        self, sample_id: str, device_name: str, measurement_type: str = "", *,
+        row: str | None = None, col: str | None = None,
     ) -> Path:
-        path = self.sample_directory(sample_id) / "measurements" / self._safe_component(device_name)
+        path = self.device_directory_for(sample_id, row, col) / "measurements" / self._safe_component(device_name)
         if measurement_type:
             path /= self._safe_component(measurement_type)
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def device_directory_for(self, sample_id: str, row: str | None, col: str | None) -> Path:
+        """One physical DUT coordinate, distinct from laboratory instruments."""
+        sample = self.get_sample(sample_id)
+        if sample is None:
+            raise KeyError(f"Sample not found: {sample_id}")
+        if bool(row) != bool(col):
+            raise ValueError("A device directory requires both row and column.")
+        if row and col:
+            row, col = str(row), str(col)
+            if row not in sample.rows or col not in sample.cols:
+                raise ValueError(f"Unknown sample device coordinate R{row}C{col}.")
+            # Reject unsafe/ambiguous names rather than merging coordinates
+            # through filename sanitization (e.g. 1/2 and 1_2).
+            if not re.fullmatch(r"[A-Za-z0-9.-]+", row) or not re.fullmatch(r"[A-Za-z0-9.-]+", col):
+                raise ValueError("Device coordinates contain unsafe path characters.")
+            coordinate = f"R{row}C{col}"
+            if not row.isdecimal() or not col.isdecimal():
+                coordinate += "_" + hashlib.sha256(json.dumps([row, col]).encode("utf-8")).hexdigest()[:8]
+        else:
+            coordinate = "unassigned"
+        root = self.sample_directory(sample_id) / "devices" / coordinate
+        root.mkdir(parents=True, exist_ok=True)
+        self._write_device_context(sample, row, col, root)
+        return root
+
+    @staticmethod
+    def _write_device_context(sample, row, col, root):
+        from app.storage.run_bundle import _atomic_json
+        context = {"schema": "lab-control-sample-device-v1", "sample_id": sample.sample_id,
+                   "row": row, "col": col, "label": sample.cell_label(row, col) if row and col else "",
+                   "state": sample.cell_state(row, col) if row and col else "unassigned",
+                   "notes": sample.cell_notes(row, col) if row and col else "",
+                   "row_label": sample.row_labels.get(row, ""), "col_label": sample.col_labels.get(col, "")}
+        path = root / "device.json"
+        if not path.exists() or json.loads(path.read_text(encoding="utf-8")) != context:
+            _atomic_json(path, context)
+        settings = root / "settings.json"
+        if not settings.exists():
+            _atomic_json(settings, {"schema": "lab-control-dut-settings-v1", "sample_id": sample.sample_id,
+                                   "row": row, "col": col, "settings": {}})
+
+    def device_settings(self, sample_id: str, row: str, col: str) -> dict:
+        path = self.device_directory_for(sample_id, row, col) / "settings.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if (value.get("schema") != "lab-control-dut-settings-v1" or value.get("sample_id") != sample_id
+                or value.get("row") != row or value.get("col") != col or not isinstance(value.get("settings"), dict)):
+            raise ValueError("DUT settings do not match the selected coordinate.")
+        return value["settings"]
+
+    def save_device_settings(self, sample_id: str, row: str, col: str, settings: Mapping) -> None:
+        from app.storage.run_bundle import _atomic_json
+        path = self.device_directory_for(sample_id, row, col) / "settings.json"
+        _atomic_json(path, {"schema": "lab-control-dut-settings-v1", "sample_id": sample_id,
+                            "row": row, "col": col, "settings": dict(settings)})
+        with self._lock:
+            self._connection.execute("UPDATE active_target SET device_settings_json = ? WHERE sample_id = ? AND row = ? AND col = ?",
+                (json.dumps(dict(settings), allow_nan=False, sort_keys=True), sample_id, row, col))
 
     def ensure_sample_structure(self, sample_id: str) -> Path:
         sample = self.get_sample(sample_id)
@@ -820,7 +881,7 @@ class InventoryStore:
             raise KeyError(f"Sample not found: {sample_id}")
         root = self.catalogue_root / sample.folder_name
         (root / "attachments").mkdir(parents=True, exist_ok=True)
-        (root / "measurements" / "sweeps").mkdir(parents=True, exist_ok=True)
+        (root / "devices").mkdir(parents=True, exist_ok=True)
         self._write_sample_info(sample, root / "info.csv")
         return root
 
@@ -1057,6 +1118,13 @@ class InventoryStore:
         if previous is not None and previous.folder_name != updated_sample.folder_name:
             self._rename_sample_directory(previous.folder_name, updated_sample.folder_name)
         self.ensure_sample_structure(updated_sample.sample_id)
+        # Refresh already materialized DUT contexts after note/state edits.
+        for directory in (self.sample_directory(updated_sample.sample_id) / "devices").iterdir():
+            if directory.is_dir() and (directory / "device.json").is_file():
+                context = json.loads((directory / "device.json").read_text(encoding="utf-8"))
+                row, col = context.get("row"), context.get("col")
+                if not row and not col or row in updated_sample.rows and col in updated_sample.cols:
+                    self._write_device_context(updated_sample, row, col, directory)
         return updated_sample
 
     def remap_sample_rows(self, sample_id: str, row_mapping: Mapping[str, str]) -> Sample:
@@ -1520,10 +1588,13 @@ class InventoryStore:
                 col_label=row["col_label"] if "col_label" in row_keys else None,
                 description=row["description"] if "description" in row_keys else None,
                 tags=tags,
+                device_settings=json.loads(row["device_settings_json"] or "{}"),
             )
 
     def set_active_target(self, target: ActiveSampleTarget) -> None:
         """Update the active measurement target."""
+        if target.sample_id and target.row and target.col:
+            target = replace(target, device_settings=self.device_settings(target.sample_id, target.row, target.col))
         with self._lock:
             cursor = self._connection.cursor()
             cursor.execute(
@@ -1531,7 +1602,7 @@ class InventoryStore:
                 UPDATE active_target
                 SET sample_id = ?, sample_name = ?, row = ?, col = ?,
                     device_label = ?, notes = ?, row_label = ?, col_label = ?,
-                    description = ?, tags_json = ?
+                    description = ?, tags_json = ?, device_settings_json = ?
                 WHERE id = 1;
                 """,
                 (
@@ -1545,6 +1616,7 @@ class InventoryStore:
                     target.col_label,
                     target.description,
                     json.dumps(list(target.tags)),
+                    json.dumps(dict(target.device_settings), allow_nan=False, sort_keys=True),
                 ),
             )
 

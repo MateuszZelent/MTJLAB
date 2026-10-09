@@ -12,6 +12,46 @@ from app.devices.anritsu_ms2830a.ui.manual_save import ManualSpectrumSaveOptions
 from app.storage import ManualSpectrumSaveMode
 
 
+def test_dut_change_discards_append_destination_and_selects_new_folder(page, tmp_path):
+    a, b = tmp_path / "R20C4", tmp_path / "R20C5"
+    page.set_sample_measurement_context(a, {"sample_id": "wafer", "row": "20", "col": "4"})
+    old = page._manual_default_destination()
+    page._manual_archive_last_path = old
+    page._manual_last_mode = ManualSpectrumSaveMode.APPEND
+    page.set_sample_measurement_context(b, {"sample_id": "wafer", "row": "20", "col": "5"})
+    assert page._manual_default_destination().parent == b
+    assert page._manual_save_options is None
+    assert page._manual_archive_last_path is None
+    assert page.correction_workspace._sample_measurement_directory == b / "baselines"
+
+
+def test_dut_change_during_archive_io_applies_after_old_job_finishes(page, tmp_path, monkeypatch):
+    a, b = tmp_path / "R20C4", tmp_path / "R20C5"
+    page.set_sample_measurement_context(a, {"sample_id": "wafer", "row": "20", "col": "4"})
+    archive = Mock(active_path=None)
+    entered, release = threading.Event(), threading.Event()
+
+    def save(**kwargs):
+        entered.set()
+        assert release.wait(10)
+        return object()
+
+    archive.save.side_effect = save
+    page._manual_archive = archive
+    monkeypatch.setattr(page, "_manual_save_completed", Mock())
+    try:
+        page._start_manual_archive_job("save", {}, options=None, metadata_count=0)
+        assert wait_for_ui(entered.is_set)
+        page.set_sample_measurement_context(b, {"sample_id": "wafer", "row": "20", "col": "5"})
+        assert page._manual_sample_directory == a
+        release.set()
+        assert wait_for_ui(lambda: page._manual_archive_thread is None)
+        assert page._manual_default_destination().parent == b
+    finally:
+        release.set()
+        assert wait_for_ui(lambda: page._manual_archive_thread is None)
+
+
 @pytest.mark.parametrize("operation", ["save", "close"])
 @pytest.mark.parametrize("fails", [False, True])
 def test_archive_worker_keeps_gui_responsive_and_reports_after_finish(page, monkeypatch, operation, fails):

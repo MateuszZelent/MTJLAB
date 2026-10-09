@@ -726,7 +726,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
                     Path(runs[0].csv_path).is_relative_to(store.catalogue_root / sample.folder_name)
                 )
                 self.assertIn(
-                    str(Path("measurements") / "Keithley_2600" / "characterization" / "R1C1"),
+                    str(Path("devices") / "R1C1" / "measurements" / "characterization" / "Keithley_2600"),
                     runs[0].csv_path,
                 )
 

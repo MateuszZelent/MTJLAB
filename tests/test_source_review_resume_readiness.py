@@ -10,6 +10,48 @@ from app.engine.runner import ExecutionMode
 from app.ui.shell import main_window
 
 
+def test_open_readiness_connects_only_missing_required_page_sessions(tmp_path):
+    from types import MethodType
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    app = QApplication.instance() or QApplication([])
+    window = QWidget()
+    window.resize(1360, 880)
+    window._sweep_readiness_dialog = None
+    window._device_states = {
+        "anritsu": "verified", "keithley": "disconnected",
+        "moke_box": "unknown", "rigol": "disconnected",
+    }
+    window._manual_device_idn = {"anritsu": "ANRITSU,MS2830A,1,1"}
+    window._controllers = {name: Mock() for name in window._device_states}
+    window.connection_panels = {name: Mock() for name in window._device_states}
+    for method in ("_update_sweep_readiness_device", "_connect_sweep_devices", "_clear_sweep_readiness_dialog"):
+        setattr(window, method, MethodType(getattr(main_window.MainWindow, method), window))
+    window.show()
+    dialog = main_window.MainWindow._open_sweep_readiness(
+        window, SimpleNamespace(required_devices={"anritsu", "keithley", "moke_box"}),
+        on_start=Mock(),
+    )
+    try:
+        app.processEvents()
+        window._controllers["keithley"].call.assert_called_once_with("connect")
+        for name in ("anritsu", "moke_box", "rigol"):
+            window._controllers[name].call.assert_not_called()
+        assert not dialog.start_button.isEnabled()
+        assert dialog.start_button.isVisible()
+        assert dialog.width() > 0 and dialog.height() > 0
+        dialog.update_device("keithley", "output_off", True)
+        assert not dialog.start_button.isEnabled()  # UNKNOWN MOKE is still blocked.
+        dialog.update_device("moke_box", "verified", True)
+        assert dialog.start_button.isEnabled()
+        assert dialog.grab().save(str(tmp_path / "automatic-sweep-readiness.png"))
+    finally:
+        dialog.close()
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
 @pytest.mark.parametrize("blocker", ["audit", "storage", "device.anritsu", "estop", None])
 def test_resume_checks_current_readiness_and_estop_before_start(monkeypatch, blocker):
     estimate = SimpleNamespace(nominal_duration_s=10.)

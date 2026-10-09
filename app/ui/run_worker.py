@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from io import StringIO
@@ -56,6 +57,7 @@ def planned_run_paths(
     file_stem_override: str | None = None,
     timestamp: datetime | None = None,
     sample_target: object | None = None,
+    reserve_directory: bool = False,
 ) -> tuple[Path, Path | None]:
     """Return the HDF5 and optional CSV path for a new run."""
 
@@ -72,16 +74,17 @@ def planned_run_paths(
         file_stem_override=file_stem_override,
         pattern=pattern,
     )
-    run_timestamp = (timestamp or datetime.now(timezone.utc)).strftime(
-        "%Y%m%dT%H%M%S.%fZ"
+    from app.storage.run_bundle import bundle_directory
+    output_dir = bundle_directory(
+        output_dir, base_name if file_stem_override else recipe_name,
+        timestamp or datetime.now(timezone.utc), reserve=reserve_directory,
     )
-    run_stem = f"{run_timestamp}_{base_name}"
     csv_path = (
-        output_dir / f"{run_stem}.csv"
+        output_dir / "data.csv"
         if hasattr(settings, "storage") and settings.storage.get("write_csv_summary")
         else None
     )
-    return output_dir / f"{run_stem}.h5", csv_path
+    return output_dir / "data.h5", csv_path
 
 
 def serialize_settings_snapshot(
@@ -316,7 +319,7 @@ class RunWorker(QObject):
         self._file_stem_override = file_stem_override
         self._device_controllers = dict(device_controllers or {})
         self._run_leases: dict[str, object] = {}
-        self._sample_target = sample_target
+        self._sample_target = deepcopy(sample_target)
         if outputs_forced_off:
             self._execution_mode = ExecutionMode.DRY_RUN
         self._outputs_forced_off = self._execution_mode is ExecutionMode.DRY_RUN
@@ -411,6 +414,7 @@ class RunWorker(QObject):
         lakeshore: LakeShore475Adapter | None = None
         completion: dict[str, object] | None = None
         failure: str | None = None
+        bundle = None
         try:
             required_by_plan = set(
                 self._plan.required_devices
@@ -464,12 +468,27 @@ class RunWorker(QObject):
                     output_dir_override=self._output_dir_override,
                     file_stem_override=self._file_stem_override,
                     sample_target=self._sample_target,
+                    reserve_directory=True,
                 )
             else:
                 result_path = self._recovery.path
                 csv_summary_path = None
             estimate = PlanEstimator(self._settings).estimate(self._plan)
             settings_source = self._settings_snapshot()
+            from app.storage.run_bundle import RunBundle
+            if self._recovery is None:
+                bundle = RunBundle(result_path)
+                bundle.initialize(
+                    plan=self._plan, settings_source=settings_source,
+                    operator_context=self._operator_context, sample_target=self._sample_target,
+                    simulation_metadata=self._execution_metadata(simulation_context, required),
+                    display_name=automated_run_file_stem(self._plan.recipe_name,
+                        sample_target=self._sample_target, file_stem_override=self._file_stem_override,
+                        pattern=self._settings.storage.get("filename_pattern")),
+                )
+            elif (result_path.parent / "metadata.json").is_file():
+                bundle = RunBundle(result_path)
+                bundle.verify_identity(self._plan)
             require_storage_capacity(result_path, estimate.total_upper_bytes)
             from app.storage.resource_budget import resolve_import_memory_budget, require_public_import_capacity
             import_budget = resolve_import_memory_budget(self._settings.storage.get("validation_memory_budget_bytes"))
@@ -486,7 +505,11 @@ class RunWorker(QObject):
             for name in sorted(required):
                 if self._early_stop_requested.is_set():
                     raise RuntimeError("Run was stopped by operator during device connection.")
-                identities[name] = devices[name].connect().idn
+                # A run borrows existing sessions; a start is not a reconnect.
+                if devices[name].connected:
+                    identities[name] = devices[name].identity.idn
+                else:
+                    identities[name] = devices[name].connect().idn
             if self._early_stop_requested.is_set():
                 raise RuntimeError("Run was stopped by operator before storage initialization.")
             sample_attrs: dict[str, object] = {}
@@ -503,6 +526,7 @@ class RunWorker(QObject):
                         "sample_description": str(getattr(self._sample_target, "description", "") or ""),
                         "sample_tags": list(getattr(self._sample_target, "tags", ()) or ()),
                         "sample_cell_notes": str(getattr(self._sample_target, "notes", "") or ""),
+                        "sample_device_settings": dict(getattr(self._sample_target, "device_settings", {}) or {}),
                     }
                 elif isinstance(self._sample_target, Mapping) and self._sample_target.get("sample_id"):
                     sample_attrs = {
@@ -516,6 +540,7 @@ class RunWorker(QObject):
                         "sample_description": str(self._sample_target.get("description") or ""),
                         "sample_tags": list(self._sample_target.get("tags") or ()),
                         "sample_cell_notes": str(self._sample_target.get("notes") or ""),
+                        "sample_device_settings": dict(self._sample_target.get("device_settings") or {}),
                     }
 
             if self._recovery is None:
@@ -554,6 +579,8 @@ class RunWorker(QObject):
                     ),
                     operator_context=self._operator_context,
                 )
+            if bundle is not None:
+                bundle.mark_running()
             self._runner = RecipeRunner(
                 rigol=rigol,
                 keithley=keithley,
@@ -581,6 +608,8 @@ class RunWorker(QObject):
                 ),
                 recovery_reference=(self._recovery.reference if self._recovery is not None else None),
             )
+            if bundle is not None:
+                bundle.finalize(execution_state=result.state.value, error=result.error)
             completion = {
                 "result": result,
                 "path": str(writer.path),
@@ -641,6 +670,11 @@ class RunWorker(QObject):
             # Do not leave the last visible spectrum frame behind merely
             # because the worker finished between two telemetry intervals.
             self._telemetry_forwarder.flush()
+            if bundle is not None and (failure is not None or cleanup_errors):
+                try:
+                    bundle.fail(failure or "; ".join(cleanup_errors))
+                except Exception as metadata_exc:
+                    failure = f"{failure or 'Run cleanup failed'}; bundle metadata update failed: {metadata_exc}"
 
         if failure is not None:
             self.failed.emit(failure)
@@ -679,6 +713,22 @@ class RunWorker(QObject):
         return errors
 
     def _cleanup_device(self, name: str, device: Any, runner_owned_shutdown: bool, errors: list[str]) -> None:
+        # Ownership outlives the reservation: another device's release error
+        # can trigger emergency cleanup after this lease was already released.
+        borrowed_session = name in self._run_leases or name in self._device_controllers
+        if name == "moke_box" and not any(
+            endpoint.startswith("moke_box.") for endpoint in controlled_output_endpoints(self._plan.actions)
+        ):
+            if borrowed_session:
+                # A read-only run does not own the page's pre-existing DAC
+                # state. Even on startup/storage failure, release only its
+                # reservation: disconnect can zero a previously used adapter.
+                self.event.emit("readonly_session_preserved", {"device": name})
+            else:
+                # Standalone workers own their transport, not a persistent UI
+                # session. They never changed this adapter's DAC output.
+                device.disconnect()
+            return
         try:
             connected = device.connected
         except Exception as exc:
@@ -689,9 +739,9 @@ class RunWorker(QObject):
             if name in getattr(self, "_completion_retained_devices", set()):
                 errors.append(f"{name}: retained output lost its persistent connection.")
             return
-        if runner_owned_shutdown and name in getattr(self, "_completion_retained_devices", set()):
-            # The device page owns this live session after the run lease is
-            # released. Disconnect would undo the requested final state.
+        if runner_owned_shutdown and (borrowed_session or name in getattr(self, "_completion_retained_devices", set())):
+            # Runner confirmed the recipe's final state. The page still owns
+            # borrowed sessions, even when their outputs are now OFF.
             return
         if not runner_owned_shutdown:
             try:
@@ -706,6 +756,10 @@ class RunWorker(QObject):
                         raise RuntimeError("Physical OUTPUT OFF was not confirmed.")
             except Exception as exc:
                 errors.append(f"{name} emergency OFF: {exc}")
+        if borrowed_session:
+            # On failure, perform shutdown above but preserve the page's
+            # transport. Releasing the run reservation is not Disconnect.
+            return
         try:
             device.disconnect()
         except Exception as exc:

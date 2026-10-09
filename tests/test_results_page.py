@@ -62,6 +62,7 @@ class ResultsPageTests(unittest.TestCase):
             writer.close("completed")
 
             page = ResultsPage(str(output_dir))
+            wait_until(self.application, lambda: page.file_browser._refresh_task is None)
             try:
                 self.assertEqual(page.runs.topLevelItemCount(), 1)
                 page.runs.setCurrentItem(page.runs.topLevelItem(0))
@@ -74,6 +75,9 @@ class ResultsPageTests(unittest.TestCase):
                 self.assertIn("browser-test", page.recipe_snapshot.toPlainText())
                 self.assertEqual(page.details_tabs.tabText(3), "PyThat data")
                 self.assertEqual(page.details_tabs.tabText(4), "Device state")
+                self.assertIn("Inspect with PyThat", page.pythat_data.toPlainText())
+                page.metadata_panel.pythat_button.click()
+                wait_until(self.application, lambda: page._pythat_task is None)
                 self.assertIn("Checkpoint", page.pythat_data.toPlainText())
                 self.assertEqual(page.points.model().rowCount(), 1)
                 page.points.setCurrentIndex(page.points.model().index(0, 0))
@@ -99,6 +103,7 @@ class ResultsPageTests(unittest.TestCase):
             writer.close("faulted")
 
             page = ResultsPage(str(output_dir))
+            wait_until(self.application, lambda: page.file_browser._refresh_task is None)
             requested: list[Path] = []
             page.resume_requested.connect(requested.append)
             try:
@@ -125,6 +130,7 @@ class ResultsPageTests(unittest.TestCase):
             writer.close("completed")
 
             page = ResultsPage(temporary)
+            wait_until(self.application, lambda: page.file_browser._refresh_task is None)
             try:
                 page.runs.setCurrentItem(page.runs.topLevelItem(0))
                 wait_until(self.application, lambda: page._result_task is None)
@@ -146,6 +152,7 @@ class ResultsPageTests(unittest.TestCase):
     def test_browses_real_thatec_tree_without_private_run_groups(self) -> None:
         reference = REFERENCE_FILE
         page = ResultsPage(str(reference.parent))
+        wait_until(self.application, lambda: page.file_browser._refresh_task is None)
         try:
             run_item = next(
                 page.runs.topLevelItem(index)
@@ -176,6 +183,7 @@ class ResultsPageTests(unittest.TestCase):
         """The public THATEC tree becomes the same complete historical Sweep tree."""
         reference = REFERENCE_FILE
         results = ResultsPage(str(reference.parent))
+        wait_until(self.application, lambda: results.file_browser._refresh_task is None)
         sweeps = RecipePage(simulation_settings())
         try:
             results.open_sweep_requested.connect(sweeps.load_historical_thatec_sweep)
@@ -282,6 +290,7 @@ class ResultsPageTests(unittest.TestCase):
             )
             writer.close("completed")
             page = ResultsPage(result_directory)
+            wait_until(self.application, lambda: page.file_browser._refresh_task is None)
             try:
                 self.assertEqual(page.runs.topLevelItemCount(), 0)
                 page.open_result_file(path)
@@ -297,6 +306,7 @@ class ResultsPageTests(unittest.TestCase):
         """The operational Results route must be a visible Fluent surface, not legacy tabs."""
         with tempfile.TemporaryDirectory() as temporary:
             page = ResultsPage(temporary)
+            wait_until(self.application, lambda: page.file_browser._refresh_task is None)
             try:
                 page.resize(1280, 720)
                 page.show()
@@ -315,7 +325,8 @@ class ResultsPageTests(unittest.TestCase):
                 page.close()
 
     def test_metadata_details_use_fluent_navigation_not_legacy_tabs(self) -> None:
-        page = ResultsPage(".")
+        page = ResultsPage(".tmp-empty-results-navigation")
+        wait_until(self.application, lambda: page.file_browser._refresh_task is None)
         try:
             self.assertNotIsInstance(page.metadata_panel.tabs, QTabWidget)
             self.assertIsInstance(page.metadata_panel.section_navigation, Pivot)
@@ -417,7 +428,8 @@ class ResultsPageTests(unittest.TestCase):
         from app.ui.widgets.fluent_code_viewer import FluentCodeViewer
         from qfluentwidgets import SegmentedWidget
 
-        page = ResultsPage(".")
+        page = ResultsPage(".tmp-empty-results-navigation")
+        wait_until(self.application, lambda: page.file_browser._refresh_task is None)
         try:
             # Check results main navigation is a SegmentedWidget
             self.assertIsInstance(page.result_tabs.navigation, SegmentedWidget)

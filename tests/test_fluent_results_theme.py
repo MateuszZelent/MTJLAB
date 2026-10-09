@@ -11,6 +11,8 @@ from PySide6.QtWidgets import QApplication
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.results.heatmap_tab import HeatmapPlotWidget
 from app.ui.shell import MainWindow
+from tests.shell_test_isolation import isolated_shell_persistence as isolated_shell_persistence  # noqa: PLC0414
+from tests.shell_test_isolation import shell_qt_application as shell_qt_application  # noqa: PLC0414
 
 
 class FluentResultsThemeTests(unittest.TestCase):
