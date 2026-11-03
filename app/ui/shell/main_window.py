@@ -514,7 +514,8 @@ class MainWindow(FluentWindow):
         )
         self.run_monitor = RunMonitorPage()
         self.results_page = ResultsPage(
-            str(self.inventory_store.catalogue_root),
+            str(self._results_directory_for_target(self.inventory_store.get_active_target())
+                or self.inventory_store.catalogue_root),
             catalogue_tree=True,
         )
         self.elab_page = ElabPage(
@@ -2676,6 +2677,18 @@ class MainWindow(FluentWindow):
         manual_directory = (self.inventory_store.measurement_directory_for(target.sample_id,
             "single_measurements", "Anritsu_MS2830A", row=target.row, col=target.col) if target.is_active else None)
         self.anritsu_page.set_sample_measurement_context(manual_directory, target.as_dict())
+        self._set_results_sample_context(target)
+
+    def _set_results_sample_context(self, target: ActiveSampleTarget) -> None:
+        self.results_page.file_browser.set_sample_context(
+            self._results_directory_for_target(target), self.inventory_store.catalogue_root)
+
+    def _results_directory_for_target(self, target: ActiveSampleTarget) -> Path | None:
+        active_directory = None
+        if target.is_active:
+            active_directory = (self.inventory_store.device_directory_for(target.sample_id, target.row, target.col)
+                                if target.row and target.col else self.inventory_store.sample_directory(target.sample_id))
+        return active_directory
 
     def _open_inventory_result(self, run_path: str) -> None:
         path = Path(run_path)
@@ -2686,10 +2699,13 @@ class MainWindow(FluentWindow):
             self._log(f"Measurement file not found: {run_path}")
 
     def _refresh_results_catalogue(self) -> None:
-        """Keep Results pointed at the one Samples catalogue root."""
+        """Update active-target context without resetting operator navigation."""
 
-        self.results_page.set_output_directory(self.inventory_store.catalogue_root)
-        self.results_page.file_browser.refresh()
+        previous_directory = self.results_page.file_browser.output_dir
+        self._set_results_sample_context(self.inventory_store.get_active_target())
+        # A changed directory has already started its own index job.
+        if self.results_page.file_browser.output_dir == previous_directory:
+            self.results_page.file_browser.refresh()
 
     def _on_elab_upload_completed(self, record: object) -> None:
         if hasattr(record, "run_path") and hasattr(record, "experiment_id"):

@@ -219,6 +219,12 @@ class MetadataPanel(QWidget):
         self.recipe_snapshot.clear()
         self.settings_snapshot.clear()
 
+    def show_heatmap_analysis(self, path, metadata):
+        self.metadata.setPlainText(f"# Derived heatmap snapshot\nFile: {path}\n\n" +
+                                   json.dumps(metadata, ensure_ascii=False, indent=2))
+        self.recipe_snapshot.clear()
+        self.settings_snapshot.clear()
+
     def show_pythat(self, data: PyThatRunData | None) -> None:
         """Populate the PyThat tab."""
         if data is not None:

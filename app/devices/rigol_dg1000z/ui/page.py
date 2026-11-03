@@ -696,7 +696,38 @@ class RigolPage(QWidget):
         snapshot = self.configuration_snapshot_for(channel)
         updated = self._snapshot_with_quick_value(snapshot, field, text)
         config = self._channel_config_from_snapshot(updated)
+        confirmed = self._confirmed_carrier_configs[channel]
+        if confirmed is not None and self._only_quick_field_changed(confirmed, config, field):
+            # An OFF output does not require rebuilding an already verified
+            # carrier on every slider/key step. The adapter still validates
+            # the baseline, limits and actual output state before the write.
+            return "quick_setpoint", QuickControlCommand(target, text)
         return "quick_configure", QuickConfigureCommand(target, config)
+
+    @staticmethod
+    def _only_quick_field_changed(
+        before: RigolChannelConfig, after: RigolChannelConfig, field: str,
+    ) -> bool:
+        ignored = {"changed_fields"}
+        if field == "frequency":
+            ignored.add("frequency_hz")
+        else:
+            ignored.update({"high_level_v", "low_level_v"})
+            if before.waveform.upper() != "DC":
+                preserved = {
+                    "high_level": (before.low_level_v, after.low_level_v),
+                    "low_level": (before.high_level_v, after.high_level_v),
+                    "amplitude": (before.high_level_v + before.low_level_v,
+                                  after.high_level_v + after.low_level_v),
+                    "offset": (before.high_level_v - before.low_level_v,
+                               after.high_level_v - after.low_level_v),
+                }[field]
+                if not math.isclose(*preserved, rel_tol=1e-9, abs_tol=1e-12):
+                    return False
+        return all(
+            getattr(before, name) == getattr(after, name)
+            for name in RigolChannelConfig.__dataclass_fields__ if name not in ignored
+        )
 
     def quick_control_configuration_verified(
         self, target: str, command: object
@@ -789,8 +820,6 @@ class RigolPage(QWidget):
 
     def _submit_active_frequency(self) -> None:
         timer = getattr(self, "_live_rigol_timers", {}).get("frequency")
-        if timer is not None:
-            timer.stop()
         if not self.live_control_switch.isChecked():
             return
         if self.waveform.currentText() in {"DC", "NOIS"}:
@@ -803,9 +832,11 @@ class RigolPage(QWidget):
             bool(self.frequency.property("precisionArrowStepInProgress"))
             or bool(self.period.property("precisionArrowStepInProgress"))
         ):
-            if timer is not None:
-                timer.start(160)
+            if timer is not None and not timer.isActive():
+                timer.start(60)
             return
+        if timer is not None:
+            timer.stop()
 
         channel = int(self.channel.currentText())
         try:
@@ -827,8 +858,6 @@ class RigolPage(QWidget):
 
     def _submit_active_voltage(self, field: str, editor: QWidget) -> None:
         timer = getattr(self, "_live_rigol_timers", {}).get(field)
-        if timer is not None:
-            timer.stop()
         if not self.live_control_switch.isChecked():
             return
         if getattr(self, "_suppress_focus_loss_dispatch", False):
@@ -836,9 +865,14 @@ class RigolPage(QWidget):
         if not self._is_device_connected():
             return
         if bool(editor.property("precisionArrowStepInProgress")):
-            if timer is not None:
-                timer.start(160)
+            # Throttle repeated arrow steps rather than restarting a debounce
+            # forever while the key is held. The coordinator coalesces queued
+            # values while a previous hardware request is still in flight.
+            if timer is not None and not timer.isActive():
+                timer.start(60)
             return
+        if timer is not None:
+            timer.stop()
 
         channel = int(self.channel.currentText())
         try:
@@ -869,7 +903,7 @@ class RigolPage(QWidget):
                 timeout_ms=15_000,
             )
         elif state == "applied":
-            self.status.emit(f"Rigol active setpoint verified: {detail}")
+            self.status.emit(f"Rigol: {detail}")
 
     def quick_setpoint_value_read(self, target: str, value_si: float) -> None:
         parts = target.split(".")

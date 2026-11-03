@@ -628,13 +628,13 @@ class RigolAdapter(DeviceAdapter):
             dc_level_selected = selected is None or bool(
                 {"waveform", "high_level_v", "low_level_v"}.intersection(selected)
             )
-            if self._dc_offset_requires_off_reconfiguration() and dc_level_selected:
+            if self._dc_level_readback_unavailable() and dc_level_selected:
                 self._configure_dc_offset_while_off(config)
             elif selected is None or "waveform" in selected:
                 session.write(
                     f"{prefix}:APPL:DC DEF,DEF,{self._format_wire_voltage(config.high_level_v)}"
                 )
-            if dc_level_selected and not self._dc_offset_requires_off_reconfiguration():
+            if dc_level_selected and not self._dc_level_readback_unavailable():
                 actual_offset = float(session.query(f"{prefix}:VOLT:OFFS?")) if selected is not None else None
                 if actual_offset is None or not math.isclose(actual_offset, config.high_level_v, rel_tol=1e-9, abs_tol=1e-12):
                     session.write(f"{prefix}:VOLT:OFFS {self._format_wire_voltage(config.high_level_v)}")
@@ -697,6 +697,10 @@ class RigolAdapter(DeviceAdapter):
                     continue
                 if waveform in {"DC", "NOIS"} and name in {"frequency_hz", "phase_deg"}:
                     continue
+                if (waveform == "DC" and name in {"high_level_v", "low_level_v"}
+                        and self._dc_level_readback_unavailable()):
+                    changed.add(name)
+                    continue
                 suffix = "VOLT:OFFS" if waveform == "DC" and name in {"high_level_v", "low_level_v"} else query_for[name]
                 actual = float(session.query(f"{prefix}:{suffix}?"))
                 self._assert_finite(name + " readback", actual)
@@ -706,6 +710,8 @@ class RigolAdapter(DeviceAdapter):
             # Amplitude and offset encode BOTH endpoints. An omitted endpoint
             # must be confirmed before that coupled write can preserve it.
             for name, suffix in (("high_level_v", "VOLT:HIGH"), ("low_level_v", "VOLT:LOW")):
+                if waveform == "DC":
+                    continue  # DC has one level, not two coupled endpoints.
                 if {"high_level_v", "low_level_v"} & changed and name not in selected:
                     actual = float(session.query(f"{prefix}:{suffix}?"))
                     if not math.isclose(actual, getattr(config, name), rel_tol=1e-9, abs_tol=1e-12):
@@ -981,11 +987,6 @@ class RigolAdapter(DeviceAdapter):
             output_before = self._parse_output_state(
                 session.query(f":OUTP{channel}?"), channel=channel
             )
-            if output_before and self._dc_offset_requires_off_reconfiguration():
-                raise SafetyViolation(
-                    "This Rigol firmware requires OUTPUT OFF to change the DC level. "
-                    "Turn OUTPUT OFF, apply Offset / DC level, then enable output explicitly."
-                )
             try:
                 self._verify_applied_configuration(
                     config, expected_output=output_before
@@ -995,25 +996,26 @@ class RigolAdapter(DeviceAdapter):
             except Exception as exc:
                 self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
             self._last_config.pop(channel, None)
-            # The qualified firmware workaround is OFF-only (guarded above).
-            # Other revisions retain the dedicated live offset command.
             try:
-                if self._dc_offset_requires_off_reconfiguration():
-                    self._configure_dc_offset_while_off(updated)
-                else:
-                    session.write(
-                        f"{prefix}:VOLT:OFFS {self._format_wire_voltage(updated.high_level_v)}"
-                    )
+                session.write(
+                    f"{prefix}:VOLT:OFFS {self._format_wire_voltage(updated.high_level_v)}"
+                )
                 self._wait_for_dc_operation_complete()
                 self._check_errors()
                 try:
-                    actual_offset = float(session.query(f"{prefix}:VOLT:OFFS?"))
+                    actual_offset = (updated.high_level_v if self._dc_level_readback_unavailable()
+                                     else float(session.query(f"{prefix}:VOLT:OFFS?")))
                 except (TypeError, ValueError) as exc:
                     raise DeviceError("Rigol returned an invalid DC-level readback.") from exc
                 output_after = self._parse_output_state(
                     session.query(f":OUTP{channel}?"), channel=channel
                 )
                 if output_after != output_before:
+                    if output_after:
+                        self._fail_live_setpoint_update(
+                            output_was_on=True,
+                            cause=DeviceError("Rigol OUTPUT unexpectedly enabled during a DC-level update."),
+                        )
                     raise DeviceError("Rigol OUTPUT state changed during a DC-level update.")
                 if not self._same_number(
                     actual_offset, updated.high_level_v, absolute=1e-6
@@ -1212,7 +1214,7 @@ class RigolAdapter(DeviceAdapter):
             )
 
     def last_channel_config(self, channel: int) -> RigolChannelConfig:
-        """Return the last configuration confirmed by instrument readback."""
+        """Return the accepted configuration (DC may lack numeric readback)."""
 
         try:
             return self._last_config[channel]
@@ -1263,7 +1265,7 @@ class RigolAdapter(DeviceAdapter):
         return actual
 
     def quick_control_snapshot(self) -> dict[str, float]:
-        """Return the last configuration verified against instrument readback."""
+        """Return accepted setpoints; see dc_readback_limitation for DC evidence."""
 
         snapshot: dict[str, float] = {}
         for channel, config in self._last_config.items():
@@ -1314,34 +1316,27 @@ class RigolAdapter(DeviceAdapter):
             output_load=config.output_load,
         )
 
-    def _dc_offset_requires_off_reconfiguration(self) -> bool:
-        # Qualified on DG1032Z / 00.01.08: both OFFS and APPL:DC silently
-        # retain the previous offset while in DC, even after OPC returns 1.
+    def _dc_level_readback_unavailable(self) -> bool:
+        # DG1032Z / 00.01.08 has separate DC panel and offset-readback state.
+        # Confirmed on DG1ZA172902039, 2026-10-09, with readback and panel.
         identity = self._identity_or_raise()
         return (identity.model or "").upper() == "DG1032Z" and identity.firmware == "00.01.08"
 
     def _configure_dc_offset_while_off(self, config: RigolChannelConfig) -> None:
-        """Work around the qualified DC-register bug without energising SIN.
+        """Apply DC directly; this revision's numeric queries expose AC state.
 
-        DC inherits the offset written while SIN is selected. Establish a small
-        temporary Vpp so a retained AC amplitude cannot clamp that offset.
-        Final DC readback is still mandatory; a mismatch never widens limits.
+        Hardware capture 2026-10-09: OFFS writes in DC update the DC panel,
+        while OFFS?/APPL? keep the last SIN offset. Never switch to SIN merely
+        to make that unrelated register agree with the requested DC voltage.
         """
-        session = self._require_session()
-        prefix = f":SOUR{config.channel}"
         self._verify_output_off(config.channel)
         try:
-            session.write(f"{prefix}:FUNC SIN")
+            self._check_errors()
+            self._require_session().write(
+                f":SOUR{config.channel}:APPL:DC 1,1,{self._format_wire_voltage(config.high_level_v)}"
+            )
             self._wait_for_dc_operation_complete()
-            self._verify_output_off(config.channel)
-            if session.query(f"{prefix}:FUNC?").strip().upper() != "SIN":
-                raise DeviceError("Rigol did not confirm the temporary OFF-only DC preparation mode.")
-            session.write(f"{prefix}:VOLT MIN")
-            session.write(f"{prefix}:VOLT:OFFS {self._format_wire_voltage(config.high_level_v)}")
-            self._wait_for_dc_operation_complete()
-            self._verify_output_off(config.channel)
-            session.write(f"{prefix}:FUNC DC")
-            self._wait_for_dc_operation_complete()
+            self._check_errors()
             self._verify_output_off(config.channel)
         except Exception as exc:
             self._last_config.pop(config.channel, None)
@@ -1349,6 +1344,13 @@ class RigolAdapter(DeviceAdapter):
             if self._state != DeviceState.OUTPUT_OFF:
                 raise DeviceError("Rigol DC preparation failed; outputs OFF could not be confirmed.") from exc
             raise
+
+    def dc_readback_limitation(self, channel: int) -> str | None:
+        config = self._last_config.get(channel)
+        if (config is not None and config.waveform.upper() == "DC"
+                and self._dc_level_readback_unavailable()):
+            return "DC command accepted; voltage readback unavailable on DG1032Z firmware 00.01.08"
+        return None
 
     def _wait_for_dc_operation_complete(self) -> None:
         """Synchronize DC writes before readback (DG1000Z guide, section *OPC).
@@ -1369,7 +1371,12 @@ class RigolAdapter(DeviceAdapter):
         *,
         expected_output: bool = False,
     ) -> RigolChannelConfig:
-        """Reject silent quantisation or clamping after every write transaction.
+        """Check available readbacks after every write transaction.
+
+        DG1032Z 00.01.08 exposes AC registers even while DC is selected.
+        Preserve the accepted DC setpoint, explicitly marked by
+        dc_readback_limitation(), rather than misreporting those registers
+        as DC voltage evidence. Mode, load, unit and output remain checked.
 
         The DG1032Z may enforce a minimum Vpp and therefore alter LowL/HighL.
         A mismatch is reported while output remains OFF; callers must use a
@@ -1388,15 +1395,16 @@ class RigolAdapter(DeviceAdapter):
                 else expected.frequency_hz
             )
             actual_dc_level = (
-                float(session.query(f"{prefix}:VOLT:OFFS?")) if is_dc else None
+                float(session.query(f"{prefix}:VOLT:OFFS?"))
+                if is_dc and not self._dc_level_readback_unavailable() else None
             )
             actual_high = (
-                actual_dc_level
+                (expected.high_level_v if actual_dc_level is None else actual_dc_level)
                 if is_dc
                 else float(session.query(f"{prefix}:VOLT:HIGH?"))
             )
             actual_low = (
-                actual_dc_level
+                (expected.low_level_v if actual_dc_level is None else actual_dc_level)
                 if is_dc
                 else float(session.query(f"{prefix}:VOLT:LOW?"))
             )
@@ -1695,6 +1703,7 @@ class RigolAdapter(DeviceAdapter):
                         channel,
                         "modulation before OUTPUT ON",
                         self._modulation_expected_fields(modulation),
+                        require_output_off=not preserve_enabled,
                     )
                 if channel in self._sweep_enabled:
                     sweep = self._last_sweep_config.get(channel)
@@ -1707,6 +1716,7 @@ class RigolAdapter(DeviceAdapter):
                         channel,
                         "frequency sweep before OUTPUT ON",
                         self._sweep_expected_fields(sweep),
+                        require_output_off=not preserve_enabled,
                     )
                 if channel in self._burst_enabled:
                     burst = self._last_burst_config.get(channel)
@@ -1719,6 +1729,7 @@ class RigolAdapter(DeviceAdapter):
                         channel,
                         "burst before OUTPUT ON",
                         self._burst_expected_fields(burst),
+                        require_output_off=not preserve_enabled,
                     )
                 # Re-read the complete carrier immediately before the one
                 # energising transition; front-panel changes cannot reuse a
@@ -1871,6 +1882,12 @@ class RigolAdapter(DeviceAdapter):
         self._assert_finite("SYNC delay", config.sync_delay_s)
         if config.sync_delay_s < 0 or config.sync_delay_s > 10:
             raise SafetyViolation("Rigol SYNC delay must be in the range 0–10 s.")
+        if (
+            (config.changed_fields is None or "sync_delay_s" in config.changed_fields)
+            and last.waveform.upper() not in {"DC", "NOIS"}
+            and config.sync_delay_s > 1.0 / last.frequency_hz
+        ):
+            raise SafetyViolation("Rigol SYNC delay cannot exceed the carrier period.")
         session = self._require_session()
         prefix = f":OUTP{config.channel}"
         selected = config.changed_fields
@@ -2563,6 +2580,16 @@ class RigolAdapter(DeviceAdapter):
                     raise DeviceError(f"Rigol returned invalid counter readback for {query}.") from exc
                 if not self._same_number(actual, wanted, absolute=1e-6):
                     raise DeviceError(f"Rigol counter readback {query} returned {actual:.9g}, expected {wanted:.9g}.")
+        gate_response = session.query(":COUN:GATE?").strip().upper()
+        accepted_gates = (
+            {"AUTO", "USER1", "USER2", "USER3", "USER4", "USER5", "USER6"}
+            if config.gate_time == "AUTO" else {config.gate_time}
+        )
+        if gate_response not in accepted_gates:
+            raise DeviceError(
+                f"Rigol counter gate readback returned {gate_response!r}, "
+                f"expected {config.gate_time}."
+            )
         state_response = session.query(":COUN?").strip().upper()
         state_response = {"1": "ON", "0": "OFF"}.get(
             state_response, state_response
@@ -2674,7 +2701,7 @@ class RigolAdapter(DeviceAdapter):
             self._verify_output_off(channel)
         if mismatches:
             raise DeviceError(
-                f"Rigol {operation} readback failed (output remains OFF): "
+                f"Rigol {operation} readback failed: "
                 + "; ".join(mismatches)
             )
 

@@ -114,6 +114,48 @@ def test_subtraction_uses_only_the_selected_mean_or_repeat_in_spectra_and_maps(r
     assert hashlib.sha256(repeat_archive.read_bytes()).hexdigest() == before
 
 
+def test_map_dsp_reuses_raw_and_selected_baselines_without_rereading(repeat_archive, monkeypatch):
+    from app.ui.results.heatmap_cache import HeatmapSourceCache
+
+    points = Hdf5RunReader.points(repeat_archive, include_details=False)
+    run = ThatecRunReader.describe(repeat_archive)
+    row = next(row for row in run.rows.values() if len(row.shape) == 2)
+    coordinates = build_heatmap_coordinates(repeat_archive, run, row, points)
+    request = HeatmapRequest("frequency", "keithley.A.current", {})
+    cache = HeatmapSourceCache()
+    raw = _read_heatmap_payload(repeat_archive, row, coordinates, request, source_cache=cache)
+    # Warm the mean and one repeat; verify each result against direct W math.
+    for sweep in (None, 2):
+        baseline = (Hdf5RunReader.reference(repeat_archive, 1) if sweep is None else
+                    Hdf5RunReader.reference_sweep(repeat_archive, 1, sweep))
+        state = ResultProcessing("subtract_reference_signed", 1, reference_sweep=sweep)
+        derived = _read_heatmap_payload(repeat_archive, row, coordinates, request,
+            processing=state, points=points, source_cache=cache)
+        expected = np.power(10., (raw.matrix - 30.) / 10.) - np.power(
+            10., (np.asarray(baseline.powers_dbm) - 30.) / 10.)
+        np.testing.assert_allclose(derived.matrix, expected, atol=1e-24)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Cached DSP must not read the archive again")
+
+    monkeypatch.setattr(ThatecRunReader, "spectrum_slice", forbidden)
+    monkeypatch.setattr(Hdf5RunReader, "reference", forbidden)
+    monkeypatch.setattr(Hdf5RunReader, "reference_sweep", forbidden)
+    monkeypatch.setattr(Hdf5RunReader, "spectrum", forbidden)
+    for sweep in (2, None, 2, None):
+        derived = _read_heatmap_payload(repeat_archive, row, coordinates, request,
+            processing=ResultProcessing("subtract_reference_signed", 1, reference_sweep=sweep),
+            points=points, source_cache=cache)
+        assert derived.baselines[0].selected_sweep == sweep
+    restored = _read_heatmap_payload(repeat_archive, row, coordinates, request, source_cache=cache)
+    np.testing.assert_array_equal(restored.matrix, raw.matrix)
+    # Automatic selection of the unique recorded reference also avoids raw
+    # private-spectrum reads; it keeps the same cached stored linear mean.
+    _read_heatmap_payload(repeat_archive, row, coordinates, request,
+        processing=ResultProcessing("subtract_reference_signed"),
+        points=points, source_cache=cache)
+
+
 def test_direct_baseline_overlays_and_subtraction_share_explicit_sample(repeat_archive):
     session = ResultReadSession(repeat_archive)
     point = session.point(0)

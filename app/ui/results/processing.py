@@ -106,13 +106,16 @@ class ResultSpectrumProcessor:
             if self._reference_catalogue is None:
                 self._reference_catalogue = self.reader.references(self.path, metadata_only=True)
             purpose = state.baseline_purpose
-            trace = self.reader.spectrum(self.path, checkpoint)
-            linked = trace.reference_index if trace else None
             candidates = [r for r in self._reference_catalogue if r.purpose == purpose]
-            if any(r.index == linked for r in candidates):
-                index = linked
-            elif len(candidates) == 1:
+            if len(candidates) == 1:
                 index = candidates[0].index
+            elif candidates:
+                # Read checkpoint linkage only when there is a real choice;
+                # one collection never requires reloading every raw spectrum.
+                trace = self.reader.spectrum(self.path, checkpoint)
+                linked = trace.reference_index if trace else None
+                if any(r.index == linked for r in candidates):
+                    index = linked
             if index is None:
                 raise ValueError(f"No unique recorded {purpose} is linked to this raw checkpoint. "
                                  "Select the recorded reference/background explicitly.")

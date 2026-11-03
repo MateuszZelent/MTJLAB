@@ -54,6 +54,7 @@ from qfluentwidgets import (
 
 from app.domain.quick_controls import (
     _QUANTITY,
+    AcceptedSetpoint,
     QuickControlCommand,
     QuickSetpoint,
     quantity_step_si,
@@ -614,7 +615,8 @@ class QuickControlCoordinator(QObject):
                         self._adopt_readback_targets[device].discard(target)
                     self.value_read.emit(target, float(value))
                     self.state_changed.emit(
-                        target, "ready", "Verified device configuration"
+                        target, "ready", value.detail if isinstance(value, AcceptedSetpoint)
+                        else "Verified device configuration"
                     )
             return
         if operation != self._inflight_operations[device]:
@@ -649,7 +651,8 @@ class QuickControlCoordinator(QObject):
             self.state_changed.emit(
                 request.target,
                 "applied",
-                f"Applied {request.text} · readback {float(result):.12g} SI",
+                (f"Accepted {request.text} · {result.detail}" if isinstance(result, AcceptedSetpoint)
+                 else f"Applied {request.text} · readback {float(result):.12g} SI"),
             )
         self._send_next(device)
         # A successful Rigol voltage update can change all four coupled views;

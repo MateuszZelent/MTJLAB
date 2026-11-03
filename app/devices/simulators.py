@@ -309,7 +309,7 @@ class RigolSimulator(_BaseSimulator):
             self.waveform[int(match.group(1))] = match.group(2).upper()
             return
         match = re.match(
-            rf"^:SOUR([12]):APPL:DC\s+DEF,DEF,({_SCPI_NUMBER})$",
+            rf"^:SOUR([12]):APPL:DC\s+(?:DEF|1),(?:DEF|1),({_SCPI_NUMBER})$",
             command,
             re.IGNORECASE,
         )
@@ -481,6 +481,15 @@ class RigolSimulator(_BaseSimulator):
         match = re.match(r"^:SOUR([12]):FUNC\?$", command, re.IGNORECASE)
         if match:
             return self.waveform[int(match.group(1))]
+        match = re.match(r"^:SOUR([12]):APPL\?$", command, re.IGNORECASE)
+        if match:
+            channel = int(match.group(1))
+            offset = (self.high[channel] + self.low[channel]) / 2
+            if self.waveform[channel] == "DC":
+                return f'"DC,DEF,DEF,{offset:.12g},DEF"'
+            return (f'"{self.waveform[channel]},{self.frequency[channel]:.12g},'
+                    f'{self.high[channel] - self.low[channel]:.12g},{offset:.12g},'
+                    f'{self.phase[channel]:.12g}"')
         match = re.match(r"^:SOUR([12]):FREQ\?$", command, re.IGNORECASE)
         if match:
             return f"{self.frequency[int(match.group(1))]:.12g}"

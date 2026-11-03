@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import json
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -22,7 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, ComboBox, FluentIcon, PushButton
+from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, ComboBox, FluentIcon, PushButton, FlowLayout
 
 from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto
 from app.recipes.parameter_registry import parameter_descriptor
@@ -38,10 +40,13 @@ from app.ui.results.heatmap_coordinates import (
     read_heatmap_matrix,
 )
 from app.ui.results.processing import ResultSpectrumProcessor
+from app.ui.results.heatmap_cache import HeatmapSourceCache
 from app.ui.results.processing_controls import ResultProcessingControls
 from app.ui.results.map_controls import MapProcessingControls
 from app.ui.results.map_processing import analyse_map
-from app.ui.results.analysis_export import ensure_derived_destination, processing_manifest, write_analysis_manifest
+from app.ui.results.analysis_export import ensure_derived_destination, processing_manifest, write_analysis_manifest, heatmap_export_path
+from app.storage.heatmap_analysis_store import write_heatmap_analysis, validate_cell_edges
+from app.ui.results.heatmap_ranges import HeatmapRangeDialog
 from app.ui.results.filter_choices import FilterComboBox
 from app.ui.results.state_card import ResultsStateCard
 from app.ui.results.workers import ResultReadTask
@@ -66,6 +71,13 @@ def _read_coordinate_payload(path, run, row, points, *, cancelled=None):
 
 def _axis_export_label(label: str, unit: str) -> str:
     return f"{label} ({unit})" if unit else label
+
+
+def _write_heatmap_companions(path, values, x, y, checkpoints, metadata, x_edges, y_edges):
+    write_heatmap_analysis(Path(path).with_suffix(".h5"), values, x, y, checkpoints, metadata,
+                           x_edges=x_edges, y_edges=y_edges)
+    write_analysis_manifest(path, metadata)
+    return str(path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,12 +135,14 @@ def _read_heatmap_payload(
     cancelled: Callable[[], bool] | None = None,
     processing=None,
     points=(),
+    source_cache=None,
 ) -> _HeatmapPayload:
     """Read the exact requested physical-coordinate plane."""
 
-    processor = ResultSpectrumProcessor(path, processing, points, cancelled=cancelled) if processing and processing.active else None
+    processor = ResultSpectrumProcessor(path, processing, points, cancelled=cancelled, reader=source_cache) if processing and processing.active else None
     matrix = read_heatmap_matrix(path, row, coordinates, request, cancelled=cancelled, processor=processor,
-                                capture_input=processor is not None)
+                                capture_input=processor is not None,
+                                spectrum_reader=source_cache.spectrum_slice if source_cache else None)
     return _HeatmapPayload(
         matrix=matrix.values,
         x_values=matrix.x_values,
@@ -174,13 +188,18 @@ class HeatmapPlotWidget(QWidget):
         self._last_readout_cell: tuple[int, int] | None = None
         self._theme_name = "dark"
         self.export_metadata = {}
+        self._axis_metadata = {"x": {"label": "X", "unit": ""}, "y": {"label": "Y", "unit": ""}}
+        self._export_pool = QThreadPool(self)
+        self._export_pool.setMaxThreadCount(1)
+        self._export_task = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
         # --- Toolbar ---
-        toolbar = QHBoxLayout()
+        toolbar_host = QWidget(self)
+        toolbar = FlowLayout(toolbar_host, needAni=False)
         toolbar.setContentsMargins(0, 0, 0, 0)
         toolbar.setSpacing(6)
 
@@ -203,16 +222,19 @@ class HeatmapPlotWidget(QWidget):
 
         export_btn = PushButton(parent=self)
         export_btn.setText("Export")
-        export_btn.setToolTip("Export heatmap to PNG, SVG or CSV")
+        export_btn.setToolTip("Export PNG, SVG or CSV with a reloadable HDF5 snapshot of the visible cells")
         export_btn.setObjectName("plotToolButton")
         export_btn.clicked.connect(self.export)
         toolbar.addWidget(export_btn)
 
-        toolbar.addStretch(1)
+        self.range_button = PushButton("Axis ranges…", self)
+        self.range_button.clicked.connect(self.configure_ranges)
+        toolbar.addWidget(self.range_button)
+        self.export_button = export_btn
         self.readout = CaptionLabel("X: —   Y: —   Z: —", self)
         self.readout.setObjectName("plotReadout")
         toolbar.addWidget(self.readout)
-        layout.addLayout(toolbar)
+        layout.addWidget(toolbar_host)
 
         # --- Plot ---
         self.plot = create_plot_widget()
@@ -287,6 +309,8 @@ class HeatmapPlotWidget(QWidget):
         z_label: str = "Amplitude (dBm)",
         levels: tuple[float, float] | None = None,
         cell_checkpoint_indices: np.ndarray | None = None,
+        x_cell_edges: np.ndarray | None = None,
+        y_cell_edges: np.ndarray | None = None,
     ) -> None:
         """Set the 2-D data matrix and update the plot.
 
@@ -335,12 +359,19 @@ class HeatmapPlotWidget(QWidget):
             x_axis = x_axis[::-1]
             matrix = matrix[:, ::-1]
             checkpoint_indices = checkpoint_indices[:, ::-1]
+            if x_cell_edges is not None:
+                x_cell_edges = np.asarray(x_cell_edges)[::-1]
         if y_delta.size and np.all(y_delta < 0):
             y_axis = y_axis[::-1]
             matrix = matrix[::-1, :]
             checkpoint_indices = checkpoint_indices[::-1, :]
-        x_edges = self._cell_edges(x_axis)
-        y_edges = self._cell_edges(y_axis)
+            if y_cell_edges is not None:
+                y_cell_edges = np.asarray(y_cell_edges)[::-1]
+        x_edges = self._cell_edges(x_axis) if x_cell_edges is None else validate_cell_edges(x_axis, x_cell_edges)
+        y_edges = self._cell_edges(y_axis) if y_cell_edges is None else validate_cell_edges(y_axis, y_cell_edges)
+        same_coordinates = (self._data is not None
+                            and np.array_equal(self._x_values, x_axis)
+                            and np.array_equal(self._y_values, y_axis))
         self._data = matrix
         self._x_values = x_axis
         self._y_values = y_axis
@@ -352,7 +383,7 @@ class HeatmapPlotWidget(QWidget):
         self._last_readout_cell = None
 
         # Fast path: ImageItem for uniform sweeps, PColorMeshItem for nonuniform (GUI-03)
-        use_raster = self._is_uniform_axis(x_axis) and self._is_uniform_axis(y_axis)
+        use_raster = self._is_uniform_axis(x_edges) and self._is_uniform_axis(y_edges)
         if use_raster:
             self.pcolor_item.setVisible(False)
             self.pcolor_item.setData()
@@ -394,6 +425,8 @@ class HeatmapPlotWidget(QWidget):
         self.plot.setLabel("bottom", x_label, units=x_unit)
         self.plot.setLabel("left", y_label, units=y_unit if y_unit else None)
         self.color_bar.setLabel("right", text=z_label)
+        self._axis_metadata = {"x": {"label": x_label, "unit": x_unit},
+                               "y": {"label": y_label, "unit": y_unit}}
 
         self._apply_colormap(self.colormap_combo.currentText())
         if levels is None:
@@ -409,7 +442,8 @@ class HeatmapPlotWidget(QWidget):
             low, high = low - padding, high + padding
         self.color_bar.setLevels((low, high))
         self.image_item.setLevels((low, high))
-        self.auto_range()
+        if not same_coordinates:
+            self.auto_range()
 
     def clear(self) -> None:
         self.export_metadata = {}
@@ -447,31 +481,97 @@ class HeatmapPlotWidget(QWidget):
         if self._data is None:
             self.status_changed.emit("Load a recorded heatmap before exporting.")
             return
+        if self._export_task is not None:
+            return
+        metadata = json.loads(json.dumps(self.export_metadata))
+        metadata.update(axes=self._axis_metadata, view_ranges=self.plot.viewRange(),
+                        palette=self.colormap_combo.currentText(), colour_levels=list(self.color_bar.levels()))
+        try:
+            source = Path(metadata["source_file"])
+            if source.is_file():
+                identity = source.stat()
+                metadata["source_identity"] = {"size_bytes": identity.st_size, "mtime_ns": identity.st_mtime_ns}
+            default = heatmap_export_path(metadata)
+            default.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            self.status_changed.emit(f"Cannot prepare heatmap export directory: {exc}")
+            return
         path, selected = QFileDialog.getSaveFileName(
             self,
             "Export heatmap",
-            "heatmap.png",
+            str(default),
             "PNG (*.png);;SVG (*.svg);;CSV (*.csv)",
         )
         if not path:
             return
+        if not Path(path).suffix:
+            path += ".png" if "PNG" in selected else ".svg" if "SVG" in selected else ".csv"
         suffix = Path(path).suffix.lower()
         try:
             ensure_derived_destination(path, self.export_metadata.get("source_file"))
+            if suffix not in {".png", ".svg", ".csv"}:
+                raise ValueError("Choose a PNG, SVG or CSV filename.")
+            if Path(path).with_suffix(".h5").exists():
+                raise ValueError("The companion HDF5 already exists. Choose a new export name.")
+            x_bounds, y_bounds = metadata["view_ranges"]
+            # Include partially visible cells and preserve their original edges.
+            # Cropping to one nonuniform bin must not invent a new cell width.
+            x_mask = (self._x_edges[:-1] < x_bounds[1]) & (self._x_edges[1:] > x_bounds[0])
+            y_mask = (self._y_edges[:-1] < y_bounds[1]) & (self._y_edges[1:] > y_bounds[0])
+            if not x_mask.any() or not y_mask.any():
+                raise ValueError("The displayed range contains no recorded heatmap cells.")
+            values = self._data[np.ix_(y_mask, x_mask)].copy()
+            checkpoints = self._cell_checkpoint_indices[np.ix_(y_mask, x_mask)].copy()
+            x_indices, y_indices = np.flatnonzero(x_mask), np.flatnonzero(y_mask)
+            x_edges = self._x_edges[x_indices[0]:x_indices[-1] + 2].copy()
+            y_edges = self._y_edges[y_indices[0]:y_indices[-1] + 2].copy()
             if "PNG" in selected or suffix == ".png":
                 ImageExporter(self.plot.plotItem).export(path)
             elif "SVG" in selected or suffix == ".svg":
                 SVGExporter(self.plot.plotItem).export(path)
             else:
-                self._export_csv(Path(path))
+                self._export_csv(Path(path), values, self._x_values[x_mask], self._y_values[y_mask])
         except Exception as exc:
             self.status_changed.emit(f"Heatmap export failed: {exc}")
             return
-        self.status_changed.emit(f"Heatmap exported to {path}")
+        self.export_button.setEnabled(False)
+        task = ResultReadTask(1, _write_heatmap_companions, path, values,
+                              self._x_values[x_mask].copy(), self._y_values[y_mask].copy(), checkpoints, metadata, x_edges, y_edges)
+        self._export_task = task
+        task.signals.loaded.connect(self._export_loaded)
+        task.signals.failed.connect(self._export_failed)
+        task.signals.finished.connect(self._export_finished)
+        self.status_changed.emit("Saving selected heatmap data and metadata…")
+        self._export_pool.start(task)
+
+    def _export_finished(self, _request_id):
+        self._export_task = None
+        self.export_button.setEnabled(True)
+
+    def _export_loaded(self, _request_id, destination):
+        self.status_changed.emit(f"Heatmap and HDF5 saved: {destination}")
+
+    def _export_failed(self, _request_id, message):
+        self.status_changed.emit(f"Image saved, but companion export failed: {message}")
+
+    def configure_ranges(self):
+        if self._data is None:
+            self.status_changed.emit("Load a heatmap before setting axis ranges.")
+            return
         try:
-            write_analysis_manifest(path, self.export_metadata)
-        except Exception as exc:
-            self.status_changed.emit(f"Heatmap saved, but analysis metadata could not be saved: {exc}")
+            dialog = HeatmapRangeDialog(self, self._axis_metadata, self.plot.viewRange())
+        except ValueError as exc:
+            self.status_changed.emit(f"Cannot edit these axis units: {exc}")
+            return
+        if dialog.exec():
+            self.plot.setRange(xRange=dialog.ranges[0], yRange=dialog.ranges[1], padding=0)
+        dialog.deleteLater()
+
+    def closeEvent(self, event):
+        if not self._export_pool.waitForDone(5000):
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------
     # Internals
@@ -578,21 +678,24 @@ class HeatmapPlotWidget(QWidget):
         row = max(0, min(row, self._data.shape[0] - 1))
         return row, col
 
-    def _export_csv(self, path: Path) -> None:
+    def _export_csv(self, path: Path, values=None, x_values=None, y_values=None) -> None:
         if self._data is None or self._x_values is None or self._y_values is None:
             return
         ensure_derived_destination(path, self.export_metadata.get("source_file"))
+        values = self._data if values is None else values
+        x_values = self._x_values if x_values is None else x_values
+        y_values = self._y_values if y_values is None else y_values
         # QFileDialog already captured the user's explicit overwrite decision.
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             header = [self._y_export_label] + [
-                f"{float(x):.9g}" for x in self._x_values
+                f"{float(x):.9g}" for x in x_values
             ]
             header[0] = f"{header[0]} / {self._x_export_label}"
             writer.writerow(header)
-            for row_idx in range(self._data.shape[0]):
-                row_values = [f"{float(self._y_values[row_idx]):.9g}"] + [
-                    f"{float(v):.9g}" for v in self._data[row_idx]
+            for row_idx in range(values.shape[0]):
+                row_values = [f"{float(y_values[row_idx]):.9g}"] + [
+                    f"{float(v):.9g}" for v in values[row_idx]
                 ]
                 writer.writerow(row_values)
 
@@ -624,6 +727,9 @@ class HeatmapResultsTab(QWidget):
         self._processing_dirty = False
         self._source_payload = None
         self._source_row = None
+        self._source_cache = None
+        self._source_cache_key = None
+        self._source_caches = OrderedDict()
         self._automatic_palette_key = None
 
         layout = QVBoxLayout(self)
@@ -772,7 +878,16 @@ class HeatmapResultsTab(QWidget):
     ) -> None:
         """Prepare the tab with available spectrum rows from a THATEC result."""
         self._invalidate_pending_read()
+        self.controls_card.setEnabled(True)
+        self.processing_controls.setEnabled(True)
+        self.map_controls.setEnabled(True)
+        self.controls_card.show()
+        self.processing_controls.show()
+        self.map_controls.show()
         self._coordinate_cache.clear()
+        self._source_cache = None
+        self._source_cache_key = None
+        self._source_caches.clear()
         self._coordinates = None
         self._coordinate_row_id = None
         self._processing_dirty = False
@@ -817,6 +932,31 @@ class HeatmapResultsTab(QWidget):
                 "Multi-trace data remains available in the Spectrum view.",
             )
 
+    def load_analysis(self, path, analysis):
+        self.clear()
+        self.controls_card.setEnabled(False)
+        self.processing_controls.setEnabled(False)
+        self.map_controls.setEnabled(False)
+        self.controls_card.hide()
+        self.processing_controls.hide()
+        self.map_controls.hide()
+        metadata = analysis.metadata
+        axes = metadata["axes"]
+        self.heatmap.set_data(analysis.values, analysis.x_values, analysis.y_values,
+            x_label=axes["x"]["label"], x_unit=axes["x"].get("unit", ""),
+            y_label=axes["y"]["label"], y_unit=axes["y"].get("unit", ""),
+            z_label=f"Derived values ({metadata['value_unit']})",
+            levels=tuple(metadata["colour_levels"]) if "colour_levels" in metadata else None,
+            cell_checkpoint_indices=analysis.checkpoints, x_cell_edges=analysis.x_edges, y_cell_edges=analysis.y_edges)
+        self.heatmap.export_metadata = metadata
+        self.heatmap.plot.setTitle("Exported heatmap · recorded derived data")
+        self.heatmap.colormap_combo.setCurrentText(metadata.get("palette", "viridis"))
+        ranges = metadata.get("view_ranges")
+        if ranges:
+            self.heatmap.plot.setRange(xRange=ranges[0], yRange=ranges[1], padding=0)
+        self.info_label.setText(f"Loaded derived heatmap: {path.name}. Open the source sweep to change processing; axis ranges and export remain available.")
+        self.heatmap_view.setCurrentWidget(self.heatmap)
+
     def load_heatmap_for_row(self, row_id: str) -> None:
         """Read all checkpoints for a given 2-D row and render the heatmap."""
         self._invalidate_pending_read()
@@ -837,15 +977,7 @@ class HeatmapResultsTab(QWidget):
         if self.processing_controls.state.active and dict(row.definition).get("lab control role") == "spectrum_processed":
             self._show_heatmap_error("Choose a raw spectrum row before applying post-processing.")
             return
-        checkpoints = row.shape[0]
-        freq_points = row.shape[1]
         self.load_button.setEnabled(False)
-        self._show_heatmap_state(
-            "Loading heatmap",
-            f"Reading {checkpoints:,} checkpoints and "
-            f"{checkpoints * freq_points:,} spectral samples...",
-            loading=True,
-        )
         self._start_read(self._selected_path, row)
 
     def _render_payload(self, row: ThatecRow, payload: _HeatmapPayload) -> None:
@@ -921,6 +1053,9 @@ class HeatmapResultsTab(QWidget):
         self._spectrum_rows = []
         self._spectrum_rows_by_variant = {}
         self._selected_path = None
+        self._source_cache = None
+        self._source_cache_key = None
+        self._source_caches.clear()
         self._run = None
         self._points = ()
         self.processing_controls.set_references(())
@@ -941,7 +1076,7 @@ class HeatmapResultsTab(QWidget):
 
     def closeEvent(self, event):
         self._invalidate_pending_read()
-        if not self._read_pool.waitForDone(5000):
+        if not self._read_pool.waitForDone(5000) or not self.heatmap._export_pool.waitForDone(5000):
             event.ignore()
             return
         super().closeEvent(event)
@@ -1250,6 +1385,33 @@ class HeatmapResultsTab(QWidget):
         self._row_changed()
 
     def _start_read(self, path: Path, row: ThatecRow) -> None:
+        # Reuse full raw grids and baselines for the two most recent planes.
+        # File changes receive a fresh cache; never show stale archive values.
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            self.load_button.setEnabled(True)
+            self._show_heatmap_error(f"Cannot read the result archive: {exc}")
+            return
+        request = self._request()
+        cache_key = (path, stat.st_mtime_ns, stat.st_size, row.id,
+                     request.x_id, request.y_id, tuple(sorted(request.filters.items())))
+        reused = cache_key in self._source_caches
+        self._source_cache = self._source_caches.pop(cache_key, None) or HeatmapSourceCache()
+        self._source_caches[cache_key] = self._source_cache
+        self._source_cache_key = cache_key
+        # Raw and the recorded processed row can coexist; do not accumulate
+        # every visited plane or file in memory.
+        while len(self._source_caches) > 2:
+            self._source_caches.popitem(last=False)
+        if not reused:
+            self._show_heatmap_state(
+                "Loading heatmap",
+                f"Reading {row.shape[0]:,} checkpoints and {row.shape[0] * row.shape[1]:,} spectral samples...",
+                loading=True,
+            )
+        else:
+            self.info_label.setText("Recalculating from cached spectra… original data unchanged.")
         self._read_request += 1
         request_id = self._read_request
         self._active_read_request = request_id
@@ -1259,9 +1421,10 @@ class HeatmapResultsTab(QWidget):
             path,
             row,
             self._active_coordinates(),
-            self._request(),
+            request,
             cooperative_cancel=True,
             processing=self.processing_controls.state, points=self._points,
+            source_cache=self._source_cache,
         )
         self._read_tasks[request_id] = task
         self._read_kinds[request_id] = "matrix"

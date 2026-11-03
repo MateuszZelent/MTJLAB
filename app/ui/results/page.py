@@ -41,6 +41,7 @@ from app.ui.results.scalar_tab import ScalarResultsTab
 from app.ui.results.state_card import ResultsStateCard
 from app.ui.results.sweep_tree_panel import SweepTreePanel
 from app.ui.results.workers import ResultReadTask
+from app.storage.heatmap_analysis_store import read_heatmap_analysis
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,11 +56,15 @@ class _ResultPayload:
     points: tuple[object, ...]
     references: tuple[object, ...]
     pythat_data: object | None
+    derived_heatmap: object | None = None
 
 
 def _read_result_payload(path: Path) -> _ResultPayload:
     """Read all optional result layers without touching Qt widgets."""
 
+    derived = read_heatmap_analysis(path)
+    if derived is not None:
+        return _ResultPayload(path, None, (), False, None, (), (), None, derived)
     thatec_run = ThatecRunReader.describe(path)
     try:
         tree = ThatecRunReader.tree(path)
@@ -670,6 +675,18 @@ class ResultsPage(QWidget):
     def _apply_result_payload(self, request_id: int, payload: _ResultPayload) -> None:
         if request_id != self._result_request_id:
             return
+        if payload.derived_heatmap is not None:
+            self._thatec_run = None
+            self._loaded_signature = self._requested_signature
+            self.metadata_panel.show_heatmap_analysis(payload.path, payload.derived_heatmap.metadata)
+            self.metadata_panel.show_pythat(None)
+            self.metadata_panel.pythat_button.setEnabled(False)
+            self.metadata_panel.pythat_data.setPlainText("Derived heatmap snapshot · pylab.heatmap-analysis.v1\nOpen the source measurement for THATEC/PyThat inspection.")
+            self._set_heatmap_visible(True)
+            self.heatmap_tab.load_analysis(payload.path, payload.derived_heatmap)
+            self.result_tabs.setCurrentIndex(self._heatmap_index)
+            self.result_state.hide()
+            return
         self._thatec_run = payload.thatec_run
         self._loaded_signature = self._requested_signature
         self._thatec_tree = payload.tree
@@ -772,7 +789,8 @@ class ResultsPage(QWidget):
                      self.spectrum_tab._read_pool, self.spectrum_tab._filter_pool,
                      self.spectrum_tab.peak_tools.pool,
                      self.sweep_tree._detail_pool,
-                     self.heatmap_tab._read_pool, self.scalar_tab._read_pool):
+                     self.heatmap_tab._read_pool, self.heatmap_tab.heatmap._export_pool,
+                     self.scalar_tab._read_pool):
             remaining = max(0, int((deadline-time.monotonic()) * 1000))
             if not pool.waitForDone(remaining):
                 return False

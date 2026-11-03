@@ -284,6 +284,9 @@ class FileBrowserPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self._output_dir = Path(output_dir).expanduser().absolute()
+        self._active_directory: Path | None = None
+        self._catalogue_root = self._output_dir
+        self._context_initialized = False
         self._catalogue_tree_requested = catalogue_tree
         self._selected_path: Path | None = None
         self._pending_selected_path: Path | None = None
@@ -323,8 +326,16 @@ class FileBrowserPanel(QWidget):
         self.refresh_button = PushButton("Refresh", self)
         self.change_directory_button = PushButton("Change directory...", self)
         self.open_file_button = PrimaryPushButton("Open HDF5 / PyThat file...", self)
+        self.parent_directory_button = PushButton(FluentIcon.UP, "Up one folder", self)
+        self.active_directory_button = PushButton("Active device", self)
+        self.catalogue_directory_button = PushButton("All samples", self)
+        self.active_directory_button.setEnabled(False)
+        self.catalogue_directory_button.setVisible(catalogue_tree)
         actions.addWidget(self.refresh_button)
         actions.addWidget(self.change_directory_button)
+        actions.addWidget(self.parent_directory_button)
+        actions.addWidget(self.active_directory_button)
+        actions.addWidget(self.catalogue_directory_button)
         actions.addWidget(self.open_file_button)
         layout.addWidget(self.actions_host)
 
@@ -466,6 +477,9 @@ class FileBrowserPanel(QWidget):
         self.refresh_button.clicked.connect(self.refresh)
         self.change_directory_button.clicked.connect(self.choose_directory)
         self.open_file_button.clicked.connect(self.browse_file)
+        self.parent_directory_button.clicked.connect(lambda: self.set_output_directory(self._output_dir.parent))
+        self.active_directory_button.clicked.connect(self._return_to_active_directory)
+        self.catalogue_directory_button.clicked.connect(lambda: self.set_output_directory(self._catalogue_root))
         self.search.textChanged.connect(self._on_filter_changed)
         self.state_filter.currentIndexChanged.connect(self._on_filter_changed)
         self.operator_filter.currentIndexChanged.connect(self._on_filter_changed)
@@ -515,15 +529,50 @@ class FileBrowserPanel(QWidget):
         if next_output_dir == self._output_dir:
             return
         self._output_dir = next_output_dir
+        self._sync_directory_actions()
         self._selected_path = None
         self._pending_selected_path = None
         self.directory_changed.emit(self._output_dir)
         self.file_selected.emit(None)
         self.refresh()
 
+    def set_sample_context(self, active_directory: str | Path | None, catalogue_root: str | Path) -> None:
+        """Follow a changed active DUT, retaining manual navigation on refresh."""
+        active = Path(active_directory).expanduser().absolute() if active_directory is not None else None
+        root = Path(catalogue_root).expanduser().absolute()
+        changed = not self._context_initialized or active != self._active_directory or root != self._catalogue_root
+        self._active_directory, self._catalogue_root = active, root
+        self._context_initialized = True
+        self._sync_directory_actions()
+        if changed:
+            self.set_output_directory(active or root)
+
+    def _return_to_active_directory(self):
+        if self._active_directory is not None:
+            self.set_output_directory(self._active_directory)
+
+    def _sync_directory_actions(self):
+        # Keep the DUT coordinate readable even when the absolute catalogue
+        # path is too long for the browser column. The full path stays on hover.
+        try:
+            relative = self._output_dir.relative_to(self._catalogue_root)
+            display = str(relative) if relative.parts else (
+                "All samples" if self._catalogue_tree_requested else str(self._output_dir))
+        except ValueError:
+            display = str(self._output_dir)
+        self.location.setText(f"Directory: {display}")
+        self.location.setToolTip(str(self._output_dir))
+        self.parent_directory_button.setEnabled(self._output_dir.parent != self._output_dir)
+        self.parent_directory_button.setToolTip(f"Browse parent folder: {self._output_dir.parent}")
+        self.active_directory_button.setEnabled(self._active_directory is not None)
+        self.active_directory_button.setToolTip(
+            f"Return to the active sample/device: {self._active_directory}" if self._active_directory is not None
+            else "Select an active sample/device in Samples.")
+        self.catalogue_directory_button.setToolTip(f"Browse the complete Samples catalogue: {self._catalogue_root}")
+
     def refresh(self) -> None:
         """Reload known results and preserve selection only when it still exists."""
-        self.location.setText(f"Directory: {self._output_dir}")
+        self._sync_directory_actions()
         self._cancel_refresh()
         self.state_card.show_state(
             title="Loading result files",
@@ -856,6 +905,7 @@ class FileBrowserPanel(QWidget):
         labels = {
             "measurements": "Measurements",
             "sweeps": "Sweeps",
+            "postprocessing": "Post-processing",
             "attachments": "Attachments",
             "characterization": "Characterization",
         }

@@ -1,0 +1,30 @@
+Hardware: Rigol DG1032Z, serial DG1ZA172902039, firmware 00.01.08.
+Date: 2026-10-09. USB VISA exclusive lock. Both outputs confirmed OFF throughout.
+
+Captured defect:
+APPL:DC 1,1,0.02 -> panel DC 20 mV, OFFS?/APPL? retain previous SIN offset 47 mV.
+VOLT:OFFS 0.01 in DC -> panel DC 10 mV, same stale numeric queries.
+Full VOLTage:LEVel:IMMediate:OFFSet 0.08 -> panel DC 80 mV, same stale queries.
+Error queue: no error. Therefore numerical queries are not DC voltage evidence.
+
+Final adapter hardware checks:
+SIN offsets 0, 10, 20, 80 mV, amplitude kept 20 mVpp: passed numeric readback.
+SIN amplitudes 10, 20, 40, 20 mVpp: passed numeric readback.
+DC offsets 0, 10, 20, 80 mV: panel screenshots confirm values, no SIN transition.
+DC 81 consecutive updates 0..80 mV: only VOLT:OFFS writes during updates.
+No FUNC, APPL or output switching writes during incremental updates.
+CH2 configuration unchanged. Both outputs confirmed OFF on completion/disconnect.
+Timing min/mean/max ms:
+SIN offset: 18.2 / 21.5 / 30.9
+SIN amplitude: 27.4 / 46.1 / 68.8
+DC separate steps: 22.0 / 22.6 / 22.9
+DC 81 updates: 20.5 / 26.2 / 105.2
+
+One extra final screenshot read_raw timed out after successful updates and OFF checks.
+Recovered with a read-only session reading the exact documented binary-block length.
+Final mode DC, both outputs OFF, error queue 0 No error, final panel DC 80 mV.
+
+Limits of evidence:
+No output was enabled by the hardware test. No terminal voltage or transient waveform
+was measured. Live OUTPUT ON behavior and injected faults were tested in simulation.
+The application marks affected DC values as command-accepted, not voltage readbacks.

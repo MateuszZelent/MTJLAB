@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from qfluentwidgets import FluentTitleBar, FluentWidget, ScrollArea
 
 from app.domain.quick_controls import (
+    AcceptedSetpoint,
     QuickControlCommand,
     quantity_step_si,
     render_quantity_si_like,
@@ -65,6 +66,29 @@ class QuickControlTests(unittest.TestCase):
                 "quick_controls/geometry",
             )
         }
+
+    def test_command_accepted_value_is_never_labelled_numeric_readback(self) -> None:
+        parent = QWidget()
+        rigol = _FakeController()
+        coordinator = QuickControlCoordinator(
+            {"rigol": rigol, "keithley": _FakeController()}, parent,
+            settings=simulation_settings(approved=True),
+        )
+        coordinator.set_hardware_request_builder(
+            "rigol", lambda request, _state: (
+                "quick_setpoint", QuickControlCommand(request.target, request.text)
+            ),
+        )
+        states = []
+        coordinator.state_changed.connect(lambda *args: states.append(args))
+        coordinator.submit("rigol.1.offset", "20 mV")
+        value = AcceptedSetpoint(.02, "DC command accepted; voltage readback unavailable")
+        rigol.result.emit("quick_setpoint", value)
+        rigol.result.emit("quick_readback", {"rigol.1.offset": value})
+        applied = [detail for target, state, detail in states if state == "applied"]
+        assert len(applied) == 1 and "readback unavailable" in applied[0]
+        assert "readback 0.02" not in applied[0]
+        assert states[-1][2] == value.detail
 
     def tearDown(self) -> None:
         settings = QSettings("LabControl", "LabControl")

@@ -1323,7 +1323,7 @@ class RecipePage(QWidget):
         action(
             acquisition,
             "Measure Keithley I/V",
-            "Read current and voltage on channel A or B; store power, OUTPUT and compliance status with the sweep point. Choose the channel in Action settings.",
+            "Read current and voltage on channel A or B; store power, derived DC resistance |V/I| in ohms, its validity, OUTPUT and compliance status with the sweep point. Undefined resistance is left unavailable. Choose the channel in Action settings.",
             "keithley",
             QStyle.StandardPixmap.SP_DialogApplyButton,
             lambda: self._library_add_basic("measure_keithley"),

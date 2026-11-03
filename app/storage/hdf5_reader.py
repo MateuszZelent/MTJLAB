@@ -386,6 +386,11 @@ class Hdf5RunReader:
     def summary(path: str | Path) -> RunSummary:
         path_obj = Path(path)
         with Hdf5RunReader._open(path_obj) as file:
+            from .heatmap_analysis_store import SCHEMA as HEATMAP_SCHEMA
+            if file.attrs.get("schema") == HEATMAP_SCHEMA:
+                return RunSummary(path_obj, Hdf5RunReader._attribute_text(file.attrs.get("created_at_utc")),
+                                  "postprocessed" if file.attrs.get("status") == "completed" else "incomplete",
+                                  0, 0, None, None)
             run = Hdf5RunReader._require_group(file, "run")
             return Hdf5RunReader.summary_from_open_file(path_obj, file, run)
 

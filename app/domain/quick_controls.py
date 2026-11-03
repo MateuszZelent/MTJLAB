@@ -42,6 +42,17 @@ class QuickConfigureCommand:
     configuration: object
 
 
+@dataclass(frozen=True, slots=True)
+class AcceptedSetpoint:
+    """A command was accepted, but its value has no reliable device readback."""
+
+    value_si: float
+    detail: str
+
+    def __float__(self) -> float:
+        return self.value_si
+
+
 def quantity_step_si(text: str, dimension: str, *, integer_step: str | None = None, step_text: str | None = None) -> float:
     """Return an explicit SI step, or the last written decimal place."""
 

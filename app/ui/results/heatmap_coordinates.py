@@ -154,6 +154,7 @@ def read_heatmap_matrix(
     cancelled: Callable[[], bool] | None = None,
     processor=None,
     capture_input: bool = False,
+    spectrum_reader=None,
 ) -> HeatmapMatrix:
     """Build one exact coordinate plane; never aggregate duplicate checkpoints."""
 
@@ -220,7 +221,7 @@ def read_heatmap_matrix(
         if cancelled is not None and cancelled():
             raise RuntimeError("Heatmap read cancelled.")
         try:
-            spectrum = ThatecRunReader.spectrum_slice(path, row.id, checkpoint)
+            spectrum = (spectrum_reader or ThatecRunReader.spectrum_slice)(path, row.id, checkpoint)
         except Exception:
             missing += 1
             continue

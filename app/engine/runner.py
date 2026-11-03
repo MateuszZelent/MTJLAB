@@ -1820,6 +1820,20 @@ class RecipeRunner:
         measurements[f"{prefix}.voltage_v"] = result.voltage_v
         measurements[f"{prefix}.current_a"] = result.current_a
         measurements[f"{prefix}.power_w"] = result.power_w
+        # Match the Live DC |V/I| convention using the measured pair, never
+        # the requested source level. Undefined ratios must not retain the
+        # previous point's resistance or introduce non-finite stored scalars.
+        resistance_key = f"{prefix}.resistance_ohm"
+        measurements.pop(resistance_key, None)
+        resistance = None
+        minimum_current_a = 1e-15
+        if (result.measurement_path_connected and math.isfinite(result.voltage_v)
+                and math.isfinite(result.current_a) and abs(result.current_a) > minimum_current_a):
+            candidate = abs(result.voltage_v / result.current_a)
+            if math.isfinite(candidate):
+                resistance = candidate
+                measurements[resistance_key] = resistance
+        measurements[f"{prefix}.resistance_valid"] = float(resistance is not None)
         measurements[f"{prefix}.output_enabled"] = float(result.output_enabled)
         measurements[f"{prefix}.measurement_path_connected"] = float(
             result.measurement_path_connected
@@ -1832,7 +1846,10 @@ class RecipeRunner:
             "keithley",
             f"measurement_{result.channel}",
             requested={"channel": result.channel},
-            actual=result,
+            actual={**self._jsonable(result), "resistance_ohm": resistance,
+                    "resistance_valid": resistance is not None,
+                    "resistance_definition": "abs(measured_voltage_v / measured_current_a)",
+                    "resistance_min_abs_current_a": minimum_current_a},
         )
 
     def _moke_ramp_progress(self, sample) -> None:

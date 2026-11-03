@@ -63,6 +63,12 @@ def test_live_and_sweep_iv_have_identical_traffic_without_configuration_changes(
         assert measurements[f"{prefix}.current_a"] == live.current_a
         assert measurements[f"{prefix}.voltage_v"] == live.voltage_v
         assert measurements[f"{prefix}.power_w"] == live.power_w
+        expected_r = abs(live.voltage_v / live.current_a) if abs(live.current_a) > 1e-15 else None
+        assert measurements[f"{prefix}.resistance_valid"] == float(expected_r is not None)
+        if expected_r is not None:
+            assert measurements[f"{prefix}.resistance_ohm"] == expected_r
+        else:
+            assert f"{prefix}.resistance_ohm" not in measurements
         assert adapter.connected
     finally:
         adapter.emergency_off()

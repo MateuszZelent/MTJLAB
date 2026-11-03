@@ -3,6 +3,9 @@
 import pytest
 
 from app.devices.rigol_dg1000z import RigolAdapter, RigolChannelConfig
+from app.devices.rigol_dg1000z.adapter import (
+    RigolBurstConfig, RigolFrequencySweepConfig, RigolModulationConfig,
+)
 from app.devices.simulators import RigolSimulator
 from app.devices.visa import FakeVisaSessionFactory
 from app.domain.errors import DeviceError
@@ -36,6 +39,34 @@ def test_repeated_on_has_only_queries_and_preserves_level_updates(rigol, channel
     assert commands and all("?" in command for command in commands)
     assert float(session.query(f":SOUR{channel}:FREQ?")) == 2000
     assert session.query(f":OUTP{channel}?").strip().upper() in {"1", "ON"}
+
+
+@pytest.mark.parametrize("mode", ["modulation", "sweep", "burst"])
+@pytest.mark.parametrize("tampered", [False, True])
+def test_repeated_on_advanced_modes_preserve_output_and_reject_drift(rigol, mode, tampered):
+    adapter, session = rigol
+    adapter.configure_channel(RigolChannelConfig(1, "SIN", 1000, .001, -.001))
+    if mode == "modulation":
+        adapter.configure_modulation(RigolModulationConfig(1, True, "AM", parameter=10))
+        drift = ":SOUR1:AM:DEPT 20"
+    elif mode == "sweep":
+        adapter.configure_frequency_sweep(RigolFrequencySweepConfig(1, True, 100, 1000, 1))
+        drift = ":SOUR1:SWE:TIME 2"
+    else:
+        adapter.configure_burst(RigolBurstConfig(1, True))
+        drift = ":SOUR1:BURS:NCYC 2"
+    adapter.set_output(1, True)
+    if tampered:
+        session.write(drift)
+    session.commands.clear()
+    if tampered:
+        with pytest.raises(DeviceError):
+            adapter.set_output(1, True)
+        assert not any(session.output.values())
+        assert ":OUTP1 ON" not in session.commands
+    else:
+        assert adapter.set_output(1, True)
+        assert all("?" in command for command in session.commands)
 
 
 @pytest.mark.parametrize("fault", ["frequency", "external_off", "query"])

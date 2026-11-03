@@ -218,6 +218,22 @@ def test_map_ui_changes_reuse_one_exact_slice_off_gui_and_export_provenance(
         raw = tab.heatmap._data.copy()
         assert raw.shape == (41, 201)  # B remains one exact selected value
         initial_reads = len(calls)
+        tab.heatmap.plot.setRange(xRange=(1.2e6, 1.8e6), yRange=(.0023, .0035), padding=0)
+        viewport = np.asarray(tab.heatmap.plot.viewRange())
+        from app.ui.results.processing import ResultProcessing
+        tab.processing_controls.set_state(ResultProcessing("subtract_reference_signed", 1), emit=True)
+        wait_until(app, lambda: not tab._read_tasks)
+        baseline = Hdf5RunReader.reference(nested_archive, 1)
+        expected_reference = np.power(10., (raw - 30.) / 10.) - np.power(
+            10., (np.asarray(baseline.powers_dbm) - 30.) / 10.)
+        np.testing.assert_allclose(tab.heatmap._data, expected_reference, atol=1e-24)
+        assert len(calls) == initial_reads
+        np.testing.assert_allclose(tab.heatmap.plot.viewRange(), viewport)
+        tab.processing_controls.set_state(ResultProcessing(), emit=True)
+        wait_until(app, lambda: not tab._read_tasks)
+        np.testing.assert_array_equal(tab.heatmap._data, raw)
+        assert len(calls) == initial_reads
+        np.testing.assert_allclose(tab.heatmap.plot.viewRange(), viewport)
         tab.map_controls.set_state(MapProcessing(component="median_power"), emit=True)
         wait_until(app, lambda: not tab._read_tasks)
         expected = np.power(10, (raw - 30) / 10)
@@ -240,6 +256,15 @@ def test_map_ui_changes_reuse_one_exact_slice_off_gui_and_export_provenance(
         assert b_range[0] == b_range[1] and b_range[0] in {-.005, -.004}
         assert not manifest["source_data_modified"]
         assert hashlib.sha256(nested_archive.read_bytes()).hexdigest() == before
+        # An externally updated file must invalidate the numeric source cache.
+        import os
+        stat = nested_archive.stat()
+        os.utime(nested_archive, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+        reads_before_refresh = len(calls)
+        tab.load_button.click()
+        wait_until(app, lambda: not tab._read_tasks)
+        assert len(calls) > reads_before_refresh
+        assert len(tab._source_caches) <= 2
     finally:
         tab.close()
         assert tab._read_pool.waitForDone(5000)

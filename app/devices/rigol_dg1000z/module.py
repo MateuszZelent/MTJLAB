@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.contracts import DeviceModule, RecipeExtension
 from app.devices.base import DeviceAdapter
-from app.domain.quick_controls import QuickConfigureCommand, QuickControlCommand
+from app.domain.quick_controls import AcceptedSetpoint, QuickConfigureCommand, QuickControlCommand
 from app.domain.quantities import parse_quantity
 from app.recipes.parameter_registry import QUICK_CONTROLS_BY_TARGET
 from app.devices.rigol_dg1000z import RigolAdapter, RigolChannelConfig
@@ -22,6 +22,9 @@ def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
 def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object:
     if not isinstance(adapter, RigolAdapter):
         raise TypeError("Rigol module received an incompatible adapter.")
+    def reported(target: str, value: float) -> float | AcceptedSetpoint:
+        limitation = adapter.dc_readback_limitation(int(target.split(".")[1]))
+        return AcceptedSetpoint(value, limitation) if limitation else value
     actions = {
         "configure": lambda: adapter.configure_channel(payload),
         "configure_output": lambda: adapter.configure_output(payload),
@@ -55,11 +58,11 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         if field == "amplitude":
             return adapter.update_amplitude_vpp(channel, float(value_si))
         if field == "offset":
-            return adapter.update_offset(channel, float(value_si))
+            return reported(payload.target, adapter.update_offset(channel, float(value_si)))
         if field == "high_level":
-            return adapter.update_high_level(channel, float(value_si))
+            return reported(payload.target, adapter.update_high_level(channel, float(value_si)))
         if field == "low_level":
-            return adapter.update_low_level(channel, float(value_si))
+            return reported(payload.target, adapter.update_low_level(channel, float(value_si)))
         raise ValueError(
             f"Unsupported Rigol quick-control target {payload.target!r}."
         )
@@ -85,13 +88,13 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
             )
         adapter.configure_channel(config)
         try:
-            return adapter.quick_control_snapshot()[payload.target]
+            return reported(payload.target, adapter.quick_control_snapshot()[payload.target])
         except KeyError as exc:
             raise ValueError(
                 f"Rigol did not expose a verified readback for {payload.target!r}."
             ) from exc
     if operation == "quick_readback":
-        return adapter.quick_control_snapshot()
+        return {target: reported(target, value) for target, value in adapter.quick_control_snapshot().items()}
     try:
         return actions[operation]()
     except KeyError as exc:
