@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from math import prod
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThreadPool, Signal, QAbstractTableModel, QModelIndex, QSignalBlocker
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSignalBlocker, Qt, QThreadPool, Signal
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -51,24 +51,28 @@ from app.storage import (
     ThatecRunReader,
     ThatecSpectrum,
 )
+from app.ui.design_system import plot_theme, tokens_for
+from app.ui.results.analysis_export import processing_manifest
+from app.ui.results.baseline_controls import RecordedBaselineControls, baseline_sample_label
 from app.ui.results.data_classifier import find_scalar_rows, find_spectrum_rows
-from app.ui.results.filter_index import FILTER_ABS_TOL, FILTER_REL_TOL, unique_signatures
 from app.ui.results.filter_choices import FilterComboBox
+from app.ui.results.filter_index import FILTER_ABS_TOL, FILTER_REL_TOL, unique_signatures
+from app.ui.results.peak_tools import ResultPeakTools
 from app.ui.results.processing import ProcessedResultSpectrum, RecordedBaselineEvidence
 from app.ui.results.processing_controls import ResultProcessingControls
-from app.ui.results.baseline_controls import RecordedBaselineControls, baseline_sample_label
+from app.ui.results.processing_overlay import ResultProcessingOverlay
 from app.ui.results.read_session import ResultReadSession
 from app.ui.results.series_controls import SweepSeriesControls
+from app.ui.results.spectrum_views import (
+    SpectrumViewControls,
+    SpectrumViewPayload,
+    read_baseline_view,
+    read_private_view,
+    read_public_view,
+)
+from app.ui.results.spectrum_workbench import ResultSpectrumWorkbench
 from app.ui.results.state_card import ResultsStateCard
 from app.ui.results.workers import ResultReadTask
-from app.ui.results.spectrum_workbench import ResultSpectrumWorkbench
-from app.ui.results.spectrum_views import (
-    SpectrumViewControls, SpectrumViewPayload, read_baseline_view, read_private_view, read_public_view,
-)
-from app.ui.results.analysis_export import processing_manifest
-from app.ui.design_system import plot_theme, tokens_for
-from app.ui.results.peak_tools import ResultPeakTools
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +250,7 @@ class SpectrumResultsTab(QWidget):
         self._active_read_request = 0
         self._read_tasks: dict[int, ResultReadTask] = {}
         self._read_context: dict[int, tuple[str, object]] = {}
+        self.processing_overlay = ResultProcessingOverlay(self)
         self._filter_request_id = 0
         self._filter_pool = QThreadPool(self)
         self._filter_pool.setMaxThreadCount(1)
@@ -1414,7 +1419,8 @@ class SpectrumResultsTab(QWidget):
         colours = (palette.measurement, palette.reference, theme.success, theme.caution, theme.neutral, theme.focus)
         for index, trace in enumerate(payload.traces):
             self.spectrum_plot.set_trace(trace.label, trace.frequencies_hz, trace.values,
-                color=colours[index % len(colours)], primary=index == 0)
+                color=colours[index % len(colours)], primary=index == 0,
+                legend_label=f"{trace.label} [{trace.unit}]")
         checkpoint = payload.traces[0].frame_id
         self.spectrum_plot.set_title(title or f"Checkpoint {checkpoint} · recorded spectrum comparison")
         self.spectrum_plot.auto_range()
@@ -1568,6 +1574,10 @@ class SpectrumResultsTab(QWidget):
         task.signals.loaded.connect(self._read_loaded)
         task.signals.failed.connect(self._read_failed)
         task.signals.finished.connect(self._read_finished)
+        if kind in {"post", "view", "baseline_view"}:
+            filters = [box.text() for box in self.processing_controls.filters.values() if box.isChecked()]
+            self.processing_overlay.begin(request_id, "Recalculating spectrum…",
+                " · ".join(filters) or "Applying the selected correction and spectrum view.")
         self._read_pool.start(task)
 
     def _read_loaded(self, request_id: int, payload: object) -> None:
@@ -1640,8 +1650,10 @@ class SpectrumResultsTab(QWidget):
     def _read_finished(self, request_id: int) -> None:
         self._read_tasks.pop(request_id, None)
         self._read_context.pop(request_id, None)
+        self.processing_overlay.finish(request_id)
 
     def _invalidate_pending_reads(self) -> None:
+        self.processing_overlay.clear()
         for task in self._read_tasks.values():
             task.cancel()
         self._read_pool.clear()

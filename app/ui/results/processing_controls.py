@@ -7,8 +7,8 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from qfluentwidgets import CaptionLabel, CardWidget, CheckBox, ComboBox, FlowLayout, PushButton
 
 from app.recipes.spectrum_processing import REFERENCE_OPERATIONS
-from app.ui.results.processing import ResultProcessing
 from app.ui.results.baseline_controls import BaselineSampleCombo
+from app.ui.results.processing import ResultProcessing
 
 
 class ResultProcessingControls(CardWidget):
@@ -30,10 +30,14 @@ class ResultProcessingControls(CardWidget):
         flow.setVerticalSpacing(6)
         self._strip = strip
         self._flow = flow
-        flow.addWidget(CaptionLabel("Post-processing", strip))
+        heading = CaptionLabel("Per-spectrum processing", strip)
+        heading.setToolTip("Apply correction and filters to each complete spectrum separately, before assembling the heatmap. Neighboring sweep points are not smoothed.")
+        flow.addWidget(heading)
         self.operation = ComboBox(strip)
         self.operation.setAccessibleName("Post-acquisition reference or background operation")
         for label, key in REFERENCE_OPERATIONS:
+            if key == "difference_db":
+                label = "Raw − reference — Subtract [dB]"
             if key == "subtract_power_signed":
                 label = "Raw − background — signed W"
             self.operation.addItem(label, userData=key)
@@ -110,6 +114,15 @@ class ResultProcessingControls(CardWidget):
         self.reference_sample.set_reference(self._references.get(state.reference_index), state.reference_sweep)
         for key, box in self.filters.items():
             box.setChecked(key in state.modes)
+        effective_unit = "dBm" if self._baseline_view else state.output_unit
+        emi_available = effective_unit in {"dBm", "dB"}
+        self.filters["narrow_reject"].setToolTip("Reject narrow peaks independently in each spectrum; use Filter settings to protect known signal bands.")
+        self.filters["denoise"].setToolTip("Smooth each spectrum along frequency only. To denoise across sweep points too, use Heatmap image processing.")
+        self.filters["emi_reject"].setEnabled(emi_available)
+        self.filters["emi_reject"].setToolTip(
+            f"Classify stationary lines from at least {state.parameters.emi_min_frames} recorded repeats at this same checkpoint, in dB/dBm. Without sufficient repeats the filter reports that it was not applied."
+            if emi_available else f"Unavailable for {effective_unit}. EMI lines requires dB/dBm; use Map analysis to classify stationary lines across the selected heatmap."
+        )
         for control in controls:
             control.blockSignals(False)
         self.operation.setToolTip(self.operation.currentText())
@@ -125,6 +138,8 @@ class ResultProcessingControls(CardWidget):
                                          and state.reference_index in self._references)
         if self._baseline_view:
             self.summary.setText("Standalone baseline spectrum · filters apply to its raw power. Checkpoint corrections are retained and resume when a measurement checkpoint is selected.")
+        if not emi_available and "emi_reject" in state.modes:
+            self.summary.setText(self.summary.text() + f" · EMI lines inactive for {effective_unit}: requires dB/dBm.")
         self.reference.setItemText(0, f"Automatic {state.baseline_purpose}")
         for i in range(1, self.reference.count()):
             purpose = self._reference_purposes.get(self.reference.itemData(i))

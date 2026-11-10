@@ -1,0 +1,653 @@
+<?xml version='1.0' encoding='utf-8'?>
+<ns0:svg xmlns:ns0="http://www.w3.org/2000/svg" width="203.2mm" height="121.92mm" viewBox="0 0 2400 1440" version="1.1"><ns0:title>Reference-subtracted power</ns0:title><ns0:defs><ns0:clipPath id="data-viewport"><ns0:rect x="252.5" y="153.125" width="1857.5" height="1071.875" /></ns0:clipPath><ns0:linearGradient gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="256" id="item12-gradient1">
+    <ns0:stop offset="0" stop-color="#2151db" stop-opacity="1" />
+    <ns0:stop offset="0.00392157" stop-color="#2552db" stop-opacity="1" />
+    <ns0:stop offset="0.00784314" stop-color="#2a53db" stop-opacity="1" />
+    <ns0:stop offset="0.0117647" stop-color="#2e54dc" stop-opacity="1" />
+    <ns0:stop offset="0.0156863" stop-color="#3155dc" stop-opacity="1" />
+    <ns0:stop offset="0.0196078" stop-color="#3556dc" stop-opacity="1" />
+    <ns0:stop offset="0.0235294" stop-color="#3857dc" stop-opacity="1" />
+    <ns0:stop offset="0.027451" stop-color="#3b58dc" stop-opacity="1" />
+    <ns0:stop offset="0.0313725" stop-color="#3e5add" stop-opacity="1" />
+    <ns0:stop offset="0.0352941" stop-color="#415bdd" stop-opacity="1" />
+    <ns0:stop offset="0.0392157" stop-color="#435cdd" stop-opacity="1" />
+    <ns0:stop offset="0.0431373" stop-color="#465ddd" stop-opacity="1" />
+    <ns0:stop offset="0.0470588" stop-color="#485ede" stop-opacity="1" />
+    <ns0:stop offset="0.0509804" stop-color="#4b5fde" stop-opacity="1" />
+    <ns0:stop offset="0.054902" stop-color="#4d60de" stop-opacity="1" />
+    <ns0:stop offset="0.0588235" stop-color="#5061de" stop-opacity="1" />
+    <ns0:stop offset="0.0627451" stop-color="#5262de" stop-opacity="1" />
+    <ns0:stop offset="0.0666667" stop-color="#5464df" stop-opacity="1" />
+    <ns0:stop offset="0.0705882" stop-color="#5665df" stop-opacity="1" />
+    <ns0:stop offset="0.0745098" stop-color="#5866df" stop-opacity="1" />
+    <ns0:stop offset="0.0784314" stop-color="#5a67df" stop-opacity="1" />
+    <ns0:stop offset="0.0823529" stop-color="#5c68df" stop-opacity="1" />
+    <ns0:stop offset="0.0862745" stop-color="#5e6ae0" stop-opacity="1" />
+    <ns0:stop offset="0.0901961" stop-color="#606be0" stop-opacity="1" />
+    <ns0:stop offset="0.0941176" stop-color="#626ce0" stop-opacity="1" />
+    <ns0:stop offset="0.0980392" stop-color="#646de0" stop-opacity="1" />
+    <ns0:stop offset="0.101961" stop-color="#666ee0" stop-opacity="1" />
+    <ns0:stop offset="0.105882" stop-color="#686fe1" stop-opacity="1" />
+    <ns0:stop offset="0.109804" stop-color="#6970e1" stop-opacity="1" />
+    <ns0:stop offset="0.113725" stop-color="#6b72e1" stop-opacity="1" />
+    <ns0:stop offset="0.117647" stop-color="#6d73e1" stop-opacity="1" />
+    <ns0:stop offset="0.121569" stop-color="#6f74e1" stop-opacity="1" />
+    <ns0:stop offset="0.12549" stop-color="#7075e2" stop-opacity="1" />
+    <ns0:stop offset="0.129412" stop-color="#7276e2" stop-opacity="1" />
+    <ns0:stop offset="0.133333" stop-color="#7478e2" stop-opacity="1" />
+    <ns0:stop offset="0.137255" stop-color="#7579e2" stop-opacity="1" />
+    <ns0:stop offset="0.141176" stop-color="#777ae2" stop-opacity="1" />
+    <ns0:stop offset="0.145098" stop-color="#797be3" stop-opacity="1" />
+    <ns0:stop offset="0.14902" stop-color="#7a7ce3" stop-opacity="1" />
+    <ns0:stop offset="0.152941" stop-color="#7c7de3" stop-opacity="1" />
+    <ns0:stop offset="0.156863" stop-color="#7d7fe3" stop-opacity="1" />
+    <ns0:stop offset="0.160784" stop-color="#7f80e3" stop-opacity="1" />
+    <ns0:stop offset="0.164706" stop-color="#8181e3" stop-opacity="1" />
+    <ns0:stop offset="0.168627" stop-color="#8282e4" stop-opacity="1" />
+    <ns0:stop offset="0.172549" stop-color="#8484e4" stop-opacity="1" />
+    <ns0:stop offset="0.176471" stop-color="#8585e4" stop-opacity="1" />
+    <ns0:stop offset="0.180392" stop-color="#8786e4" stop-opacity="1" />
+    <ns0:stop offset="0.184314" stop-color="#8887e4" stop-opacity="1" />
+    <ns0:stop offset="0.188235" stop-color="#8a88e5" stop-opacity="1" />
+    <ns0:stop offset="0.192157" stop-color="#8b8ae5" stop-opacity="1" />
+    <ns0:stop offset="0.196078" stop-color="#8d8be5" stop-opacity="1" />
+    <ns0:stop offset="0.2" stop-color="#8e8ce5" stop-opacity="1" />
+    <ns0:stop offset="0.203922" stop-color="#908ee6" stop-opacity="1" />
+    <ns0:stop offset="0.207843" stop-color="#918fe6" stop-opacity="1" />
+    <ns0:stop offset="0.211765" stop-color="#9290e6" stop-opacity="1" />
+    <ns0:stop offset="0.215686" stop-color="#9491e6" stop-opacity="1" />
+    <ns0:stop offset="0.219608" stop-color="#9592e6" stop-opacity="1" />
+    <ns0:stop offset="0.223529" stop-color="#9794e6" stop-opacity="1" />
+    <ns0:stop offset="0.227451" stop-color="#9895e7" stop-opacity="1" />
+    <ns0:stop offset="0.231373" stop-color="#9a96e7" stop-opacity="1" />
+    <ns0:stop offset="0.235294" stop-color="#9b97e7" stop-opacity="1" />
+    <ns0:stop offset="0.239216" stop-color="#9c98e7" stop-opacity="1" />
+    <ns0:stop offset="0.243137" stop-color="#9e9ae7" stop-opacity="1" />
+    <ns0:stop offset="0.247059" stop-color="#9f9be7" stop-opacity="1" />
+    <ns0:stop offset="0.25098" stop-color="#a09ce8" stop-opacity="1" />
+    <ns0:stop offset="0.254902" stop-color="#a29ee8" stop-opacity="1" />
+    <ns0:stop offset="0.258824" stop-color="#a39fe8" stop-opacity="1" />
+    <ns0:stop offset="0.262745" stop-color="#a4a0e8" stop-opacity="1" />
+    <ns0:stop offset="0.266667" stop-color="#a6a1e8" stop-opacity="1" />
+    <ns0:stop offset="0.270588" stop-color="#a7a3e8" stop-opacity="1" />
+    <ns0:stop offset="0.27451" stop-color="#a8a4e9" stop-opacity="1" />
+    <ns0:stop offset="0.278431" stop-color="#aaa5e9" stop-opacity="1" />
+    <ns0:stop offset="0.282353" stop-color="#aba7e9" stop-opacity="1" />
+    <ns0:stop offset="0.286275" stop-color="#aca8e9" stop-opacity="1" />
+    <ns0:stop offset="0.290196" stop-color="#aea9e9" stop-opacity="1" />
+    <ns0:stop offset="0.294118" stop-color="#afaae9" stop-opacity="1" />
+    <ns0:stop offset="0.298039" stop-color="#b0acea" stop-opacity="1" />
+    <ns0:stop offset="0.301961" stop-color="#b2adea" stop-opacity="1" />
+    <ns0:stop offset="0.305882" stop-color="#b3aeea" stop-opacity="1" />
+    <ns0:stop offset="0.309804" stop-color="#b4afea" stop-opacity="1" />
+    <ns0:stop offset="0.313725" stop-color="#b6b1ea" stop-opacity="1" />
+    <ns0:stop offset="0.317647" stop-color="#b7b2ea" stop-opacity="1" />
+    <ns0:stop offset="0.321569" stop-color="#b8b3eb" stop-opacity="1" />
+    <ns0:stop offset="0.32549" stop-color="#b9b5eb" stop-opacity="1" />
+    <ns0:stop offset="0.329412" stop-color="#bbb6eb" stop-opacity="1" />
+    <ns0:stop offset="0.333333" stop-color="#bcb7eb" stop-opacity="1" />
+    <ns0:stop offset="0.337255" stop-color="#bdb8eb" stop-opacity="1" />
+    <ns0:stop offset="0.341176" stop-color="#bebaeb" stop-opacity="1" />
+    <ns0:stop offset="0.345098" stop-color="#c0bbeb" stop-opacity="1" />
+    <ns0:stop offset="0.34902" stop-color="#c1bcec" stop-opacity="1" />
+    <ns0:stop offset="0.352941" stop-color="#c2bdec" stop-opacity="1" />
+    <ns0:stop offset="0.356863" stop-color="#c3bfec" stop-opacity="1" />
+    <ns0:stop offset="0.360784" stop-color="#c5c0ec" stop-opacity="1" />
+    <ns0:stop offset="0.364706" stop-color="#c6c2ec" stop-opacity="1" />
+    <ns0:stop offset="0.368627" stop-color="#c7c3ec" stop-opacity="1" />
+    <ns0:stop offset="0.372549" stop-color="#c8c4ec" stop-opacity="1" />
+    <ns0:stop offset="0.376471" stop-color="#cac5ed" stop-opacity="1" />
+    <ns0:stop offset="0.380392" stop-color="#cbc7ed" stop-opacity="1" />
+    <ns0:stop offset="0.384314" stop-color="#ccc8ed" stop-opacity="1" />
+    <ns0:stop offset="0.388235" stop-color="#cdc9ed" stop-opacity="1" />
+    <ns0:stop offset="0.392157" stop-color="#cfcbed" stop-opacity="1" />
+    <ns0:stop offset="0.396078" stop-color="#d0cced" stop-opacity="1" />
+    <ns0:stop offset="0.4" stop-color="#d1cded" stop-opacity="1" />
+    <ns0:stop offset="0.403922" stop-color="#d2cfee" stop-opacity="1" />
+    <ns0:stop offset="0.407843" stop-color="#d3d0ee" stop-opacity="1" />
+    <ns0:stop offset="0.411765" stop-color="#d5d1ee" stop-opacity="1" />
+    <ns0:stop offset="0.415686" stop-color="#d6d3ee" stop-opacity="1" />
+    <ns0:stop offset="0.419608" stop-color="#d7d4ee" stop-opacity="1" />
+    <ns0:stop offset="0.423529" stop-color="#d8d5ee" stop-opacity="1" />
+    <ns0:stop offset="0.427451" stop-color="#dad6ee" stop-opacity="1" />
+    <ns0:stop offset="0.431373" stop-color="#dbd8ee" stop-opacity="1" />
+    <ns0:stop offset="0.435294" stop-color="#dcd9ee" stop-opacity="1" />
+    <ns0:stop offset="0.439216" stop-color="#dddbef" stop-opacity="1" />
+    <ns0:stop offset="0.443137" stop-color="#dedcef" stop-opacity="1" />
+    <ns0:stop offset="0.447059" stop-color="#e0ddef" stop-opacity="1" />
+    <ns0:stop offset="0.45098" stop-color="#e1deef" stop-opacity="1" />
+    <ns0:stop offset="0.454902" stop-color="#e2dfef" stop-opacity="1" />
+    <ns0:stop offset="0.458824" stop-color="#e3e1ef" stop-opacity="1" />
+    <ns0:stop offset="0.462745" stop-color="#e4e2ef" stop-opacity="1" />
+    <ns0:stop offset="0.466667" stop-color="#e5e3ef" stop-opacity="1" />
+    <ns0:stop offset="0.470588" stop-color="#e6e4ee" stop-opacity="1" />
+    <ns0:stop offset="0.47451" stop-color="#e8e5ee" stop-opacity="1" />
+    <ns0:stop offset="0.478431" stop-color="#e9e6ee" stop-opacity="1" />
+    <ns0:stop offset="0.482353" stop-color="#eae6ed" stop-opacity="1" />
+    <ns0:stop offset="0.486275" stop-color="#eae7ed" stop-opacity="1" />
+    <ns0:stop offset="0.490196" stop-color="#ebe7ec" stop-opacity="1" />
+    <ns0:stop offset="0.494118" stop-color="#ece7eb" stop-opacity="1" />
+    <ns0:stop offset="0.498039" stop-color="#ede7ea" stop-opacity="1" />
+    <ns0:stop offset="0.501961" stop-color="#eee7e9" stop-opacity="1" />
+    <ns0:stop offset="0.505882" stop-color="#eee7e8" stop-opacity="1" />
+    <ns0:stop offset="0.509804" stop-color="#efe7e7" stop-opacity="1" />
+    <ns0:stop offset="0.513725" stop-color="#efe6e6" stop-opacity="1" />
+    <ns0:stop offset="0.517647" stop-color="#f0e5e4" stop-opacity="1" />
+    <ns0:stop offset="0.521569" stop-color="#f0e4e2" stop-opacity="1" />
+    <ns0:stop offset="0.52549" stop-color="#f1e3e1" stop-opacity="1" />
+    <ns0:stop offset="0.529412" stop-color="#f1e2df" stop-opacity="1" />
+    <ns0:stop offset="0.533333" stop-color="#f1e1de" stop-opacity="1" />
+    <ns0:stop offset="0.537255" stop-color="#f1e0dc" stop-opacity="1" />
+    <ns0:stop offset="0.541176" stop-color="#f1deda" stop-opacity="1" />
+    <ns0:stop offset="0.545098" stop-color="#f1ddd8" stop-opacity="1" />
+    <ns0:stop offset="0.54902" stop-color="#f2dcd6" stop-opacity="1" />
+    <ns0:stop offset="0.552941" stop-color="#f2dad4" stop-opacity="1" />
+    <ns0:stop offset="0.556863" stop-color="#f2d8d2" stop-opacity="1" />
+    <ns0:stop offset="0.560784" stop-color="#f2d7d0" stop-opacity="1" />
+    <ns0:stop offset="0.564706" stop-color="#f2d5cf" stop-opacity="1" />
+    <ns0:stop offset="0.568627" stop-color="#f2d4cd" stop-opacity="1" />
+    <ns0:stop offset="0.572549" stop-color="#f2d2ca" stop-opacity="1" />
+    <ns0:stop offset="0.576471" stop-color="#f2d1c9" stop-opacity="1" />
+    <ns0:stop offset="0.580392" stop-color="#f2cfc7" stop-opacity="1" />
+    <ns0:stop offset="0.584314" stop-color="#f1cec5" stop-opacity="1" />
+    <ns0:stop offset="0.588235" stop-color="#f1ccc3" stop-opacity="1" />
+    <ns0:stop offset="0.592157" stop-color="#f1cac1" stop-opacity="1" />
+    <ns0:stop offset="0.596078" stop-color="#f1c9bf" stop-opacity="1" />
+    <ns0:stop offset="0.6" stop-color="#f1c7bd" stop-opacity="1" />
+    <ns0:stop offset="0.603922" stop-color="#f1c6bb" stop-opacity="1" />
+    <ns0:stop offset="0.607843" stop-color="#f1c4b9" stop-opacity="1" />
+    <ns0:stop offset="0.611765" stop-color="#f1c3b7" stop-opacity="1" />
+    <ns0:stop offset="0.615686" stop-color="#f1c1b6" stop-opacity="1" />
+    <ns0:stop offset="0.619608" stop-color="#f1c0b4" stop-opacity="1" />
+    <ns0:stop offset="0.623529" stop-color="#f0beb2" stop-opacity="1" />
+    <ns0:stop offset="0.627451" stop-color="#f0bdb0" stop-opacity="1" />
+    <ns0:stop offset="0.631373" stop-color="#f0bbae" stop-opacity="1" />
+    <ns0:stop offset="0.635294" stop-color="#f0b9ac" stop-opacity="1" />
+    <ns0:stop offset="0.639216" stop-color="#f0b8aa" stop-opacity="1" />
+    <ns0:stop offset="0.643137" stop-color="#f0b6a8" stop-opacity="1" />
+    <ns0:stop offset="0.647059" stop-color="#efb5a7" stop-opacity="1" />
+    <ns0:stop offset="0.65098" stop-color="#efb3a4" stop-opacity="1" />
+    <ns0:stop offset="0.654902" stop-color="#efb2a3" stop-opacity="1" />
+    <ns0:stop offset="0.658824" stop-color="#efb0a1" stop-opacity="1" />
+    <ns0:stop offset="0.662745" stop-color="#eeaf9f" stop-opacity="1" />
+    <ns0:stop offset="0.666667" stop-color="#eead9d" stop-opacity="1" />
+    <ns0:stop offset="0.670588" stop-color="#eeac9b" stop-opacity="1" />
+    <ns0:stop offset="0.67451" stop-color="#eeaa99" stop-opacity="1" />
+    <ns0:stop offset="0.678431" stop-color="#eda897" stop-opacity="1" />
+    <ns0:stop offset="0.682353" stop-color="#eda796" stop-opacity="1" />
+    <ns0:stop offset="0.686275" stop-color="#eda594" stop-opacity="1" />
+    <ns0:stop offset="0.690196" stop-color="#eda492" stop-opacity="1" />
+    <ns0:stop offset="0.694118" stop-color="#eca290" stop-opacity="1" />
+    <ns0:stop offset="0.698039" stop-color="#eca18e" stop-opacity="1" />
+    <ns0:stop offset="0.701961" stop-color="#ec9f8d" stop-opacity="1" />
+    <ns0:stop offset="0.705882" stop-color="#eb9e8b" stop-opacity="1" />
+    <ns0:stop offset="0.709804" stop-color="#eb9c89" stop-opacity="1" />
+    <ns0:stop offset="0.713725" stop-color="#eb9a87" stop-opacity="1" />
+    <ns0:stop offset="0.717647" stop-color="#ea9985" stop-opacity="1" />
+    <ns0:stop offset="0.721569" stop-color="#ea9783" stop-opacity="1" />
+    <ns0:stop offset="0.72549" stop-color="#ea9682" stop-opacity="1" />
+    <ns0:stop offset="0.729412" stop-color="#e99480" stop-opacity="1" />
+    <ns0:stop offset="0.733333" stop-color="#e9937e" stop-opacity="1" />
+    <ns0:stop offset="0.737255" stop-color="#e9917c" stop-opacity="1" />
+    <ns0:stop offset="0.741176" stop-color="#e88f7a" stop-opacity="1" />
+    <ns0:stop offset="0.745098" stop-color="#e88e79" stop-opacity="1" />
+    <ns0:stop offset="0.74902" stop-color="#e78c77" stop-opacity="1" />
+    <ns0:stop offset="0.752941" stop-color="#e78b75" stop-opacity="1" />
+    <ns0:stop offset="0.756863" stop-color="#e78973" stop-opacity="1" />
+    <ns0:stop offset="0.760784" stop-color="#e68771" stop-opacity="1" />
+    <ns0:stop offset="0.764706" stop-color="#e68670" stop-opacity="1" />
+    <ns0:stop offset="0.768627" stop-color="#e5846e" stop-opacity="1" />
+    <ns0:stop offset="0.772549" stop-color="#e5836c" stop-opacity="1" />
+    <ns0:stop offset="0.776471" stop-color="#e4816a" stop-opacity="1" />
+    <ns0:stop offset="0.780392" stop-color="#e48069" stop-opacity="1" />
+    <ns0:stop offset="0.784314" stop-color="#e37e67" stop-opacity="1" />
+    <ns0:stop offset="0.788235" stop-color="#e37c65" stop-opacity="1" />
+    <ns0:stop offset="0.792157" stop-color="#e27b63" stop-opacity="1" />
+    <ns0:stop offset="0.796078" stop-color="#e27962" stop-opacity="1" />
+    <ns0:stop offset="0.8" stop-color="#e17860" stop-opacity="1" />
+    <ns0:stop offset="0.803922" stop-color="#e1765e" stop-opacity="1" />
+    <ns0:stop offset="0.807843" stop-color="#e0745c" stop-opacity="1" />
+    <ns0:stop offset="0.811765" stop-color="#e0735b" stop-opacity="1" />
+    <ns0:stop offset="0.815686" stop-color="#df7159" stop-opacity="1" />
+    <ns0:stop offset="0.819608" stop-color="#df6f57" stop-opacity="1" />
+    <ns0:stop offset="0.823529" stop-color="#de6e55" stop-opacity="1" />
+    <ns0:stop offset="0.827451" stop-color="#de6c54" stop-opacity="1" />
+    <ns0:stop offset="0.831373" stop-color="#dd6b52" stop-opacity="1" />
+    <ns0:stop offset="0.835294" stop-color="#dd6950" stop-opacity="1" />
+    <ns0:stop offset="0.839216" stop-color="#dc674f" stop-opacity="1" />
+    <ns0:stop offset="0.843137" stop-color="#db654d" stop-opacity="1" />
+    <ns0:stop offset="0.847059" stop-color="#db644b" stop-opacity="1" />
+    <ns0:stop offset="0.85098" stop-color="#da6249" stop-opacity="1" />
+    <ns0:stop offset="0.854902" stop-color="#da6048" stop-opacity="1" />
+    <ns0:stop offset="0.858824" stop-color="#d95f46" stop-opacity="1" />
+    <ns0:stop offset="0.862745" stop-color="#d85d44" stop-opacity="1" />
+    <ns0:stop offset="0.866667" stop-color="#d85b43" stop-opacity="1" />
+    <ns0:stop offset="0.870588" stop-color="#d75a41" stop-opacity="1" />
+    <ns0:stop offset="0.87451" stop-color="#d7583f" stop-opacity="1" />
+    <ns0:stop offset="0.878431" stop-color="#d6563d" stop-opacity="1" />
+    <ns0:stop offset="0.882353" stop-color="#d5543c" stop-opacity="1" />
+    <ns0:stop offset="0.886275" stop-color="#d5523a" stop-opacity="1" />
+    <ns0:stop offset="0.890196" stop-color="#d45139" stop-opacity="1" />
+    <ns0:stop offset="0.894118" stop-color="#d34f37" stop-opacity="1" />
+    <ns0:stop offset="0.898039" stop-color="#d34d35" stop-opacity="1" />
+    <ns0:stop offset="0.901961" stop-color="#d24b34" stop-opacity="1" />
+    <ns0:stop offset="0.905882" stop-color="#d14932" stop-opacity="1" />
+    <ns0:stop offset="0.909804" stop-color="#d14730" stop-opacity="1" />
+    <ns0:stop offset="0.913725" stop-color="#d0452e" stop-opacity="1" />
+    <ns0:stop offset="0.917647" stop-color="#cf442d" stop-opacity="1" />
+    <ns0:stop offset="0.921569" stop-color="#cf422b" stop-opacity="1" />
+    <ns0:stop offset="0.92549" stop-color="#ce3f29" stop-opacity="1" />
+    <ns0:stop offset="0.929412" stop-color="#cd3d28" stop-opacity="1" />
+    <ns0:stop offset="0.933333" stop-color="#cd3b26" stop-opacity="1" />
+    <ns0:stop offset="0.937255" stop-color="#cc3924" stop-opacity="1" />
+    <ns0:stop offset="0.941176" stop-color="#cb3722" stop-opacity="1" />
+    <ns0:stop offset="0.945098" stop-color="#ca3521" stop-opacity="1" />
+    <ns0:stop offset="0.94902" stop-color="#ca321f" stop-opacity="1" />
+    <ns0:stop offset="0.952941" stop-color="#c9301d" stop-opacity="1" />
+    <ns0:stop offset="0.956863" stop-color="#c82e1c" stop-opacity="1" />
+    <ns0:stop offset="0.960784" stop-color="#c82b1a" stop-opacity="1" />
+    <ns0:stop offset="0.964706" stop-color="#c72918" stop-opacity="1" />
+    <ns0:stop offset="0.968627" stop-color="#c62616" stop-opacity="1" />
+    <ns0:stop offset="0.972549" stop-color="#c52314" stop-opacity="1" />
+    <ns0:stop offset="0.976471" stop-color="#c52012" stop-opacity="1" />
+    <ns0:stop offset="0.980392" stop-color="#c41c10" stop-opacity="1" />
+    <ns0:stop offset="0.984314" stop-color="#c3180e" stop-opacity="1" />
+    <ns0:stop offset="0.988235" stop-color="#c2140c" stop-opacity="1" />
+    <ns0:stop offset="0.992157" stop-color="#c2100a" stop-opacity="1" />
+    <ns0:stop offset="0.996078" stop-color="#c10908" stop-opacity="1" />
+    <ns0:stop offset="1" stop-color="#c00206" stop-opacity="1" />
+</ns0:linearGradient>
+</ns0:defs><ns0:rect width="100%" height="100%" fill="white" /><ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+</ns0:g>
+<ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+</ns0:g>
+<ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="none" transform="matrix(3.125,0,0,3.125,252.5,153.125)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+<ns0:path vector-effect="non-scaling-stroke" fill-rule="evenodd" d="M0,0 L594.9,0 L594.9,343.5 L0,343.5 L0,0 Z " />
+</ns0:g>
+</ns0:g>
+<ns0:g clip-path="url(#data-viewport)"><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+</ns0:g>
+<ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="#9f9be7" fill-opacity="1" stroke="none" transform="matrix(3.20259e-07,0,0,-87858.6,188.448,1391.93)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0019 6e+09,0.0019 6e+09,0.0021 2e+08,0.0021 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0021 6e+09,0.0021 6e+09,0.0023 2e+08,0.0023 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0023 6e+09,0.0023 6e+09,0.0025 2e+08,0.0025 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0025 6e+09,0.0025 6e+09,0.0027 2e+08,0.0027 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0027 6e+09,0.0027 6e+09,0.0029 2e+08,0.0029 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0029 6e+09,0.0029 6e+09,0.0031 2e+08,0.0031 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0031 6e+09,0.0031 6e+09,0.0033 2e+08,0.0033 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0033 6e+09,0.0033 6e+09,0.0035 2e+08,0.0035 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0035 6e+09,0.0035 6e+09,0.0037 2e+08,0.0037 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0037 6e+09,0.0037 6e+09,0.0039 2e+08,0.0039 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0039 6e+09,0.0039 6e+09,0.0041 2e+08,0.0041 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0041 6e+09,0.0041 6e+09,0.0043 2e+08,0.0043 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0043 6e+09,0.0043 6e+09,0.0045 2e+08,0.0045 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0045 6e+09,0.0045 6e+09,0.0047 2e+08,0.0047 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0047 6e+09,0.0047 6e+09,0.0049 2e+08,0.0049 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0049 6e+09,0.0049 6e+09,0.0051 2e+08,0.0051 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0051 6e+09,0.0051 6e+09,0.0053 2e+08,0.0053 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0053 6e+09,0.0053 6e+09,0.0055 2e+08,0.0055 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0055 6e+09,0.0055 6e+09,0.0057 2e+08,0.0057 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0057 6e+09,0.0057 6e+09,0.0059 2e+08,0.0059 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0059 6e+09,0.0059 6e+09,0.0061 2e+08,0.0061 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0061 6e+09,0.0061 6e+09,0.0063 2e+08,0.0063 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0063 6e+09,0.0063 6e+09,0.0065 2e+08,0.0065 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0065 6e+09,0.0065 6e+09,0.0067 2e+08,0.0067 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0067 6e+09,0.0067 6e+09,0.0069 2e+08,0.0069 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0069 6e+09,0.0069 6e+09,0.0071 2e+08,0.0071 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0071 6e+09,0.0071 6e+09,0.0073 2e+08,0.0073 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0073 6e+09,0.0073 6e+09,0.0075 2e+08,0.0075 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0075 6e+09,0.0075 6e+09,0.0077 2e+08,0.0077 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0077 6e+09,0.0077 6e+09,0.0079 2e+08,0.0079 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0079 2.2298e+09,0.0079 2.2298e+09,0.0081 2e+08,0.0081 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2.80974e+09,0.0079 6e+09,0.0079 6e+09,0.0081 2.80974e+09,0.0081 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0081 6e+09,0.0081 6e+09,0.0083 2e+08,0.0083 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0083 6e+09,0.0083 6e+09,0.0085 2e+08,0.0085 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0085 6e+09,0.0085 6e+09,0.0087 2e+08,0.0087 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0087 6e+09,0.0087 6e+09,0.0089 2e+08,0.0089 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0089 6e+09,0.0089 6e+09,0.0091 2e+08,0.0091 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0091 6e+09,0.0091 6e+09,0.0093 2e+08,0.0093 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0093 6e+09,0.0093 6e+09,0.0095 2e+08,0.0095 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0095 6e+09,0.0095 6e+09,0.0097 2e+08,0.0097 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0097 6e+09,0.0097 6e+09,0.0099 2e+08,0.0099 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0099 6e+09,0.0099 6e+09,0.0101 2e+08,0.0101 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0101 6e+09,0.0101 6e+09,0.0103 2e+08,0.0103 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0103 6e+09,0.0103 6e+09,0.0105 2e+08,0.0105 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0105 6e+09,0.0105 6e+09,0.0107 2e+08,0.0107 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0107 6e+09,0.0107 6e+09,0.0109 2e+08,0.0109 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0109 6e+09,0.0109 6e+09,0.0111 2e+08,0.0111 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0111 6e+09,0.0111 6e+09,0.0113 2e+08,0.0113 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0113 6e+09,0.0113 6e+09,0.0115 2e+08,0.0115 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0115 6e+09,0.0115 6e+09,0.0117 2e+08,0.0117 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0117 6e+09,0.0117 6e+09,0.0119 2e+08,0.0119 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0119 6e+09,0.0119 6e+09,0.0121 2e+08,0.0121 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0121 6e+09,0.0121 6e+09,0.0123 2e+08,0.0123 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0123 6e+09,0.0123 6e+09,0.0125 2e+08,0.0125 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0125 6e+09,0.0125 6e+09,0.0127 2e+08,0.0127 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0127 6e+09,0.0127 6e+09,0.0129 2e+08,0.0129 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0129 6e+09,0.0129 6e+09,0.0131 2e+08,0.0131 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0131 6e+09,0.0131 6e+09,0.0133 2e+08,0.0133 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0133 6e+09,0.0133 6e+09,0.0135 2e+08,0.0135 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0135 6e+09,0.0135 6e+09,0.0137 2e+08,0.0137 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0137 6e+09,0.0137 6e+09,0.0139 2e+08,0.0139 " />
+<ns0:polygon fill-rule="evenodd" vector-effect="none" points="2e+08,0.0139 6e+09,0.0139 6e+09,0.0141 2e+08,0.0141 " />
+</ns0:g>
+</ns0:g>
+</ns0:g></ns0:g><ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="none" transform="matrix(3.125,0,0,3.125,252.5,153.125)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+<ns0:rect vector-effect="non-scaling-stroke" x="0" y="0" width="594.4" height="343" />
+</ns0:g>
+</ns0:g>
+</ns0:g></ns0:g><ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+</ns0:g>
+<ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,773.438,59.375)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,773.438,59.375)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,773.438,59.375)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,773.438,59.375)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="4" y="22" font-family="Arial" font-size="20" font-weight="400" font-style="normal">Reference-subtracted power</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,773.438,59.375)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,773.438,59.375)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+</ns0:g>
+</ns0:g></ns0:g><ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+</ns0:g>
+<ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="none" transform="matrix(3.125,0,0,3.125,2128.75,156.25)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+<ns0:path vector-effect="non-scaling-stroke" fill-rule="evenodd" d="M0,0 L18.5,0 L18.5,341.5 L0,341.5 L0,0 Z " />
+</ns0:g>
+</ns0:g>
+<ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+</ns0:g>
+<ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="url(#item12-gradient1)" stroke="none" transform="matrix(56.25,0,0,-4.1626,2128.75,1221.88)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+<ns0:rect vector-effect="non-scaling-stroke" x="0" y="0" width="1" height="256" />
+</ns0:g>
+</ns0:g>
+</ns0:g></ns0:g><ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="none" transform="matrix(3.125,0,0,3.125,2128.75,156.25)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+<ns0:rect vector-effect="non-scaling-stroke" x="0" y="0" width="18" height="341" />
+</ns0:g>
+</ns0:g>
+</ns0:g></ns0:g><ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="3.4375" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,2128.75,156.25)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="-1,-1 19,-1 " />
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,2128.75,156.25)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+</ns0:g>
+</ns0:g>
+</ns0:g><ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="3.4375" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,2128.75,1221.88)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="-1,1 19,1 " />
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,2128.75,1221.88)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+</ns0:g>
+</ns0:g>
+</ns0:g><ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="3.4375" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,2128.75,156.25)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="-1,-1 -1,342 " />
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,2128.75,156.25)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+</ns0:g>
+</ns0:g>
+</ns0:g><ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="3.4375" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,2185,156.25)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="1,-1 1,342 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,341 -5,341 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,255.75 -5,255.75 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,170.5 -5,170.5 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,85.25 -5,85.25 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,0 -5,0 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,298.375 -3.33333,298.375 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,213.125 -3.33333,213.125 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,127.875 -3.33333,127.875 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,42.625 -3.33333,42.625 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,332.475 -2.5,332.475 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,323.95 -2.5,323.95 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,315.425 -2.5,315.425 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,306.9 -2.5,306.9 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,289.85 -2.5,289.85 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,281.325 -2.5,281.325 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,272.8 -2.5,272.8 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,264.275 -2.5,264.275 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,247.225 -2.5,247.225 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,238.7 -2.5,238.7 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,230.175 -2.5,230.175 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,221.65 -2.5,221.65 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,204.6 -2.5,204.6 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,196.075 -2.5,196.075 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,187.55 -2.5,187.55 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,179.025 -2.5,179.025 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,161.975 -2.5,161.975 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,153.45 -2.5,153.45 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,144.925 -2.5,144.925 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,136.4 -2.5,136.4 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,119.35 -2.5,119.35 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,110.825 -2.5,110.825 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,102.3 -2.5,102.3 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,93.775 -2.5,93.775 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,76.725 -2.5,76.725 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,68.2 -2.5,68.2 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,59.675 -2.5,59.675 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,51.15 -2.5,51.15 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,34.1 -2.5,34.1 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,25.575 -2.5,25.575 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,17.05 -2.5,17.05 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="0,8.525 -2.5,8.525 " />
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,2185,156.25)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,2185,156.25)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="7" y="347.5" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">-4</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,2185,156.25)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="7" y="262.25" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">-2</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,2185,156.25)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="7" y="177" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">0</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,2185,156.25)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="7" y="91.7344" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">2</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,2185,156.25)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="7" y="6.5" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">4</ns0:text>
+</ns0:g>
+</ns0:g>
+<ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(0,-3.125,3.125,0,2253.75,1012.5)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(0,-3.125,3.125,0,2253.75,1012.5)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(0,-3.125,3.125,0,2253.75,1012.5)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(0,-3.125,3.125,0,2253.75,1012.5)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="4" y="23" font-family="Arial" font-size="21.3333" font-weight="400" font-style="normal">Residual power (pW)</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(0,-3.125,3.125,0,2253.75,1012.5)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(0,-3.125,3.125,0,2253.75,1012.5)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+</ns0:g>
+</ns0:g></ns0:g></ns0:g><ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="3.4375" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,252.5,1225)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="-1,1 595.4,1 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="81.9862,0 81.9862,-5 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="184.469,0 184.469,-5 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="286.952,0 286.952,-5 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="389.434,0 389.434,-5 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="491.917,0 491.917,-5 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="594.4,0 594.4,-5 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="30.7448,0 30.7448,-3.33333 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="133.228,0 133.228,-3.33333 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="235.71,0 235.71,-3.33333 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="338.193,0 338.193,-3.33333 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="440.676,0 440.676,-3.33333 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="543.159,0 543.159,-3.33333 " />
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,252.5,1225)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,252.5,1225)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="76.4844" y="24" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">1</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,252.5,1225)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="178.969" y="24" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">2</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,252.5,1225)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="281.438" y="24" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">3</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,252.5,1225)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="383.922" y="24" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">4</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,252.5,1225)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="486.406" y="24" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">5</ns0:text>
+</ns0:g>
+</ns0:g>
+<ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,911.875,1296.88)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,911.875,1296.88)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,911.875,1296.88)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,911.875,1296.88)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="4" y="23" font-family="Arial" font-size="21.3333" font-weight="400" font-style="normal">Frequency (GHz)</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,911.875,1296.88)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,911.875,1296.88)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+</ns0:g>
+</ns0:g></ns0:g><ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="3.4375" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,59.375,153.125)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="60.8,-1 60.8,344 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="61.8,340.189 66.8,340.189 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="61.8,283.959 66.8,283.959 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="61.8,227.73 66.8,227.73 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="61.8,171.5 66.8,171.5 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="61.8,115.27 66.8,115.27 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="61.8,59.041 66.8,59.041 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="61.8,2.81148 66.8,2.81148 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="61.8,312.074 65.1333,312.074 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="61.8,255.844 65.1333,255.844 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="61.8,199.615 65.1333,199.615 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="61.8,143.385 65.1333,143.385 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="61.8,87.1557 65.1333,87.1557 " />
+<ns0:polyline fill="none" vector-effect="non-scaling-stroke" points="61.8,30.9262 65.1333,30.9262 " />
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,59.375,153.125)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,59.375,153.125)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="43.7969" y="346.688" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">2</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,59.375,153.125)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="43.7969" y="290.453" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">4</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,59.375,153.125)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="43.7969" y="234.219" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">6</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,59.375,153.125)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="43.7969" y="177.984" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">8</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,59.375,153.125)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="32.7969" y="121.766" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">10</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,59.375,153.125)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="32.7969" y="65.5313" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">12</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(3.125,0,0,3.125,59.375,153.125)" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="32.7969" y="9.3125" font-family="Arial" font-size="18.6667" font-weight="400" font-style="normal">14</ns0:text>
+</ns0:g>
+</ns0:g>
+<ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(0,-3.125,3.125,0,43.75,893.75)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(0,-3.125,3.125,0,43.75,893.75)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(0,-3.125,3.125,0,43.75,893.75)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#181818" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(0,-3.125,3.125,0,43.75,893.75)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+<ns0:text fill="#181818" fill-opacity="1" stroke="none" xml:space="preserve" x="4" y="23" font-family="Arial" font-size="21.3333" font-weight="400" font-style="normal">Current (mA)</ns0:text>
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(0,-3.125,3.125,0,43.75,893.75)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+
+<ns0:g fill="none" stroke="#000000" stroke-opacity="1" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(0,-3.125,3.125,0,43.75,893.75)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+</ns0:g>
+</ns0:g>
+</ns0:g></ns0:g></ns0:g><ns0:g><ns0:g fill="none" stroke="black" stroke-width="1" fill-rule="evenodd" stroke-linecap="square" stroke-linejoin="bevel">
+
+<ns0:g fill="none" stroke="none" transform="matrix(3.125,0,0,3.125,0,0)" font-family="Sans Serif" font-size="12" font-weight="400" font-style="normal">
+<ns0:rect vector-effect="non-scaling-stroke" x="0" y="0" width="0" height="0" />
+</ns0:g>
+</ns0:g>
+</ns0:g></ns0:g></ns0:svg>

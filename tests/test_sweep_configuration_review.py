@@ -367,7 +367,7 @@ root:
         data = parse_recipe_text(page.editor.toPlainText()).root.children[0].data
         assert "nplc" not in data and "sense_mode" not in data
         assert "measure_voltage_autorange" not in data
-        assert observed[0]["nplc"] == "Preserve · Not programmed"
+        assert observed[0]["nplc"] == "Preserve · Same as device tab; preserved"
         assert data["level"] == "1 mA"
     finally:
         page._close_discard_confirmed = True
@@ -416,7 +416,8 @@ root:
         assert dialog.settle.text() == ("250 ms" if use_provider else "100 ms")
         assert dialog.settle.isVisibleTo(dialog)
         assert "settling_time" not in dialog.programmed_configuration_fields()
-        assert effects(dialog)["settling_time"] == "Preserve · Not programmed"
+        expected_status = "Same as device tab; preserved" if use_provider else "Not set by this block"
+        assert effects(dialog)["settling_time"] == f"Preserve · {expected_status}"
         observed.append(dialog.configuration_snapshot())
         assert dialog.grab().save(str(tmp_path / f"settling-{channel}-{use_provider}.png"))
         return QDialog.DialogCode.Accepted

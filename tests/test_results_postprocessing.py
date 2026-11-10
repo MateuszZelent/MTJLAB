@@ -140,6 +140,34 @@ def test_heatmap_processes_full_spectra_before_frequency_crop(archive, transpose
     assert np.any(payload.matrix < 0)
 
 
+@pytest.mark.parametrize("transpose", [False, True])
+@pytest.mark.parametrize("modes", [(), ("denoise",)])
+def test_reference_db_heatmap_matches_each_raw_reference_spectrum(archive, transpose, modes):
+    from app.ui.results.read_session import ResultReadSession
+    from app.ui.results.spectrum_views import SpectrumView, read_private_view
+
+    run = ThatecRunReader.describe(archive)
+    points = Hdf5RunReader.points(archive)
+    row = find_heatmap_rows(run)[0]
+    coords = build_heatmap_coordinates(archive, run, row, points)
+    sweep = coords.dimensions[1].id
+    request = HeatmapRequest(sweep if transpose else "frequency",
+                             "frequency" if transpose else sweep,
+                             {"frequency": (1.3e6, 1.6e6)})
+    processing = ResultProcessing("difference_db", 0, modes)
+    payload = _read_heatmap_payload(archive, row, coords, request,
+                                     processing=processing, points=points)
+    session = ResultReadSession(archive)
+    view = SpectrumView(show_analysis=False, show_reference=True, reference_index=0)
+    assert payload.z_unit == "dB"
+    for index, point in enumerate(points):
+        spectrum = read_private_view(session, point, processing, view).traces[0]
+        mask = (np.asarray(spectrum.frequencies_hz) >= 1.3e6) & (np.asarray(spectrum.frequencies_hz) <= 1.6e6)
+        assert spectrum.unit == "dB"
+        values = payload.matrix[:, index] if transpose else payload.matrix[index]
+        np.testing.assert_array_equal(values, np.asarray(spectrum.values)[mask])
+
+
 def test_positive_only_subtraction_preserves_undefined_bins_and_notes(archive):
     point = Hdf5RunReader.points(archive)[0]
     derived = read_processed_private(

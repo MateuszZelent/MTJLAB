@@ -12,8 +12,7 @@ from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.exporters import ImageExporter, SVGExporter
-from PySide6.QtCore import QRectF, QSize, QThreadPool, Signal
+from PySide6.QtCore import QEvent, QRectF, QSize, QThreadPool, Signal
 from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
@@ -24,14 +23,32 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, ComboBox, FluentIcon, PushButton, FlowLayout
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    CardWidget,
+    ComboBox,
+    FlowLayout,
+    FluentIcon,
+    PushButton,
+)
 
 from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto
 from app.recipes.parameter_registry import parameter_descriptor
 from app.storage import StoredPoint, ThatecRow, ThatecRun, ThatecRunReader
+from app.storage.heatmap_analysis_store import validate_cell_edges, write_heatmap_analysis
 from app.ui.design_system import plot_theme, tokens_for
+from app.ui.design_system.paper_plot_style import PAPER_STYLE
 from app.ui.dialogs import StationFileDialog as QFileDialog
+from app.ui.results.analysis_export import (
+    ensure_derived_destination,
+    heatmap_export_path,
+    processing_manifest,
+    write_analysis_manifest,
+)
 from app.ui.results.data_classifier import find_heatmap_rows
+from app.ui.results.filter_choices import FilterComboBox
+from app.ui.results.heatmap_cache import HeatmapSourceCache
 from app.ui.results.heatmap_coordinates import (
     HeatmapCoordinates,
     HeatmapDimension,
@@ -39,18 +56,22 @@ from app.ui.results.heatmap_coordinates import (
     build_heatmap_coordinates,
     read_heatmap_matrix,
 )
-from app.ui.results.processing import ResultSpectrumProcessor
-from app.ui.results.heatmap_cache import HeatmapSourceCache
-from app.ui.results.processing_controls import ResultProcessingControls
-from app.ui.results.map_controls import MapProcessingControls
-from app.ui.results.map_processing import analyse_map
-from app.ui.results.analysis_export import ensure_derived_destination, processing_manifest, write_analysis_manifest, heatmap_export_path
-from app.storage.heatmap_analysis_store import write_heatmap_analysis, validate_cell_edges
 from app.ui.results.heatmap_ranges import HeatmapRangeDialog
-from app.ui.results.filter_choices import FilterComboBox
+from app.ui.results.map_controls import MapProcessingControls
+from app.ui.results.map_processing import MapProcessing, analyse_map
+from app.ui.results.processing import ResultSpectrumProcessor
+from app.ui.results.processing_controls import ResultProcessingControls
+from app.ui.results.processing_overlay import ResultProcessingOverlay
 from app.ui.results.state_card import ResultsStateCard
 from app.ui.results.workers import ResultReadTask
-from app.ui.widgets.plot_ownership import create_plot_widget, own_plot_item_menus, own_signal_proxy
+from app.ui.widgets.plot_ownership import (
+    create_plot_widget,
+    own_plot_item_menus,
+    own_signal_proxy,
+    set_plot_export_action,
+)
+from app.ui.widgets.plot_style import apply_scientific_style
+
 
 def _read_coordinate_payload(path, run, row, points, *, cancelled=None):
     coordinates = build_heatmap_coordinates(path, run, row, points)
@@ -101,9 +122,12 @@ class _HeatmapPayload:
 
 
 def _process_map_payload(payload, state, frequency_axis, *, cancelled=None):
+    # Input remains reachable even when a proposed filter would reject the map.
+    if state.view == "input":
+        state = replace(state, component="none", mask_lines=False, image_filter="none", view="result")
     if frequency_axis is None:
-        if state.component != "none" or state.mask_lines or state.view == "component":
-            raise ValueError("Choose Frequency as X or Y before using common-component or line filters.")
+        if state.component != "none" or state.mask_lines or state.image_filter != "none" or state.view in {"component", "removed"}:
+            raise ValueError("Choose Frequency as X or Y before using common-component, line, or 2D image filters.")
         finite = payload.matrix[np.isfinite(payload.matrix)]
         levels = payload.levels
         if state.colour_range == "robust":
@@ -112,9 +136,6 @@ def _process_map_payload(payload, state, frequency_axis, *, cancelled=None):
             bound = max(abs(levels[0]), abs(levels[1]))
             levels = (-bound, bound)
         return replace(payload, levels=levels)
-    # Input remains reachable even when a proposed filter would reject the map.
-    if state.view == "input":
-        state = replace(state, component="none", mask_lines=False, view="result")
     if state.mask_lines and not payload.line_input_is_raw:
         raise ValueError("Choose a Raw spectrum row before classifying stationary lines; use post-processing to subtract recorded background/reference.")
     result = analyse_map(payload.matrix, unit=payload.z_unit,
@@ -122,7 +143,8 @@ def _process_map_payload(payload, state, frequency_axis, *, cancelled=None):
         coordinate_values=payload.y_values if frequency_axis == 1 else payload.x_values,
         frequency_axis=frequency_axis, state=state, line_input_dbm=payload.line_input_dbm, cancelled=cancelled)
     return replace(payload, matrix=result.values, z_unit=result.unit,
-                   z_label="Common component" if state.view == "component" else "Power / contrast",
+                   z_label=("Common component" if state.view == "component" else
+                            "Removed by 2D filter" if state.view == "removed" else "Power / contrast"),
                    levels=result.levels, processing_notes=payload.processing_notes + result.notes)
 
 
@@ -184,6 +206,8 @@ class HeatmapPlotWidget(QWidget):
         self._y_edges: np.ndarray | None = None
         self._x_export_label = "X"
         self._y_export_label = "Y"
+        self._z_label = "Amplitude (dBm)"
+        self._z_unit = ""
         self._cell_checkpoint_indices: np.ndarray | None = None
         self._last_readout_cell: tuple[int, int] | None = None
         self._theme_name = "dark"
@@ -222,7 +246,7 @@ class HeatmapPlotWidget(QWidget):
 
         export_btn = PushButton(parent=self)
         export_btn.setText("Export")
-        export_btn.setToolTip("Export PNG, SVG or CSV with a reloadable HDF5 snapshot of the visible cells")
+        export_btn.setToolTip(f"{PAPER_STYLE.description}. Export PNG, SVG or CSV with a reloadable HDF5 snapshot of the visible cells.")
         export_btn.setObjectName("plotToolButton")
         export_btn.clicked.connect(self.export)
         toolbar.addWidget(export_btn)
@@ -238,8 +262,10 @@ class HeatmapPlotWidget(QWidget):
 
         # --- Plot ---
         self.plot = create_plot_widget()
+        set_plot_export_action(self.plot, self.export)
         self.plot.setBackground(None)
-        self.plot.showGrid(x=True, y=True, alpha=0.18)
+        self.plot.showGrid(x=False, y=False)
+        self.plot.getViewBox().setDefaultPadding(0)
         self.plot.setLabel("bottom", "Frequency", units="Hz")
         self.plot.setLabel("left", "Checkpoint")
         self.plot.setMenuEnabled(True)
@@ -269,7 +295,9 @@ class HeatmapPlotWidget(QWidget):
         self.color_bar.setImageItem(self.image_item, insert_in=self.plot.getPlotItem())
         own_plot_item_menus(self.color_bar, self.plot)
 
-        layout.addWidget(self.plot, 1)
+        # Keep the canvas about 30% shorter while retaining its readable minimum.
+        layout.addWidget(self.plot, 7)
+        layout.addStretch(3)
 
         # --- Crosshair ---
         self.crosshair_x = pg.InfiniteLine(
@@ -280,6 +308,9 @@ class HeatmapPlotWidget(QWidget):
         )
         self.plot.addItem(self.crosshair_x, ignoreBounds=True)
         self.plot.addItem(self.crosshair_y, ignoreBounds=True)
+        self.crosshair_x.hide()
+        self.crosshair_y.hide()
+        self.plot.viewport().installEventFilter(self)
 
         self._mouse_proxy = pg.SignalProxy(
             self.plot.scene().sigMouseMoved, rateLimit=30, slot=self._mouse_moved
@@ -307,6 +338,7 @@ class HeatmapPlotWidget(QWidget):
         y_label: str = "Checkpoint",
         y_unit: str = "",
         z_label: str = "Amplitude (dBm)",
+        z_unit: str = "",
         levels: tuple[float, float] | None = None,
         cell_checkpoint_indices: np.ndarray | None = None,
         x_cell_edges: np.ndarray | None = None,
@@ -424,7 +456,9 @@ class HeatmapPlotWidget(QWidget):
 
         self.plot.setLabel("bottom", x_label, units=x_unit)
         self.plot.setLabel("left", y_label, units=y_unit if y_unit else None)
-        self.color_bar.setLabel("right", text=z_label)
+        self._z_label, self._z_unit = z_label, z_unit
+        self.color_bar.setLabel("right", text=z_label, units=z_unit)
+        apply_scientific_style(self.plot.plotItem, self._theme_name, color_bar=self.color_bar)
         self._axis_metadata = {"x": {"label": x_label, "unit": x_unit},
                                "y": {"label": y_label, "unit": y_unit}}
 
@@ -438,14 +472,20 @@ class HeatmapPlotWidget(QWidget):
         if not np.isfinite(low) or not np.isfinite(high) or low > high:
             raise ValueError("Heatmap colour levels must be finite and ordered.")
         if low == high:
-            padding = max(abs(low) * 1e-12, 1e-12)
+            padding = max(abs(low) * 1e-12, abs(np.spacing(low))) if low else 1e-12
             low, high = low - padding, high + padding
+        # ColorBarItem uses rounding as both the drag step and minimum span.
+        # Its default of 1 would turn sub-nanowatt residuals into a 1 W range.
+        self.color_bar.rounding = max(
+            (high - low) / 1000, float(np.spacing(max(abs(low), abs(high))))
+        )
         self.color_bar.setLevels((low, high))
         self.image_item.setLevels((low, high))
         if not same_coordinates:
             self.auto_range()
 
     def clear(self) -> None:
+        self._hide_crosshair()
         self.export_metadata = {}
         self.pcolor_item.setData()
         self.raster_item.clear()
@@ -463,17 +503,17 @@ class HeatmapPlotWidget(QWidget):
         self.readout.setText("X: —   Y: —   Z: —")
 
     def auto_range(self) -> None:
-        self.plot.enableAutoRange()
-        self.plot.autoRange()
+        if self._x_edges is not None and self._y_edges is not None:
+            view = self.plot.getViewBox()
+            view.disableAutoRange()
+            view.setRange(xRange=(float(self._x_edges[0]), float(self._x_edges[-1])),
+                          yRange=(float(self._y_edges[0]), float(self._y_edges[-1])), padding=0)
 
     def apply_theme(self, theme: str) -> None:
         self._theme_name = theme
         palette = plot_theme(tokens_for(theme))
         self.plot.setBackground(palette.background)
-        for axis in ("left", "bottom"):
-            item = self.plot.getAxis(axis)
-            item.setPen(pg.mkPen(palette.axes))
-            item.setTextPen(pg.mkPen(palette.axes))
+        apply_scientific_style(self.plot.plotItem, theme, color_bar=self.color_bar)
         self.crosshair_x.setPen(pg.mkPen(palette.grid, width=1))
         self.crosshair_y.setPen(pg.mkPen(palette.grid, width=1))
 
@@ -484,8 +524,11 @@ class HeatmapPlotWidget(QWidget):
         if self._export_task is not None:
             return
         metadata = json.loads(json.dumps(self.export_metadata))
+        view_state = self.plot.getViewBox().state
+        inverted = [bool(view_state["xInverted"]), bool(view_state["yInverted"])]
         metadata.update(axes=self._axis_metadata, view_ranges=self.plot.viewRange(),
-                        palette=self.colormap_combo.currentText(), colour_levels=list(self.color_bar.levels()))
+                        palette=self.colormap_combo.currentText(), colour_levels=list(self.color_bar.levels()),
+                        inverted_axes=inverted)
         try:
             source = Path(metadata["source_file"])
             if source.is_file():
@@ -525,10 +568,17 @@ class HeatmapPlotWidget(QWidget):
             x_indices, y_indices = np.flatnonzero(x_mask), np.flatnonzero(y_mask)
             x_edges = self._x_edges[x_indices[0]:x_indices[-1] + 2].copy()
             y_edges = self._y_edges[y_indices[0]:y_indices[-1] + 2].copy()
-            if "PNG" in selected or suffix == ".png":
-                ImageExporter(self.plot.plotItem).export(path)
-            elif "SVG" in selected or suffix == ".svg":
-                SVGExporter(self.plot.plotItem).export(path)
+            if suffix in {".png", ".svg"}:
+                from app.ui.widgets.figure_export import export_heatmap_figure
+
+                metadata["figure_presentation"] = export_heatmap_figure(path,
+                    values=values, x_edges=x_edges, y_edges=y_edges,
+                    view_ranges=metadata["view_ranges"],
+                    x_label=self._axis_metadata["x"]["label"], x_unit=self._axis_metadata["x"]["unit"],
+                    y_label=self._axis_metadata["y"]["label"], y_unit=self._axis_metadata["y"]["unit"],
+                    z_label=self._z_label, z_unit=self._z_unit,
+                    levels=metadata["colour_levels"], colormap=metadata["palette"],
+                    title=self.plot.plotItem.titleLabel.item.toPlainText(), inverted_axes=inverted)
             else:
                 self._export_csv(Path(path), values, self._x_values[x_mask], self._y_values[y_mask])
         except Exception as exc:
@@ -612,19 +662,23 @@ class HeatmapPlotWidget(QWidget):
 
     def _mouse_moved(self, event: tuple[object, ...]) -> None:
         position = event[0]
-        if not self.plot.sceneBoundingRect().contains(position):
+        if not self.plot.getViewBox().sceneBoundingRect().contains(position):
+            self._hide_crosshair()
             return
         point = self.plot.plotItem.vb.mapSceneToView(position)
         x, y = float(point.x()), float(point.y())
+        cell = self._cell_indices(x, y)
+        if cell is None:
+            self._hide_crosshair()
+            self.readout.setText("X: -   Y: -   Z: -")
+            return
         self.crosshair_x.setPos(x)
         self.crosshair_y.setPos(y)
-        cell = self._cell_indices(x, y)
+        self.crosshair_x.show()
+        self.crosshair_y.show()
         if cell == self._last_readout_cell:
             return
         self._last_readout_cell = cell
-        if cell is None:
-            self.readout.setText("X: -   Y: -   Z: -")
-            return
         display_x = float(self._x_values[cell[1]])
         display_y = float(self._y_values[cell[0]])
         z = float(self._data[cell[0], cell[1]])
@@ -632,6 +686,16 @@ class HeatmapPlotWidget(QWidget):
         self.readout.setText(
             f"X: {display_x:.6g}   Y: {display_y:.4g}   Z: {z_text}"
         )
+
+    def _hide_crosshair(self):
+        self.crosshair_x.hide()
+        self.crosshair_y.hide()
+        self._last_readout_cell = None
+
+    def eventFilter(self, obj, event):
+        if obj is self.plot.viewport() and event.type() == QEvent.Type.Leave:
+            self._hide_crosshair()
+        return super().eventFilter(obj, event)
 
     def _mouse_clicked(self, event: Any) -> None:
         if (
@@ -722,6 +786,7 @@ class HeatmapResultsTab(QWidget):
         self._active_read_request = 0
         self._read_tasks: dict[int, ResultReadTask] = {}
         self._read_kinds = {}
+        self.processing_overlay = ResultProcessingOverlay(self)
         self._coordinate_cache = {}
         self._frequency_values = ()
         self._processing_dirty = False
@@ -893,7 +958,6 @@ class HeatmapResultsTab(QWidget):
         self._processing_dirty = False
         self._source_payload = None
         self._source_row = None
-        from .map_processing import MapProcessing
         self.map_controls.set_state(MapProcessing())
         self.processing_controls.set_references(references)
         self._selected_path = path
@@ -945,13 +1009,16 @@ class HeatmapResultsTab(QWidget):
         self.heatmap.set_data(analysis.values, analysis.x_values, analysis.y_values,
             x_label=axes["x"]["label"], x_unit=axes["x"].get("unit", ""),
             y_label=axes["y"]["label"], y_unit=axes["y"].get("unit", ""),
-            z_label=f"Derived values ({metadata['value_unit']})",
+            z_label="Derived values", z_unit=metadata["value_unit"],
             levels=tuple(metadata["colour_levels"]) if "colour_levels" in metadata else None,
             cell_checkpoint_indices=analysis.checkpoints, x_cell_edges=analysis.x_edges, y_cell_edges=analysis.y_edges)
         self.heatmap.export_metadata = metadata
         self.heatmap.plot.setTitle("Exported heatmap · recorded derived data")
         self.heatmap.colormap_combo.setCurrentText(metadata.get("palette", "viridis"))
         ranges = metadata.get("view_ranges")
+        inverted = metadata.get("inverted_axes", (False, False))
+        self.heatmap.plot.getViewBox().invertX(bool(inverted[0]))
+        self.heatmap.plot.getViewBox().invertY(bool(inverted[1]))
         if ranges:
             self.heatmap.plot.setRange(xRange=ranges[0], yRange=ranges[1], padding=0)
         self.info_label.setText(f"Loaded derived heatmap: {path.name}. Open the source sweep to change processing; axis ranges and export remain available.")
@@ -987,17 +1054,25 @@ class HeatmapResultsTab(QWidget):
         if state.active:
             label = ("Common component" if state.view == "component" else
                      "Input spectrum" if state.view == "input" else
+                     "Removed by 2D filter" if state.view == "removed" else
                      "Differential power" if state.component.endswith("power") else
                      "Relative contrast" if state.component == "median_db" else "Spectrum")
             label += f" ({payload.z_unit})" if payload.z_unit else ""
-        palette_key = (state.component, state.view, payload.z_unit)
+        palette_key = (state.component, state.image_filter, state.view, payload.z_unit)
         if palette_key != self._automatic_palette_key:
-            if state.view == "result" and state.component != "none" and payload.levels[0] < 0 < payload.levels[1]:
+            if ((state.view == "result" and state.component != "none" or state.view == "removed")
+                    and payload.levels[0] < 0 < payload.levels[1]):
                 self.heatmap.colormap_combo.setCurrentText("CET-D1")
             self._automatic_palette_key = palette_key
-        z_axis_label = payload.z_label
-        if payload.z_unit:
-            z_axis_label = f"{z_axis_label} ({payload.z_unit})"
+        z_label = payload.z_label
+        if state.view not in {"component", "removed"}:
+            if payload.z_unit == "dB":
+                z_label = "Relative power"
+            elif payload.z_unit == "ratio":
+                z_label = "Power ratio"
+            elif payload.z_unit == "W" and (state.component.endswith("power")
+                    or self.processing_controls.state.math_operation == "subtract_power_signed"):
+                z_label = "Power difference"
         self.heatmap.set_data(
             payload.matrix,
             x_values=payload.x_values,
@@ -1006,7 +1081,7 @@ class HeatmapResultsTab(QWidget):
             x_unit=payload.x_unit,
             y_label=payload.y_label,
             y_unit=payload.y_unit,
-            z_label=z_axis_label,
+            z_label=z_label, z_unit=payload.z_unit,
             levels=payload.levels,
             cell_checkpoint_indices=payload.cell_checkpoints,
         )
@@ -1059,6 +1134,7 @@ class HeatmapResultsTab(QWidget):
         self._run = None
         self._points = ()
         self.processing_controls.set_references(())
+        self.map_controls.set_state(MapProcessing())
         self._coordinates = None
         self._coordinate_row_id = None
         self._coordinate_cache.clear()
@@ -1435,6 +1511,9 @@ class HeatmapResultsTab(QWidget):
         )
         task.signals.failed.connect(self._read_failed)
         task.signals.finished.connect(self._read_finished)
+        filters = [box.text() for box in self.processing_controls.filters.values() if box.isChecked()]
+        self.processing_overlay.begin(request_id, "Recalculating heatmap…",
+            "Processing each recorded spectrum" + (": " + " · ".join(filters) if filters else "."))
         self._read_pool.start(task)
 
     def _read_loaded(
@@ -1491,6 +1570,8 @@ class HeatmapResultsTab(QWidget):
         task.signals.finished.connect(self._read_finished)
         self.load_button.setEnabled(False)
         self.info_label.setText("Analysing the selected map slice… original data unchanged.")
+        self.processing_overlay.begin(request_id, "Recalculating heatmap…",
+            "Applying filters to the selected two-dimensional map.")
         self._read_pool.start(task)
 
     def _read_failed(self, request_id: int, message: str) -> None:
@@ -1500,10 +1581,12 @@ class HeatmapResultsTab(QWidget):
     def _read_finished(self, request_id: int) -> None:
         self._read_tasks.pop(request_id, None)
         self._read_kinds.pop(request_id, None)
+        self.processing_overlay.finish(request_id)
         if request_id == self._active_read_request:
             self.load_button.setEnabled(self.row_combo.currentData() is not None)
 
     def _invalidate_pending_read(self) -> None:
+        self.processing_overlay.clear()
         for task in self._read_tasks.values():
             task.cancel()
         self._read_pool.clear()

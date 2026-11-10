@@ -3,13 +3,13 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.recipes.spectrum_processing import REFERENCE_UNITS
 from app.spectrum.analysis import SpectrumAnalysisParameters
 from app.spectrum.display_processing import clean_display_spectrum
 from app.spectrum.preview_processing import SpectrumPreviewProcessor
 from app.spectrum.processing import apply_reference_operation, frequency_grids_match
 from app.storage import Hdf5RunReader
 from app.storage.hdf5_reader import iter_recipe_spectrum_sweeps
-from app.recipes.spectrum_processing import REFERENCE_UNITS
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +156,8 @@ class ResultSpectrumProcessor:
             if indices:
                 records = []
                 # Keep only the bounded tail needed by the shared live algorithms.
-                limit = max(params.emi_min_frames, params.temporal_average_frames)
+                limit = max(24 if "emi_reject" in state.modes else 1,
+                            params.temporal_average_frames)
                 for ordinal, _boundary, record in iter_recipe_spectrum_sweeps(
                     self.path, selected_indices=set(sorted(indices)[-limit:])
                 ):
@@ -200,11 +201,13 @@ class ResultSpectrumProcessor:
             reference_values = reference.powers_dbm
 
         # EMI classifies the same domain as the displayed trace, as in recipe execution.
-        filter_history = history
-        if history and state.operation != "none":
+        # Live EMI sees at most 24 corrected frames, even when power averaging
+        # requires a longer raw history from this same checkpoint.
+        filter_history = history[-24:]
+        if filter_history and state.operation != "none":
             filter_history = tuple(
                 apply_reference_operation(row, reference_values, operation)[0]
-                for row in history
+                for row in filter_history
             )
         result, _stats = SpectrumPreviewProcessor().process(
             values,

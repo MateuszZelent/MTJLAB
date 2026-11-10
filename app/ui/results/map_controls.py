@@ -1,16 +1,27 @@
-"""Visible, opt-in controls for differential heatmap analysis."""
+"""Visible, opt-in differential analysis and 2D image denoising controls."""
 
 from dataclasses import replace
 
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QVBoxLayout, QWidget
-from qfluentwidgets import (CaptionLabel, CardWidget, CheckBox, ComboBox,
-                           DoubleSpinBox, FlowLayout, LineEdit, PrimaryPushButton, PushButton)
+from qfluentwidgets import (
+    CaptionLabel,
+    CardWidget,
+    CheckBox,
+    ComboBox,
+    DoubleSpinBox,
+    FlowLayout,
+    LineEdit,
+    PrimaryPushButton,
+    PushButton,
+    SpinBox,
+)
 
 from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto, parse_quantity
 from app.ui.dialogs import StationDialog
+
 from .filter_choices import FilterComboBox
-from .map_processing import MapProcessing
+from .map_processing import MAX_IMAGE_SIGMA, MAX_IMAGE_WINDOW, MIN_IMAGE_SIGMA, MapProcessing
 
 
 class MapSettingsDialog(StationDialog):
@@ -20,7 +31,7 @@ class MapSettingsDialog(StationDialog):
         self.set_resizable(True)
         self.resize(760, 680)
         root = self.modal_content_layout(spacing=10)
-        note = CaptionLabel("Classify narrow lines on recorded raw dBm, then mask the corresponding bins in the current map. No smoothing across the sweep parameter; masked bins remain gaps.", self)
+        note = CaptionLabel("Classify narrow lines on recorded raw dBm, then mask the corresponding bins in the current map. Masked bins remain gaps. Optional 2D image denoising is configured separately in the Map controls and follows these operations.", self)
         note.setWordWrap(True)
         root.addWidget(note)
         form = QFormLayout()
@@ -124,9 +135,11 @@ class MapProcessingControls(CardWidget):
         self.lines.setToolTip("Requires stable dBm amplitude, local contrast, full-lobe width, and readable coverage. Real stationary lines can also satisfy these criteria.")
         self.flow.addWidget(self.lines)
         self.view = ComboBox(self.strip)
-        for label, key in (("Result", "result"), ("Input before map filters", "input"), ("Common component", "component")):
+        for label, key in (("Result", "result"), ("Input before map filters", "input"),
+                           ("Common component", "component"), ("Removed noise (2D stage)", "removed")):
             self.view.addItem(label, userData=key)
-        self.view.setAccessibleName("Heatmap input result or common component")
+        self.view.setAccessibleName("Heatmap input result common component or removed noise")
+        self.view.setToolTip("Input bypasses all map stages. Removed noise is input to the 2D stage minus its result, in signed W for dBm input; it can include real signal.")
         self.flow.addWidget(self.view)
         self.colour = ComboBox(self.strip)
         for label, key in (("Full colour range", "full"), ("1–99% colour range", "robust"), ("Symmetric about zero", "symmetric")):
@@ -140,12 +153,73 @@ class MapProcessingControls(CardWidget):
         self.reset.clicked.connect(lambda: self.set_state(MapProcessing(), emit=True))
         self.flow.addWidget(self.reset)
         root.addWidget(self.strip)
+        self.image_strip = QWidget(self)
+        self.image_flow = FlowLayout(self.image_strip, needAni=False)
+        self.image_flow.setContentsMargins(0, 0, 0, 0)
+        self.image_flow.setHorizontalSpacing(8)
+        self.image_flow.setVerticalSpacing(6)
+        self.image_flow.addWidget(CaptionLabel("2D image denoising", self.image_strip))
+        self.image_filter = ComboBox(self.image_strip)
+        self.image_filter.setFixedWidth(180)
+        self.image_filter.setAccessibleName("2D heatmap image denoising")
+        for label, key in (("Off - preserve input", "none"), ("2D median", "median"),
+                           ("2D Gaussian", "gaussian")):
+            self.image_filter.addItem(label, userData=key)
+        self.image_filter.setToolTip("Smooth the selected frequency-by-sweep plane after component subtraction and line masking. Smoothing can broaden or suppress a real resonance.")
+        self.image_flow.addWidget(self.image_filter)
+        self.image_windows = {}
+        self.image_sigmas = {}
+        for key, label, suffix in (
+            ("image_frequency_window", "Frequency window", " bins"),
+            ("image_sweep_window", "Sweep window", " points"),
+            ("image_frequency_sigma", "Frequency sigma", " bins"),
+            ("image_sweep_sigma", "Sweep sigma", " points"),
+        ):
+            field = QWidget(self.image_strip)
+            field_layout = QHBoxLayout(field)
+            field_layout.setContentsMargins(0, 0, 0, 0)
+            field_layout.setSpacing(6)
+            field_label = CaptionLabel(f"{label} ({suffix.strip()})", field)
+            if key.endswith("window"):
+                spin = SpinBox(field)
+                spin.setRange(1, MAX_IMAGE_WINDOW)
+                spin.setSingleStep(2)
+                spin.setToolTip(f"Odd count from 1 to {MAX_IMAGE_WINDOW}. Grid samples, not a uniform physical span. A window of 1 leaves this axis unsmoothed.")
+                self.image_windows[key] = spin
+            else:
+                spin = DoubleSpinBox(field)
+                spin.setRange(MIN_IMAGE_SIGMA, MAX_IMAGE_SIGMA)
+                spin.setDecimals(2)
+                spin.setSingleStep(.1)
+                spin.setToolTip("Gaussian standard deviation in grid samples, truncated to the selected window. Missing neighbours are excluded and weights renormalized.")
+                self.image_sigmas[key] = spin
+            spin.setFixedWidth(140)
+            spin.setKeyboardTracking(False)
+            spin.setAccessibleName(f"2D image {label.lower()} in {suffix.strip()}")
+            field_label.setBuddy(spin)
+            field_layout.addWidget(field_label)
+            field_layout.addWidget(spin)
+            self.image_flow.addWidget(field)
+        root.addWidget(self.image_strip)
+        self.image_error = CaptionLabel("", self)
+        self.image_error.setWordWrap(True)
+        self.image_error.setAccessibleName("Invalid 2D image filter settings")
+        self.image_error.hide()
+        root.addWidget(self.image_error)
+        self.image_note = CaptionLabel(
+            "Narrow peaks / EMI / Denoise act per spectrum. 2D image denoising acts on the selected map. "
+            "Windows and Gaussian sigma count frequency bins / sweep points, not uniform physical spacing. "
+            "dBm is filtered in W; signed W and dB stay in domain. Original gaps remain gaps.", self)
+        self.image_note.setWordWrap(True)
+        root.addWidget(self.image_note)
         self.note = CaptionLabel("Map filters are off. A stationary line can be real signal; compare Input / Common component before interpreting the residual.", self)
         self.note.setWordWrap(True)
         root.addWidget(self.note)
-        for control in (self.operation, self.reference, self.view, self.colour):
+        for control in (self.operation, self.reference, self.view, self.colour, self.image_filter):
             control.currentIndexChanged.connect(self._changed)
         self.lines.toggled.connect(self._changed)
+        for control in (*self.image_windows.values(), *self.image_sigmas.values()):
+            control.valueChanged.connect(self._changed)
         self.set_state(self.state)
 
     def set_coordinates(self, values, formatter):
@@ -158,7 +232,8 @@ class MapProcessingControls(CardWidget):
 
     def set_state(self, state, *, emit=False):
         self.state = state
-        controls = (self.operation, self.reference, self.lines, self.view, self.colour)
+        controls = (self.operation, self.reference, self.lines, self.view, self.colour,
+                    self.image_filter, *self.image_windows.values(), *self.image_sigmas.values())
         for control in controls:
             control.blockSignals(True)
         self.operation.setCurrentIndex(self.operation.findData(state.component))
@@ -166,11 +241,21 @@ class MapProcessingControls(CardWidget):
         self.lines.setChecked(state.mask_lines)
         self.view.setCurrentIndex(self.view.findData(state.view))
         self.colour.setCurrentIndex(self.colour.findData(state.colour_range))
+        self.image_filter.setCurrentIndex(self.image_filter.findData(state.image_filter))
+        for key, control in (*self.image_windows.items(), *self.image_sigmas.items()):
+            control.setValue(getattr(state, key))
         for control in controls:
             control.blockSignals(False)
         self.reference.setEnabled(state.component == "reference_power")
         self.view.setItemEnabled(2, state.component != "none")
-        self.reset.setEnabled(state.active)
+        self.view.setItemEnabled(3, state.image_filter != "none")
+        for control in self.image_windows.values():
+            control.setEnabled(state.image_filter != "none")
+        for control in self.image_sigmas.values():
+            control.setEnabled(state.image_filter == "gaussian")
+        self.image_error.clear()
+        self.image_error.hide()
+        self.reset.setEnabled(state != MapProcessing())
         self.note.setText(
             f"Common component: {state.component} · coverage ≥ {state.minimum_coverage:.0%} · "
             f"lines: contrast ≥ {state.line_contrast_db:g} dB, MAD ≤ {state.line_mad_db:g} dB, "
@@ -183,12 +268,27 @@ class MapProcessingControls(CardWidget):
 
     def _changed(self, *_args):
         component = self.operation.currentData()
+        image_filter = self.image_filter.currentData()
         view = self.view.currentData()
-        if component == "none" and view == "component":
+        if (component == "none" and view == "component") or (image_filter == "none" and view == "removed"):
             view = "result"
-        self.set_state(replace(self.state, component=component, reference_value=self.reference.currentData(),
-                               mask_lines=self.lines.isChecked(), view=view,
-                               colour_range=self.colour.currentData()), emit=True)
+        # Explicit bypasses discard a rejected edit and retain the last valid
+        # image settings. Invalid pending controls must never trap Input or Off.
+        bypass = ((self.sender() is self.image_filter and image_filter == "none") or
+                  (self.sender() is self.view and view == "input"))
+        image_settings = {} if bypass else {
+            key: control.value() for key, control in (*self.image_windows.items(), *self.image_sigmas.items())
+        }
+        try:
+            state = replace(self.state, component=component, reference_value=self.reference.currentData(),
+                mask_lines=self.lines.isChecked(), view=view, colour_range=self.colour.currentData(),
+                image_filter=image_filter, **image_settings)
+        except ValueError as exc:
+            self.image_error.setText(str(exc))
+            self.image_error.show()
+            self.reset.setEnabled(True)
+            return
+        self.set_state(state, emit=True)
 
     def _settings(self):
         dialog = MapSettingsDialog(self, self.state)
@@ -198,6 +298,7 @@ class MapProcessingControls(CardWidget):
 
     def _sync_height(self):
         self.strip.setMinimumHeight(self.flow.heightForWidth(max(200, self.width() - 20)))
+        self.image_strip.setMinimumHeight(self.image_flow.heightForWidth(max(200, self.width() - 20)))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

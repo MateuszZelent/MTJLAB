@@ -23,7 +23,7 @@ def app():
 def test_rigol_full_configuration_counts_hidden_action_defaults_and_channel_baselines(app):
     current = RigolConfigurationSnapshot()
     baselines = {1: current, 2: replace(current, channel=2, frequency="3 kHz")}
-    dialog = RigolNodeEditorDialog(snapshot=current, snapshot_resolver=baselines.get)
+    dialog = RigolNodeEditorDialog(snapshot=current, snapshot_resolver=baselines.get, carrier_only=True)
     try:
         assert dialog.review.table.counts["changed"] == 0
         dialog.frequency.setText("0.002 MHz")
@@ -31,11 +31,13 @@ def test_rigol_full_configuration_counts_hidden_action_defaults_and_channel_base
         # 'Unchanged' means use the full carrier snapshot, not omit its writes.
         assert dialog.parameter_selectors["carrier.frequency"].currentData() == "unchanged"
         dialog.channel.setCurrentIndex(dialog.channel.findData(2))
-        assert dialog.review.table.counts["changed"] == 0
+        # Retargeting keeps the authored 2 kHz; the destination baseline is 3 kHz.
+        assert dialog.review.table.counts["changed"] == 1
+        dialog.level_mode.setCurrentText("Amplitude / Offset")
         dialog.vpp.setText("4 mV")
-        assert dialog.review.table.counts["changed"] == 2  # high and low physical levels
+        assert dialog.review.table.counts["changed"] == 3  # frequency and both physical levels
         dialog.vpp.setText("invalid")
-        assert dialog.review.table.counts["changed"] == 2
+        assert dialog.review.table.counts["changed"] == 3
     finally:
         dialog.close()
 
@@ -58,8 +60,14 @@ def test_anritsu_only_selected_fields_count_and_missing_baseline_is_unknown(app)
         dialog.close()
 
 
-def test_sg_writes_both_fields_and_never_substitutes_defaults_for_current(app):
-    dialog = AnritsuSignalGeneratorNodeEditorDialog(current_snapshot=SignalGeneratorSnapshot(1e9, -30, False, "SPECT"))
+def test_sg_review_distinguishes_selected_targets_from_preserved_fields(app):
+    dialog = AnritsuSignalGeneratorNodeEditorDialog(
+        current_snapshot=SignalGeneratorSnapshot(1e9, -30, False, "SPECT"),
+        parameter_actions=[
+            {"parameter_id": "sg.frequency", "mode": "set", "value": "1 GHz"},
+            {"parameter_id": "sg.power", "mode": "set", "value": "-30 dBm"},
+        ],
+    )
     try:
         assert dialog.review.table.counts["same"] == 2
         dialog.power.setText("-20 dBm")
@@ -67,7 +75,9 @@ def test_sg_writes_both_fields_and_never_substitutes_defaults_for_current(app):
     finally:
         dialog.close()
     dialog = AnritsuSignalGeneratorNodeEditorDialog()
-    assert dialog.review.table.counts["unknown"] == 2
+    assert dialog.review.table.counts["preserved"] == 2
+    assert dialog.review.table.counts["same"] == 0
+    assert dialog.planned_parameter_actions() == []
     dialog.close()
 
 
@@ -114,6 +124,7 @@ def test_keithley_generator_settings_scroll_instead_of_overlapping(app):
         assert not dialog.parameter_scroll.geometry().intersects(dialog.segments.geometry())
         assert {row.key for row in dialog.review.table.rows} == {
             "source_level", "source_mode", "compliance", "nplc", "settling_time", "sense_mode",
+            "source_range",
         }
     finally:
         dialog.close()

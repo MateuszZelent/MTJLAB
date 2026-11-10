@@ -8,6 +8,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from app.ui.design_system import plot_theme, tokens_for
@@ -95,7 +96,8 @@ class SpectrumPlotTests(unittest.TestCase):
             self.assertEqual(widget.marker.pen.color().name(), palette.reference)
             self.assertEqual(widget.crosshair_x.pen.color().name(), palette.grid)
             self.assertEqual(widget.crosshair_y.pen.color().name(), palette.grid)
-            self.assertEqual(widget.plot.getAxis("left").pen().color().name(), palette.axes)
+            self.assertEqual(widget.plot.getAxis("left").pen().style(), Qt.PenStyle.NoPen)
+            self.assertEqual(widget.plot.getAxis("left").textPen().color().name(), palette.axes)
             self.assertEqual(widget.plot.getAxis("bottom").textPen().color().name(), palette.axes)
         finally:
             widget.close()

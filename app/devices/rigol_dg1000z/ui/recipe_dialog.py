@@ -10,11 +10,12 @@ from typing import Any
 from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLayout, QLineEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
-    CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton, ScrollArea,
+    CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton,
+    ScrollArea, StrongBodyLabel, SubtitleLabel,
 )
 from app.ui.dialogs import StationMessageBox as QMessageBox
 
@@ -29,6 +30,7 @@ from app.ui.common import line_edit as _line
 from app.ui.recipes import SweepGeneratorDialog
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 from app.ui.recipes.configuration_comparison import ConfigurationReview, ConfigurationComparisonRow
+from app.ui.design_system.tokens import SPACING
 
 
 class RigolNodeEditorDialog(FluentRecipeDialog):
@@ -65,18 +67,22 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self._working_segments: dict[str, list[dict[str, object]]] = {}
         self.plan_mode = True
         self.hardware_actions_enabled = False
-        self.setWindowTitle("Rigol DG1032Z — configure sweep node")
-        self.resize(780, 640)
+        self.setWindowTitle("Rigol DG1032Z — initial waveform" if carrier_only
+                            else "Rigol DG1032Z — sweep parameters")
+        self.setMinimumSize(680 if carrier_only else 760, 620)
+        self.resize(920 if carrier_only else 1120, 800)
         surface = self.use_modal_shell_content().surface
-        layout = self.modal_content_layout(spacing=10)
-        heading = BodyLabel("Rigol DG1032Z · Carrier and output")
-        heading.setObjectName("pageTitle")
-        layout.addWidget(heading)
+        layout = self.modal_content_layout(spacing=SPACING["md"])
+        self.heading = SubtitleLabel("Initial waveform" if carrier_only else "Sweep parameters", surface)
+        layout.addWidget(self.heading)
         self.review = ConfigurationReview(surface)
-        layout.addWidget(self.review)
         description = BodyLabel(
-            "The complete carrier snapshot is stored in the recipe. Select one of "
-            "Frequency, HighL or LowL as a local ROI axis when required."
+            "Set the initial waveform and level for this channel. "
+            "Polarity and SYNC have their own output settings step."
+            if carrier_only else
+            "Choose the parameters to set or sweep. Other values come from the "
+            "earlier waveform configuration in this recipe."
+            , surface
         )
         description.setWordWrap(True)
         description.setObjectName("recipeHint")
@@ -87,6 +93,10 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         content.setParent(surface)
         carrier = CardWidget(surface)
         form = QFormLayout(carrier)
+        form.setContentsMargins(SPACING["lg"], SPACING["lg"], SPACING["lg"], SPACING["lg"])
+        form.setSpacing(SPACING["md"])
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.addRow(StrongBodyLabel("Waveform settings", carrier))
         self.channel = ComboBox(carrier)
         self.channel.addItem("Channel 1", userData=1)
         self.channel.addItem("Channel 2", userData=2)
@@ -152,7 +162,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             ("LowL", self.low_level),
             ("Amplitude (Vpp)", self.vpp),
             ("Offset / DC level", self.offset),
-            ("Load", self.output_load),
+            ("Output load", self.output_load),
             ("Phase [deg]", self.phase),
             ("Square duty [%]", self.duty),
             ("Ramp symmetry [%]", self.symmetry),
@@ -221,24 +231,45 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         content.addWidget(actions_scroll)
         content.setStretchFactor(0, 3)
         content.setStretchFactor(1, 2)
-        layout.addWidget(content, 1)
-        note = BodyLabel("Plan editing is offline. " + (
-            "Configuration forces this channel OUTPUT OFF. "
-            "Basic recipe configuration requires VPP units and modulation, hardware sweep, "
-            "burst, harmonics and summing OFF; conflicting front-panel settings block execution. "
+        if carrier_only:
+            # One scrolling document keeps the form and its optional comparison
+            # reachable without squeezing either into a second disabled panel.
+            carrier_scroll.takeWidget()
+            content.hide()
+            body = QWidget(surface)
+            body_layout = QVBoxLayout(body)
+            body_layout.setContentsMargins(0, 0, 0, 0)
+            body_layout.setSpacing(SPACING["lg"])
+            body_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+            body_layout.addWidget(carrier)
+            body_layout.addWidget(self.review)
+            body_layout.addStretch(1)
+            self.controls_scroll = ScrollArea(surface)
+            self.controls_scroll.setObjectName("rigolWaveformScroll")
+            self.controls_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self.controls_scroll.setWidgetResizable(True)
+            self.controls_scroll.setWidget(body)
+            layout.addWidget(self.controls_scroll, 1)
+        else:
+            layout.insertWidget(1, self.review)
+            layout.addWidget(content, 1)
+        note = CaptionLabel(
+            "Saved to the recipe only. This step leaves OUTPUT OFF; "
+            "add OUTPUT ON after the waveform and output settings."
             if carrier_only else
-            "Only selected parameters are updated; other settings come from the preceding "
-            "explicit configuration in this recipe. OUTPUT follows the selected policy. "
-            "Recipe axes use validated point updates with readback. Continuous mode never "
-            "adopts an external device state: the same recipe must have configured and "
-            "confirmed this channel OUTPUT ON first."
-        ))
+            "Saved to the recipe only. Live updates require a waveform and confirmed "
+            "OUTPUT ON from this recipe; parameters are verified by readback.", surface
+        )
+        note.setToolTip(
+            "Basic waveform configuration requires VPP units and modulation, hardware sweep, "
+            "burst, harmonics and summing OFF. Preflight and device readback verify the prerequisites."
+        )
         note.setWordWrap(True)
         note.setObjectName("recipeHint")
         layout.addWidget(note)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self.apply_button = PrimaryPushButton("Apply Rigol configuration", surface)
+        self.apply_button = PrimaryPushButton("Save waveform settings" if carrier_only else "Save sweep parameters", surface)
         self.cancel_button = PushButton("Cancel", surface)
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.apply_button)
@@ -274,6 +305,8 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             widget.setEnabled(False)
             widget.setToolTip("Not programmed by this node. Configure explicitly in the recipe baseline.")
         if carrier_only:
+            for widget in output_controls:
+                form.setRowVisible(widget, False)
             for selector in self.parameter_selectors.values():
                 selector.setEnabled(False)
             self.open_roi_button.setEnabled(False)
@@ -405,7 +438,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         if self._carrier_only:
             rows.append(ConfigurationComparisonRow("output_enabled", "OUTPUT during configuration", None, "OFF; no automatic ON", "Set"))
         elif policy == "continue":
-            rows.append(ConfigurationComparisonRow("output_enabled", "OUTPUT before live updates", None, "ON confirmed by this recipe", "Require"))
+            rows.append(ConfigurationComparisonRow("output_enabled", "OUTPUT before live updates (ON required)", None, True, "Require"))
         else:
             transitions = {
                 "unchanged": "Preserved",
@@ -428,7 +461,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        if not hasattr(self, "content_splitter"):
+        if not hasattr(self, "content_splitter") or self._carrier_only:
             return
         orientation = Qt.Orientation.Vertical if self.width() < 980 else Qt.Orientation.Horizontal
         if self.content_splitter.orientation() != orientation:

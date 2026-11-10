@@ -95,7 +95,8 @@ class FinalStateDialog(FluentRecipeDialog):
             self.fields["voltage"].setText(self._hold_voltage)
         self._zero_mode = zero
         self.status.setText("MOKE OFF means the qualified zero target. Choose Hold to leave a nonzero voltage." if zero else
-                            "Values are validated against the recipe configuration and station/DUT limits before saving.")
+                            "This output is checked against its recipe configuration and station limits before saving. "
+                            "The full recipe must pass Validate & preview before it can run.")
 
     def node_fields(self):
         device = self.device.currentData()

@@ -1,14 +1,22 @@
 """Derived analysis of one frequency × sweep-coordinate plane, never file data.
 
 Common-mode removal is a differential measurement, not a claim that every
-stationary spectral feature is noise. No smoothing is done along the sweep axis.
+stationary spectral feature is noise. Optional image filters act on both axes
+of the selected plane, after component subtraction and stationary-line masking.
 """
 
-from dataclasses import dataclass
 import math
 import warnings
+from dataclasses import dataclass, replace
+from numbers import Integral, Real
 
 import numpy as np
+from scipy.ndimage import gaussian_filter, vectorized_filter
+
+MAX_IMAGE_WINDOW = 31
+MIN_IMAGE_SIGMA = 0.05
+MAX_IMAGE_SIGMA = 31.0
+_IMAGE_TILE_SIZE = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,12 +35,25 @@ class MapProcessing:
     protected_bands_hz: tuple[tuple[float, float], ...] = ()
     view: str = "result"
     colour_range: str = "full"
+    image_filter: str = "none"
+    image_frequency_window: int = 3
+    image_sweep_window: int = 3
+    image_frequency_sigma: float = 1.0
+    image_sweep_sigma: float = 1.0
 
     def __post_init__(self):
         if self.component not in {"none", "median_power", "quantile_power", "reference_power", "median_db"}:
             raise ValueError("Unknown map component operation.")
-        if self.view not in {"result", "input", "component"} or self.colour_range not in {"full", "robust", "symmetric"}:
+        if self.view not in {"result", "input", "component", "removed"} or self.colour_range not in {"full", "robust", "symmetric"}:
             raise ValueError("Unknown map view or colour range.")
+        if self.image_filter not in {"none", "median", "gaussian"}:
+            raise ValueError("Unknown 2D image filter.")
+        for value in (self.image_frequency_window, self.image_sweep_window):
+            if isinstance(value, bool) or not isinstance(value, Integral) or not 1 <= value <= MAX_IMAGE_WINDOW or value % 2 != 1:
+                raise ValueError(f"Image windows must be odd integer counts from 1 to {MAX_IMAGE_WINDOW} bins/points.")
+        for value in (self.image_frequency_sigma, self.image_sweep_sigma):
+            if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or not MIN_IMAGE_SIGMA <= value <= MAX_IMAGE_SIGMA:
+                raise ValueError(f"Image Gaussian sigma must be finite, from {MIN_IMAGE_SIGMA:g} to {MAX_IMAGE_SIGMA:g} bins/points.")
         if not math.isfinite(self.quantile) or not 0 < self.quantile < 0.5:
             raise ValueError("Lower quantile must be between 0 and 0.5.")
         if not math.isfinite(self.minimum_coverage) or not 0.5 <= self.minimum_coverage <= 1:
@@ -54,7 +75,7 @@ class MapProcessing:
 
     @property
     def active(self):
-        return self.component != "none" or self.mask_lines or self.colour_range != "full" or self.view != "result"
+        return self.component != "none" or self.mask_lines or self.image_filter != "none" or self.colour_range != "full" or self.view != "result"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,13 +150,73 @@ def _stationary_lines(values_dbm, frequencies, state, minimum, cancelled):
     return mask
 
 
+def _smooth_image(values, unit, state, cancelled):
+    """Joint 2D median or normalized Gaussian, with bounded tiles and halos.
+
+    Outside the plane and at missing samples there is no observation: exclude
+    these neighbours and renormalize, then restore every original gap. Gaussian
+    support is exactly the visible odd window, independent of sigma. A halo
+    prevents artificial seams at tile boundaries. No separable median is used.
+    """
+    if unit not in {"dBm", "W", "dB"}:
+        raise ValueError("2D image denoising requires dBm, signed W or dB values.")
+    _cancel(cancelled)
+    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+        domain = np.power(10., (values - 30.) / 10.) if unit == "dBm" else values
+    valid = np.isfinite(domain) & np.isfinite(values)
+    output = np.full(values.shape, np.nan)
+    size = (state.image_sweep_window, state.image_frequency_window)
+    radius = tuple(value // 2 for value in size)
+    sigma = (state.image_sweep_sigma, state.image_frequency_sigma)
+    for row in range(0, values.shape[0], _IMAGE_TILE_SIZE):
+        for column in range(0, values.shape[1], _IMAGE_TILE_SIZE):
+            _cancel(cancelled)
+            end_row = min(row + _IMAGE_TILE_SIZE, values.shape[0])
+            end_column = min(column + _IMAGE_TILE_SIZE, values.shape[1])
+            lo_row, hi_row = max(0, row - radius[0]), min(values.shape[0], end_row + radius[0])
+            lo_column, hi_column = max(0, column - radius[1]), min(values.shape[1], end_column + radius[1])
+            block = domain[lo_row:hi_row, lo_column:hi_column]
+            present = valid[lo_row:hi_row, lo_column:hi_column]
+            if not np.any(present):
+                continue
+            if state.image_filter == "median":
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)  # entirely missing windows
+                    filtered = vectorized_filter(np.where(present, block, np.nan), np.nanmedian,
+                        size=size, mode="constant", cval=np.nan, batch_memory=4 * 1024**2)
+            else:
+                numerator = gaussian_filter(np.where(present, block, 0.), sigma,
+                    radius=radius, mode="constant", cval=0.)
+                denominator = gaussian_filter(present.astype(float), sigma,
+                    radius=radius, mode="constant", cval=0.)
+                filtered = np.divide(numerator, denominator, out=np.full(block.shape, np.nan),
+                                     where=denominator > 0)
+            core = (slice(row - lo_row, end_row - lo_row),
+                    slice(column - lo_column, end_column - lo_column))
+            output[row:end_row, column:end_column] = filtered[core]
+    output[~valid] = np.nan
+    _cancel(cancelled)
+    if state.view == "removed":
+        return domain - output, "W" if unit == "dBm" else unit
+    if unit == "dBm":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            output = 10 * np.log10(output) + 30.
+        output[~np.isfinite(output)] = np.nan
+    return output, unit
+
+
 def analyse_map(values, *, unit, frequencies_hz, coordinate_values, frequency_axis,
-                state=MapProcessing(), line_input_dbm=None, cancelled=None):
+                state=None, line_input_dbm=None, cancelled=None):
     """Operate on an already selected slice; transpose support is explicit.
 
     Subtracting additive components uses W, while median_db deliberately returns
-    a relative dB ratio. Missing/under-supported bins stay gaps, never zeros.
+    a relative dB ratio. Image denoising follows both map operations; its removed
+    preview is the signed difference across that stage, in W for dBm input.
+    Missing/under-supported bins stay gaps, never zeros. Input bypasses all
+    filters even when they would be inapplicable to the selected plane.
     """
+    if state is None:
+        state = MapProcessing()
     matrix = np.asarray(values, dtype=float)
     if matrix.ndim != 2 or frequency_axis not in {0, 1}:
         raise ValueError("Map analysis requires Frequency on exactly one map axis.")
@@ -151,6 +232,8 @@ def analyse_map(values, *, unit, frequencies_hz, coordinate_values, frequency_ax
     if np.any(np.isinf(rows)):
         rows = np.where(np.isfinite(rows), rows, np.nan)
     _cancel(cancelled)
+    if state.view == "input":
+        state = replace(state, component="none", mask_lines=False, image_filter="none")
     notes = []
     finite_rows = int(np.count_nonzero(np.any(np.isfinite(rows), axis=1)))
     minimum = max(3, math.ceil(rows.shape[0] * state.minimum_coverage))
@@ -207,6 +290,22 @@ def analyse_map(values, *, unit, frequencies_hz, coordinate_values, frequency_ax
         mask = _stationary_lines(line_source, f, state, minimum, cancelled)
         output[:, mask] = np.nan
         notes.append(f"{np.count_nonzero(mask)} stationary narrow frequency bins classified on recorded raw dBm and masked as gaps; no interpolation.")
+    if state.view == "removed" and state.image_filter == "none":
+        raise ValueError("Enable a 2D image denoising filter to inspect removed noise.")
+    if state.image_filter != "none" and state.view != "component":
+        image_unit = output_unit
+        output, output_unit = _smooth_image(output, output_unit, state, cancelled)
+        notes.append(f"2D image {state.image_filter}: {state.image_frequency_window} frequency bins x "
+                     f"{state.image_sweep_window} sweep points; grid windows count samples, not uniform physical spacing. "
+                     "Missing neighbours excluded, edge windows truncated; original gaps preserved. Smoothing can broaden or suppress real signal.")
+        if state.image_filter == "gaussian":
+            notes.append(f"Gaussian sigma: {state.image_frequency_sigma:g} frequency bins x "
+                         f"{state.image_sweep_sigma:g} sweep points; support limited to the selected windows.")
+        if image_unit == "dBm":
+            notes.append("Absolute dBm image values filtered in W, then returned to dBm; removed noise is a signed W difference.")
+        if state.view == "removed":
+            notes.append(f"Removed noise preview ({output_unit}): input to the 2D stage minus its result; "
+                         "includes removed signal and is not an independent noise estimate.")
     if state.view == "input":
         output, output_unit = rows, unit
     elif state.view == "component":

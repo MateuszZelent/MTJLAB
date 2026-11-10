@@ -28,16 +28,8 @@ from app.domain.quantities import (
     format_quantity_auto,
     parse_quantity,
 )
+from app.spectrum.processing import REFERENCE_OPERATIONS
 from app.ui.dialogs import StationDialog
-
-REFERENCE_OPERATIONS = (
-    ("Choose an operation", "none"),
-    ("Subtract [dB]", "difference_db"),
-    ("Divide [ratio]", "ratio_linear"),
-    ("Add power [dBm]", "add_power"),
-    ("Subtract power [dBm]", "subtract_power"),
-    ("Multiply [mW²]", "multiply_linear"),
-)
 
 
 class SpectrumCorrectionControls(CardWidget):

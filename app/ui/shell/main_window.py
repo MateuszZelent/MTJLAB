@@ -505,10 +505,18 @@ class MainWindow(FluentWindow):
             self.rigol_page.configuration_review_snapshot_for,
         )
         self.recipe_page.parameter_snapshot_provider = self.moke_box_page.field_workflow.quick_control_drafts
+        self.recipe_page.set_device_comparison_extras(
+            "moke_box", self.moke_box_page.field_workflow.configuration_comparison_values,
+        )
         self.recipe_page.set_anritsu_snapshot_provider(
             self.anritsu_page.configuration_panel.configuration_snapshot,
             self.anritsu_page.advanced_settings_snapshot,
         )
+        self.recipe_page.set_device_comparison_extras("anritsu", lambda _channel: {
+            "average_count": self.anritsu_page.average_count.value(),
+            "reference_average_count": self.anritsu_page.reference_average_count.value(),
+            "reference_operation": self.anritsu_page.reference_operation.currentData(),
+        })
         self.recipe_page.set_anritsu_sg_snapshot_provider(
             self.anritsu_page.signal_generator_snapshot
         )

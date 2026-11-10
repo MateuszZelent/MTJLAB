@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
@@ -32,16 +32,16 @@ from app.storage import (
     ThatecRunReader,
     read_pythat_run_data,
 )
+from app.storage.heatmap_analysis_store import read_heatmap_analysis
 from app.ui.results.data_classifier import find_heatmap_rows
 from app.ui.results.file_browser import FileBrowserPanel
 from app.ui.results.heatmap_tab import HeatmapResultsTab
 from app.ui.results.metadata_panel import MetadataPanel
-from app.ui.results.spectrum_tab import SpectrumResultsTab
 from app.ui.results.scalar_tab import ScalarResultsTab
+from app.ui.results.spectrum_tab import SpectrumResultsTab
 from app.ui.results.state_card import ResultsStateCard
 from app.ui.results.sweep_tree_panel import SweepTreePanel
 from app.ui.results.workers import ResultReadTask
-from app.storage.heatmap_analysis_store import read_heatmap_analysis
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,12 +424,15 @@ class ResultsPage(QWidget):
             self.metadata_panel.show_device_state
         )
 
+        self._syncing_processing = False
+        self._reference_view_active = False
         self.spectrum_tab.processing_controls.changed.connect(
-            lambda state: self._sync_processing(self.heatmap_tab, state)
+            self._sync_processing
         )
         self.heatmap_tab.processing_controls.changed.connect(
-            lambda state: self._sync_processing(self.spectrum_tab, state)
+            self._sync_processing
         )
+        self.spectrum_tab.view_controls.changed.connect(self._sync_reference_view)
 
         # Cross-tab coordination: heatmap click → spectrum
         self.heatmap_tab.checkpoint_clicked.connect(
@@ -717,6 +720,7 @@ class ResultsPage(QWidget):
             self.metadata_panel.show_thatec_summary(payload.path, payload.thatec_run)
         self.metadata_panel.show_pythat(payload.pythat_data)
         self.scalar_tab.load(payload.path, payload.thatec_run, payload.points)
+        self._reference_view_active = False
         self.spectrum_tab.load(payload.path, payload.thatec_run, payload.points, references=payload.references)
         if find_heatmap_rows(payload.thatec_run):
             self._set_heatmap_visible(True)
@@ -755,11 +759,34 @@ class ResultsPage(QWidget):
             self.metadata_panel.pythat_button.setEnabled(True)
             self.metadata_panel.pythat_data.setPlainText(f"# PyThat inspection failed\n{message}")
 
-    @staticmethod
-    def _sync_processing(tab, state) -> None:
-        if tab.processing_controls.state != state:
-            tab.processing_controls.set_state(state)
-            tab._processing_changed(state)
+    def _sync_processing(self, state) -> None:
+        """Share the effective correction, including active Spectrum Compare."""
+        if self._syncing_processing:
+            return
+        self._syncing_processing = True
+        try:
+            view = self.spectrum_tab.view_controls
+            view_changed = view.set_reference_processing(state)
+            self._reference_view_active = view.state.show_reference
+            for tab in (self.spectrum_tab, self.heatmap_tab):
+                changed = tab.processing_controls.state != state
+                if changed:
+                    tab.processing_controls.set_state(state)
+                if changed or tab is self.spectrum_tab and view_changed:
+                    tab._processing_changed(state)
+        finally:
+            self._syncing_processing = False
+
+    def _sync_reference_view(self, view) -> None:
+        if self._syncing_processing:
+            return
+        processing = self.spectrum_tab.processing_controls.state
+        if view.show_reference:
+            self._sync_processing(view.reference_processing(processing))
+        elif self._reference_view_active:
+            self._sync_processing(replace(processing, operation="none",
+                                          reference_index=None, reference_sweep=None))
+        self._reference_view_active = self.spectrum_tab.view_controls.state.show_reference
 
     def closeEvent(self, event) -> None:
         if not self.shutdown():

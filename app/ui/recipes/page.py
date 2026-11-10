@@ -537,6 +537,14 @@ class RecipePage(QWidget):
             shortcut=QKeySequence.StandardKey.Redo,
         )
         self.recipe_command_bar.addSeparator()
+        self.all_device_settings_action = command_action(
+            "All device settings",
+            QStyle.StandardPixmap.SP_FileDialogDetailedView,
+            self._open_all_device_settings,
+        )
+        self.all_device_settings_action.setToolTip(
+            "Compare every device setting and sweep axis with the matching device tab"
+        )
         self.compile_recipe_action = command_action(
             "Validate & preview",
             QStyle.StandardPixmap.SP_DialogApplyButton,
@@ -960,6 +968,7 @@ class RecipePage(QWidget):
             self.undo_tree_action,
             self.redo_tree_action,
             self.compile_recipe_action,
+            self.all_device_settings_action,
         )
         self.load_editor(show_error=False)
 
@@ -2171,6 +2180,12 @@ class RecipePage(QWidget):
 
         self._anritsu_snapshot_provider = provider
         self._anritsu_advanced_snapshot_provider = advanced_provider
+
+    def set_device_comparison_extras(self, device: str, provider) -> None:
+        """Add read-only values for device-tab controls outside its basic snapshot."""
+        if not hasattr(self, "_device_comparison_extras"):
+            self._device_comparison_extras = {}
+        self._device_comparison_extras[device] = provider
 
     def set_anritsu_sg_snapshot_provider(self, provider: object) -> None:
         """Bind read-only access to the manual Anritsu SG form state."""
@@ -5003,6 +5018,10 @@ class RecipePage(QWidget):
                 and location[4]
             ),
         )
+        device = next((name for name in ("keithley", "rigol", "anritsu_sg", "anritsu", "moke_box")
+                       if name in node.type), None)
+        if device is not None and node.type.startswith(("configure_", "update_", "set_", "enable_", "ramp_", "stop_")):
+            self._bind_recipe_review(dialog, node, device)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         replacement = self._node_to_mapping(node)
@@ -5024,6 +5043,7 @@ class RecipePage(QWidget):
 
     def _edit_final_state(self, node: RecipeNode | None = None) -> None:
         from app.ui.recipes.final_state_dialog import FinalStateDialog
+        from app.ui.recipes.final_state_validation import validate_final_state_edit
         node_id = node.id if node is not None else self._new_node_id("final-state")
         source = self._builder_source()
 
@@ -5038,7 +5058,7 @@ class RecipePage(QWidget):
             return add_recipe_node(source, parent_id="__finally__", branch="children", node=replacement)
 
         def validate(fields):
-            RecipeCompiler(self._settings).compile(parse_recipe_text(edited_source(fields)))
+            validate_final_state_edit(self._settings, parse_recipe_text(edited_source(fields)), node_id)
 
         initial = dict(node.data) if node is not None else None
         if node is not None and node.type == "stop_moke_voltage":
@@ -5452,6 +5472,162 @@ class RecipePage(QWidget):
             source, f"Updated ROI for {parameter_id} in {node.id}"
         )
 
+    def _open_all_device_settings(self) -> None:
+        """Review all authored settings and axes without compiling or executing."""
+        from app.recipes.parameter_overview import build_sweep_parameter_entries
+        from app.ui.recipes.parameter_overview_dialog import SweepParameterOverviewDialog
+
+        try:
+            recipe = parse_recipe_text(self._builder_source(), origin=self.path.text())
+            entries = build_sweep_parameter_entries(recipe, self._device_tab_comparison_values)
+        except (ConfigurationError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, "All device settings", str(exc))
+            return
+        dialog = SweepParameterOverviewDialog(recipe.name, entries, self)
+        requested = []
+        if hasattr(dialog, "source_requested"):
+            dialog.source_requested.connect(requested.append)
+        dialog.exec()
+        if requested and requested[-1] in self._recipe_node_locations():
+            self._select_source_node(requested[-1])
+
+    def _device_tab_comparison_values(self, device: str, channel=None) -> dict:
+        """Read the actual form draft for the requested tab/channel without I/O."""
+        if device == "anritsu":
+            values = self._anritsu_comparison_values()
+            basic = self._review_snapshot(self._anritsu_snapshot_provider)
+            advanced = self._review_snapshot(getattr(self, "_anritsu_advanced_snapshot_provider", None))
+            if basic is not None:
+                values["spectrum.points"] = basic.points
+            if advanced is not None:
+                values["advanced.preamplifier_enabled"] = advanced.preamplifier_enabled
+            provider = getattr(self, "_device_comparison_extras", {}).get(device)
+            if callable(provider):
+                values.update(provider(channel))
+            return values
+        if device == "anritsu_sg":
+            snapshot = self._review_snapshot(self._anritsu_sg_snapshot_provider)
+            return {} if snapshot is None else {
+                "frequency": f"{snapshot.frequency_hz:.12g} Hz",
+                "power": f"{snapshot.power_dbm:.12g} dBm", "output_enabled": snapshot.output_enabled,
+            }
+        if device == "moke_box":
+            provider = getattr(self, "parameter_snapshot_provider", None)
+            values = provider() if callable(provider) else {}
+            voltage = values.get(f"moke_box.vout{channel}.voltage")
+            result = {"voltage": voltage} if voltage is not None else {}
+            extras = getattr(self, "_device_comparison_extras", {}).get(device)
+            if callable(extras):
+                result.update(extras(channel))
+            return result
+        if device == "keithley" and channel in {"A", "B"}:
+            snapshot = self._keithley_snapshot_for(channel)
+        elif device == "rigol" and channel in {1, 2, "1", "2"}:
+            snapshot = self._rigol_snapshot_for(int(channel))
+        else:
+            snapshot = None
+        if snapshot is None:
+            return {}
+        values = {key: getattr(snapshot, key) for key in snapshot.__dataclass_fields__}
+        for field in ("source_range", "measure_voltage_range", "measure_current_range"):
+            if values.get(field.replace("_range", "_autorange")):
+                values[field] = "AUTO"
+        return values
+
+    def _bind_recipe_review(self, dialog, node: RecipeNode, device: str) -> None:
+        """Bind a configuration review to the document it will actually execute."""
+        from app.recipes.configuration_context import configuration_before
+
+        recipe = parse_recipe_text(self._builder_source())
+        cache = {}
+
+        def selected_channel():
+            channel = None
+            if hasattr(dialog, "_editors"):
+                editor = dialog._editors.get("channel")
+                channel = (editor[0].currentData() if editor[1] == "choice" else editor[0].text()) if editor else node.data.get("channel")
+            elif device == "keithley":
+                channel = dialog.channel.currentText()
+            elif device == "rigol":
+                channel = dialog.selected_channel()
+            return channel
+
+        def context():
+            channel = selected_channel()
+            if channel not in cache:
+                cache[channel] = configuration_before(recipe, node.id, device, channel)
+            return cache[channel]
+
+        def device_values():
+            return self._device_tab_comparison_values(device, selected_channel())
+
+        if hasattr(dialog, "set_recipe_context"):
+            dialog.set_recipe_context(context, device_values)
+        else:
+            review = dialog.review
+            review.table.set_recipe_context(context, device_values)
+            review.toggle.setChecked(True)
+            review.baseline_note.setText(
+                "Compare sweep targets with the current settings in the matching device tab. "
+                "Recipe context shows any additional changes introduced by earlier blocks. "
+                "This comparison does not communicate with the instrument."
+            )
+
+    def _bind_recipe_axis_review(self, dialog, node: RecipeNode) -> None:
+        """Expose inherited configuration alongside a legacy sweep's ROI."""
+        from app.recipes.configuration_context import configuration_before
+        from app.ui.recipes.configuration_comparison import ConfigurationComparisonRow
+
+        recipe = parse_recipe_text(self._builder_source())
+
+        def endpoint():
+            target = str(dialog.definition.get("target", ""))
+            parts = target.split(".", 2)
+            if len(parts) != 3:
+                return None, None, None
+            device, channel, field = parts
+            if device == "anritsu" and channel == "sg":
+                device = "anritsu_sg"
+            if device == "moke_box":
+                channel = channel.removeprefix("vout")
+            if device == "keithley":
+                field = "source_level" if field in {"current", "voltage", "level"} else field
+            return device, channel, field
+
+        def context():
+            device, channel, field = endpoint()
+            if device is None:
+                return {}
+            values = configuration_before(recipe, node.id, device, channel)
+            return {**values, **({"axis": values[field]} if field in values else {})}
+
+        def device_values():
+            device, channel, field = endpoint()
+            values = self._device_tab_comparison_values(device, channel)
+            return {**values, **({"axis": values[field]} if field in values else {})}
+
+        table = dialog.review.table
+        rows = list(table.rows)
+        table.set_recipe_context(context, device_values)
+        axis_field = str(dialog.definition.get("target", "")).rsplit(".", 1)[-1]
+        if str(dialog.definition.get("target", "")).startswith("keithley."):
+            axis_field = "source_level" if axis_field in {"current", "voltage", "level"} else axis_field
+        rows.extend(ConfigurationComparisonRow(key, key.replace("_", " ").capitalize(),
+                    None, "", "Preserve") for key in sorted(context().keys() | device_values().keys())
+                    if key not in {"axis", axis_field, "channel", "output_policy"})
+        table.set_rows(rows)
+        dialog.review.toggle.setChecked(True)
+        dialog.review.baseline_note.setText(
+            "Compare this sweep axis and all preserved device settings with the matching device tab. "
+            "Recipe context lists any additional changes made by earlier blocks."
+        )
+        source_range = context().get("source_range")
+        if source_range is not None:
+            value = "unknown" if source_range.varying else source_range.value
+            dialog.review.baseline_note.setText(
+                f"Source range: {value} (from {source_range.source}). " + dialog.review.baseline_note.text()
+            )
+
     def _edit_keithley_module_node(self, node: RecipeNode) -> None:
         snapshot = self._current_keithley_snapshot()
         configuration = node.data.get("configuration")
@@ -5481,6 +5657,7 @@ class RecipePage(QWidget):
         dialog.load_plan_actions(
             actions, str(node.data.get("output_policy", "unchanged"))
         )
+        self._bind_recipe_review(dialog, node, "keithley")
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
@@ -5533,6 +5710,7 @@ class RecipePage(QWidget):
             self._settings, self, snapshot=snapshot,
             current_values=self._anritsu_comparison_values(),
         )
+        self._bind_recipe_review(dialog, node, "anritsu")
         dialog.load_plan_actions(
             actions,
             acquire_single=bool(node.data.get("acquire_single", False)),
@@ -5624,6 +5802,7 @@ class RecipePage(QWidget):
             parameter_actions=actions,
             output_policy=str(node.data.get("output_policy", "unchanged")),
         )
+        self._bind_recipe_review(dialog, node, "anritsu_sg")
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
@@ -5674,6 +5853,7 @@ class RecipePage(QWidget):
             parameter_actions=actions,
             output_policy=str(node.data.get("output_policy", "unchanged")),
         )
+        self._bind_recipe_review(dialog, node, "rigol")
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
@@ -5813,7 +5993,10 @@ class RecipePage(QWidget):
             nplc=str(node.data.get("nplc", "1")),
             settling_time=str(node.data.get("settle_time", node.data.get("settling_time", preserved_settling))),
             sense_mode=str(node.data.get("sense_mode", "2wire")),
-            source_autorange=bool(node.data.get("source_autorange", False)),
+            source_autorange=bool(node.data.get(
+                "source_autorange", False if mode == "measure_only" else
+                self._settings.keithley.safety.channels[channel].defaults.get("source_autorange", False)
+            )),
             source_range=str(node.data.get("source_range", "Select range")),
             measure_voltage_autorange=bool(
                 node.data.get("measure_voltage_autorange", True)
@@ -5834,6 +6017,7 @@ class RecipePage(QWidget):
             full_configuration=True,
             programmed_fields={field_names[key] for key in node.data if key in field_names},
         )
+        self._bind_recipe_review(dialog, node, "keithley")
         for selector in dialog.parameter_selectors.values():
             index = selector.findData("set")
             if index >= 0:
@@ -5903,6 +6087,7 @@ class RecipePage(QWidget):
             programmed_fields=set(node.data),
             current_snapshot_resolver=getattr(self, "_rigol_review_snapshot_provider", None),
         )
+        self._bind_recipe_review(dialog, node, "rigol")
         dialog.output_policy.setEnabled(False)
         dialog.output_policy.setToolTip(
             "Configuration forces this channel OUTPUT OFF. Add a separate OUTPUT ON action if required."
@@ -5992,6 +6177,7 @@ class RecipePage(QWidget):
         dialog.load_plan_actions(
             actions, acquire_single=False, trace=str(node.data.get("trace", "TRAC1"))
         )
+        self._bind_recipe_review(dialog, node, "anritsu")
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
@@ -7050,6 +7236,7 @@ class RecipePage(QWidget):
         # Editing ROI owns only the point list. Device configuration and Wait
         # nodes have their own editors, even in older generated recipes.
         dialog = SweepGeneratorDialog(definition, self, initial_segments=segments)
+        self._bind_recipe_axis_review(dialog, node)
         dialog.select_interval(stage_index)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return

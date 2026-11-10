@@ -230,6 +230,21 @@ class MokeFieldWorkflow(QObject):
         drafts[target] = text
         return drafts
 
+    def configuration_comparison_values(self, channel=None):
+        """Read the displayed authoring values, without qualifying hardware limits."""
+        channel = self._selected_channel() if channel is None else channel
+        if channel == self._selected_channel():
+            return {"voltage": self.target.text(),
+                    "minimum_voltage": self.configuration_panel.minimum_text,
+                    "maximum_voltage": self.configuration_panel.maximum_text,
+                    "settling_time": self.manual_settling.text()}
+        if channel not in range(8):
+            return {}
+        values = self._channel_drafts.get(channel, self._channel_defaults(channel))
+        minimum, maximum, settling, voltage = values
+        return {"voltage": voltage, "minimum_voltage": minimum, "maximum_voltage": maximum,
+                "settling_time": settling}
+
     def voltage_step_text(self, channel):
         return self._channel_steps.get(channel, "1 mV")
 

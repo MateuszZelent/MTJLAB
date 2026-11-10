@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.exporters import ImageExporter, SVGExporter
 from PySide6.QtCore import QEvent, QSize, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -16,10 +15,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import BodyLabel, FlowLayout, TransparentPushButton, isDarkTheme
-from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.ui.design_system import plot_theme, tokens_for
-from app.ui.widgets.plot_ownership import create_plot_widget, own_signal_proxy
+from app.ui.design_system.paper_plot_style import PAPER_STYLE
+from app.ui.dialogs import StationFileDialog as QFileDialog
+from app.ui.widgets.plot_ownership import (
+    create_plot_widget,
+    own_signal_proxy,
+    set_plot_export_action,
+)
+from app.ui.widgets.plot_style import apply_scientific_style
 
 
 class SpectrumPlotWidget(QWidget):
@@ -83,7 +88,7 @@ class SpectrumPlotWidget(QWidget):
             ("Max hold", "Toggle a maximum hold of the primary trace", self.toggle_max_hold),
             ("Min hold", "Toggle a minimum hold of the primary trace", self.toggle_min_hold),
             ("Clear hold", "Clear maximum and minimum hold traces", self.clear_holds),
-            ("Export", "Export visible traces to CSV, PNG or SVG", self.export),
+            ("Export", f"{PAPER_STYLE.description}. Export visible traces to CSV, PNG or SVG.", self.export),
         )
         if compact_toolbar:
             actions = tuple(action for action in actions if action[0] in {"Reset", "Peak", "Export"})
@@ -103,6 +108,7 @@ class SpectrumPlotWidget(QWidget):
         root.addLayout(toolbar)
 
         self.plot = create_plot_widget(factory=plot_widget_factory)
+        set_plot_export_action(self.plot, self.export)
         self.plot.setBackground(None)
         self.plot.showGrid(x=True, y=True, alpha=0.18)
         self.plot.setLabel("bottom", "Frequency", units="Hz")
@@ -168,7 +174,8 @@ class SpectrumPlotWidget(QWidget):
         y: str = "Power",
         y_unit: str = "dBm",
     ) -> None:
-        if x_unit != self._x_unit or y_unit != self._y_unit:
+        units_changed = x_unit != self._x_unit or y_unit != self._y_unit
+        if units_changed:
             self.clear_holds()
         self._x_label = x
         self._x_unit = x_unit
@@ -176,6 +183,8 @@ class SpectrumPlotWidget(QWidget):
         self._last_readout_position = None
         self.plot.setLabel("bottom", x, units=x_unit)
         self.plot.setLabel("left", y, units=y_unit)
+        if units_changed:
+            apply_scientific_style(self.plot.plotItem, self._theme_name)
 
     def set_title(self, title: str) -> None:
         if title != self._plot_title:
@@ -201,21 +210,14 @@ class SpectrumPlotWidget(QWidget):
         self._theme_name = theme
         palette = plot_theme(tokens_for(theme))
         self.plot.setBackground(palette.background)
-        for axis in ("left", "bottom"):
-            item = self.plot.getAxis(axis)
-            item.setPen(pg.mkPen(palette.axes))
-            item.setTextPen(pg.mkPen(palette.axes))
-        legend = self.plot.getPlotItem().legend
-        if legend is not None:
-            legend.setLabelTextColor(palette.axes)
+        apply_scientific_style(self.plot.plotItem, theme)
         self.crosshair_x.setPen(pg.mkPen(palette.grid, width=1))
         self.crosshair_y.setPen(pg.mkPen(palette.grid, width=1))
         self.marker.setPen(pg.mkPen(palette.reference, width=2))
         self.delta_marker.setPen(pg.mkPen(palette.reference, width=2))
         self._style_peak_markers()
         self.replacement_markers.setPen(pg.mkPen(palette.reference))
-        tokens = tokens_for(theme)
-        danger_color = tokens.danger
+        danger_color = palette.danger
         self.compliance_markers.setPen(pg.mkPen(danger_color, width=1.5))
         self.compliance_markers.setBrush(pg.mkBrush(danger_color))
         for name in self._token_owned_primary_curves:
@@ -223,8 +225,8 @@ class SpectrumPlotWidget(QWidget):
             if curve is not None:
                 curve.setPen(pg.mkPen(palette.measurement, width=self._trace_line_width(name)))
         for name, color in (
-            ("Max hold", tokens_for(theme).danger),
-            ("Min hold", tokens_for(theme).success),
+            ("Max hold", palette.danger),
+            ("Min hold", palette.success),
         ):
             curve = self._curves.get(name)
             if curve is not None:
@@ -388,8 +390,7 @@ class SpectrumPlotWidget(QWidget):
         if x_clean.size == 0:
             self.compliance_markers.clear()
             return
-        tokens = tokens_for(self._theme_name)
-        danger_color = tokens.danger
+        danger_color = plot_theme(tokens_for(self._theme_name)).danger
         self.compliance_markers.setData(
             x=x_clean,
             y=y_clean,
@@ -511,7 +512,7 @@ class SpectrumPlotWidget(QWidget):
     @staticmethod
     def _stable_data_range(values: np.ndarray, *, zero_margin: float = 1.0,
                            constant_relative: bool = False) -> tuple[float, float] | None:
-        """Return a fixed five-percent margin around finite values."""
+        """Return the paper style's fixed margin around finite values."""
 
         finite = values[np.isfinite(values)]
         if finite.size == 0:
@@ -519,11 +520,11 @@ class SpectrumPlotWidget(QWidget):
         lower = float(np.min(finite))
         upper = float(np.max(finite))
         if lower == upper:
-            margin = abs(lower) * 0.05 if lower != 0 else zero_margin
+            margin = abs(lower) * PAPER_STYLE.number("axes.ymargin") if lower != 0 else zero_margin
             if not constant_relative:
                 margin = max(margin, zero_margin)
         else:
-            margin = (upper - lower) * 0.05
+            margin = (upper - lower) * PAPER_STYLE.number("axes.ymargin")
         return lower - margin, upper + margin
 
     def peak_search(self) -> None:
@@ -553,10 +554,10 @@ class SpectrumPlotWidget(QWidget):
         self._marker_changed()
 
     def toggle_max_hold(self) -> None:
-        self._toggle_hold("Max hold", tokens_for(self._theme_name).danger)
+        self._toggle_hold("Max hold", plot_theme(tokens_for(self._theme_name)).danger)
 
     def toggle_min_hold(self) -> None:
-        self._toggle_hold("Min hold", tokens_for(self._theme_name).success)
+        self._toggle_hold("Min hold", plot_theme(tokens_for(self._theme_name)).success)
 
     def clear_holds(self) -> None:
         self._max_hold = None
@@ -572,16 +573,56 @@ class SpectrumPlotWidget(QWidget):
             return
         suffix = Path(path).suffix.lower()
         try:
-            if "PNG" in selected or suffix == ".png":
-                ImageExporter(self.plot.plotItem).export(path)
-            elif "SVG" in selected or suffix == ".svg":
-                SVGExporter(self.plot.plotItem).export(path)
+            if suffix in {".png", ".svg"} or "PNG" in selected or "SVG" in selected:
+                self._export_figure(path)
             else:
                 self._export_csv(Path(path))
         except Exception as exc:
             self.status_changed.emit(f"Spectrum export failed: {exc}")
             return
         self.status_changed.emit(f"Spectrum exported to {path}")
+
+    def _export_figure(self, path):
+        from app.ui.widgets.figure_export import export_spectrum_figure
+
+        traces = []
+        for name, (x, y) in self._traces.items():
+            curve = self._curves.get(name)
+            if curve is not None and curve.isVisible():
+                pen = pg.mkPen(curve.opts["pen"])
+                traces.append({"name": self._legend_labels.get(name, name), "x": x, "y": y,
+                               "color": pen.color().name(), "width": pen.widthF(),
+                               "symbol": curve.opts.get("symbol"), "symbol_size": curve.opts.get("symbolSize", 6)})
+        markers = []
+        marker_pairs = [(self.marker, "M1"), (self.delta_marker, "Δ")]
+        marker_pairs.extend((line, name) for name, line in getattr(self, "frequency_markers", {}).items())
+        for line, label in marker_pairs:
+            if line.isVisible():
+                markers.append({"position": float(line.value()), "label": label,
+                                "color": line.pen.color().name()})
+        band = (tuple(self.band.getRegion()) if getattr(self, "band_enabled", None) is not None
+                and self.band_enabled.isChecked() else None)
+        points = []
+        for item in (self.peak_markers, self.replacement_markers, self.compliance_markers):
+            if item.isVisible():
+                groups = {}
+                for point in item.points():
+                    symbol = point.symbol()
+                    # Open crosses are drawn entirely by their pen.
+                    paint = point.pen() if symbol in {"x", "+"} else point.brush()
+                    key = (paint.color().name(), symbol, point.size())
+                    group = groups.setdefault(key, {"x": [], "y": [], "color": key[0],
+                                                    "symbol": key[1], "size": key[2]})
+                    group["x"].append(point.pos().x())
+                    group["y"].append(point.pos().y())
+                points.extend(groups.values())
+        return export_spectrum_figure(path, traces=traces, view_ranges=self.plot.viewRange(),
+            x_label=self._x_label, x_unit=self._x_unit,
+            y_label=self.plot.getAxis("left").labelText, y_unit=self._y_unit,
+            title=self.plot.plotItem.titleLabel.item.toPlainText(), markers=markers, band=band, points=points,
+            log_mode=(self.plot.plotItem.ctrl.logXCheck.isChecked(), self.plot.plotItem.ctrl.logYCheck.isChecked()),
+            inverted_axes=(bool(self.plot.getViewBox().state["xInverted"]),
+                           bool(self.plot.getViewBox().state["yInverted"])))
 
     def _export_csv(self, path: Path) -> None:
         visible = [
@@ -623,9 +664,10 @@ class SpectrumPlotWidget(QWidget):
         self.status_changed.emit(f"{name} enabled")
 
     def _update_holds(self, x_values: np.ndarray, y_values: np.ndarray) -> None:
+        palette = plot_theme(tokens_for(self._theme_name))
         for name, operation, attribute, color in (
-            ("Max hold", np.fmax, "_max_hold", tokens_for(self._theme_name).danger),
-            ("Min hold", np.fmin, "_min_hold", tokens_for(self._theme_name).success),
+            ("Max hold", np.fmax, "_max_hold", palette.danger),
+            ("Min hold", np.fmin, "_min_hold", palette.success),
         ):
             curve = self._curves.get(name)
             if curve is None or not curve.isVisible():

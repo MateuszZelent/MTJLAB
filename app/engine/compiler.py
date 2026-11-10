@@ -336,6 +336,45 @@ class RecipeCompiler:
             return False
         return False
 
+    def _validate_rigol_axis_point(self, binding, value: Quantity, node_id: str) -> None:
+        """Validate a semantic ROI against the complete incoming carrier.
+
+        Providers emit quantized payloads directly rather than going through
+        _compile_action. Check the requested value as well as its hardware
+        representation so rounding cannot conceal an out-of-limit request.
+        """
+        channel = int(binding.endpoint)
+        baseline = self._planned_rigol_configs.get(channel)
+        if baseline is None:
+            raise ConfigurationError(f"{node_id}: Rigol sweep requires an explicit carrier baseline.")
+        if not self._settings.rigol.safety.channels[str(channel)].enabled:
+            raise SafetyViolation(f"{node_id}: Rigol CH{channel} is disabled.")
+        value.require_dimension(binding.dimension)
+        parameter = binding.target.rsplit(".", 1)[-1]
+        high, low = baseline.high_level_v, baseline.low_level_v
+        frequency_hz = baseline.frequency_hz
+        if parameter == "frequency":
+            if baseline.waveform.upper() in {"DC", "NOIS"}:
+                raise ConfigurationError(f"{node_id}: {baseline.waveform} has no carrier-frequency axis.")
+            frequency_hz = value.si_value
+        elif parameter == "high_level":
+            high = value.si_value
+        elif parameter == "low_level":
+            low = value.si_value
+        elif parameter == "amplitude":
+            offset = (high + low) / 2
+            high, low = offset + value.si_value / 2, offset - value.si_value / 2
+        elif parameter == "offset":
+            amplitude = high - low
+            high, low = value.si_value + amplitude / 2, value.si_value - amplitude / 2
+        self._compile_rigol({
+            "channel": channel, "waveform": baseline.waveform,
+            "frequency": Quantity(frequency_hz, DIMENSION_FREQUENCY),
+            "high_level": Quantity(high, DIMENSION_VOLTAGE),
+            "low_level": Quantity(low, DIMENSION_VOLTAGE),
+            "output_load": baseline.output_load,
+        })
+
     def _semantic_axis_action(
         self,
         node: RecipeNode,
@@ -369,6 +408,8 @@ class RecipeCompiler:
             if request is not None and request.source_range_si is not None:
                 dimension = DIMENSION_CURRENT if request.mode == "current" else DIMENSION_VOLTAGE
                 physical_context[f"keithley.{binding.endpoint}.source_range"] = Quantity(request.source_range_si, dimension)
+        if binding.device_module == "rigol":
+            self._validate_rigol_axis_point(binding, value, node.id)
         compiled = provider.compile_point(provider_node, binding, value, physical_context, self._settings)
         axis_context = AxisPointContext(
             binding.axis_id,
@@ -657,6 +698,16 @@ class RecipeCompiler:
                 key = ("keithley", str(payload["request"].channel))
             elif kind == "configure_rigol":
                 key = ("rigol", str(payload["config"].channel))
+            elif kind == "configure_rigol_output":
+                output_key = ("rigol", str(payload["config"].channel))
+                if output_key not in configured:
+                    raise ConfigurationError(
+                        f"{action.node_id}: Rigol output-path configuration requires "
+                        "an earlier carrier configuration for this channel."
+                    )
+                # The adapter forces and confirms OUTPUT OFF for this operation.
+                output_enabled[output_key] = False
+                continue
             elif kind == "configure_anritsu_sg":
                 key = ("anritsu_sg", "RF")
             if key is not None:
@@ -836,6 +887,11 @@ class RecipeCompiler:
             "measurement.voltage_range": "measure_voltage_range",
             "measurement.current_range": "measure_current_range",
         }
+        range_autorange_fields = {
+            "source_range": "source_autorange",
+            "measure_voltage_range": "measure_voltage_autorange",
+            "measure_current_range": "measure_current_autorange",
+        }
         for action in parameter_actions:
             if str(action.get("mode", "")) != "set":
                 continue
@@ -845,7 +901,14 @@ class RecipeCompiler:
                 raise ConfigurationError(
                     f"{node_id}: unsupported Keithley parameter action {parameter_id!r}."
                 )
-            configure_data[target] = self._action_value(action, node_id, parameter_id)
+            value = self._action_value(action, node_id, parameter_id)
+            configure_data[target] = value
+            if target in range_autorange_fields:
+                # A selected range owns both the value and its AUTO/fixed policy.
+                # _compile_keithley still enforces the station source-policy lock.
+                configure_data[range_autorange_fields[target]] = (
+                    isinstance(value, str) and value.strip().upper() == "AUTO"
+                )
 
     def _apply_rigol_set_actions(
         self,
@@ -2876,6 +2939,10 @@ class RecipeCompiler:
             validate_rigol_waveform(channel=self._settings.rigol.safety.channels[str(channel)], safety=self._settings.rigol.safety,
                 waveform=config.waveform, frequency=config.frequency_hz, high_level=config.high_level_v,
                 low_level=config.low_level_v, output_load=config.output_load)
+            applied = self._quantize_rigol_config(config)
+            validate_rigol_waveform(channel=self._settings.rigol.safety.channels[str(channel)], safety=self._settings.rigol.safety,
+                waveform=applied.waveform, frequency=applied.frequency_hz, high_level=applied.high_level_v,
+                low_level=applied.low_level_v, output_load=applied.output_load)
             payload = {
                 "channel": config.channel,
                 "high_level_v": config.high_level_v,
@@ -3188,6 +3255,18 @@ class RecipeCompiler:
                     f"{node_id}: Rigol CH{channel} frequency {frequency_hz:g} Hz is "
                     f"outside the station range [{minimum:g}, {maximum:g}] Hz."
                 )
+        baseline = self._planned_rigol_configs.get(channel)
+        if baseline is None:
+            raise ConfigurationError(f"{node_id}: Rigol frequency update requires an earlier configuration for this channel.")
+        if baseline.waveform.upper() in {"DC", "NOIS"}:
+            raise ConfigurationError(f"{node_id}: {baseline.waveform} has no carrier-frequency axis.")
+        for candidate_hz in (frequency_hz, quantize_rigol_frequency(frequency_hz)):
+            validate_rigol_waveform(
+                channel=channel_settings, safety=self._settings.rigol.safety,
+                waveform=baseline.waveform, frequency=candidate_hz,
+                high_level=baseline.high_level_v, low_level=baseline.low_level_v,
+                output_load=baseline.output_load,
+            )
         return {"channel": channel, "frequency_hz": frequency_hz}
 
     def _compile_anritsu_advanced(

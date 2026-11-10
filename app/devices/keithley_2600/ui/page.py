@@ -1076,6 +1076,73 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             self.comparison.setMinimumHeight(140 if narrow else 180)
             self.comparison.setMaximumHeight(160 if narrow else 250)
 
+    def set_recipe_context(self, resolver, device_values=None) -> None:
+        """Compare saved targets with the corresponding device tab settings."""
+        self._recipe_context_resolver = resolver
+        self.comparison.set_recipe_context(resolver, device_values)
+        self.comparison_note.setText(
+            "Compare the saved sweep targets with the current settings in the matching Keithley "
+            "channel tab. Recipe context also shows values changed by earlier blocks. "
+            "Preserved fields are not programmed by this block. This comparison does not read the instrument."
+        )
+        self._recipe_comparison_note = self.comparison_note.text()
+        self._load_recipe_preserved_fields()
+        if not self._full_configuration:
+            for selector in self.parameter_selectors.values():
+                selector.currentIndexChanged.connect(self._refresh_recipe_field_visibility)
+            self._refresh_recipe_field_visibility()
+        self._refresh_comparison()
+
+    def _load_recipe_preserved_fields(self) -> None:
+        panel = self.configuration_panel
+        editors = {"source_level": panel.level, "compliance": panel.compliance,
+                   "nplc": panel.nplc, "settling_time": panel.settle,
+                   "source_range": panel.source_range, "source_autorange": panel.source_autorange,
+                   "measure_voltage_range": panel.measure_voltage_range,
+                   "measure_voltage_autorange": panel.measure_voltage_autorange,
+                   "measure_current_range": panel.measure_current_range,
+                   "measure_current_autorange": panel.measure_current_autorange,
+                   "sense_mode": panel.sense_mode}
+        rebased = {}
+        for row in tuple(self.comparison.rows):
+            if (row.action != "Preserve" or row.key not in editors or row.planned is None
+                    or row.planned in ("Keep existing value", "Depends on earlier execution")):
+                continue
+            editor = editors[row.key]
+            if isinstance(row.planned, bool):
+                editor.setChecked(row.planned)
+            elif row.key == "sense_mode":
+                editor.setCurrentText(str(row.planned))
+            else:
+                editor.setText(str(row.planned))
+            if self._full_configuration:
+                rebased[row.key] = getattr(self.configuration_snapshot(), row.key)
+        if rebased:
+            # Showing an inherited/tab value must not turn omission into a write.
+            self._initial_snapshot = replace(self._initial_snapshot, **rebased)
+
+    def _refresh_recipe_field_visibility(self, *_args) -> None:
+        """Inactive drafts are not controls for the effective execution value."""
+        if self._full_configuration:
+            return
+        panel = self.configuration_panel
+        fields = {
+            "source.level": (panel.form, (panel.level_field,)),
+            "source.compliance": (panel.form, (panel.compliance_field,)),
+            "measurement.nplc": (panel.form, (panel.nplc_field,)),
+            "measurement.settling_time": (panel.form, (panel.settle.parentWidget(),)),
+            "measurement.sense_mode": (panel.form, (panel.sense_mode,)),
+            "source.range": (panel.advanced_ranges_form, (panel.source_autorange, panel.source_range_field)),
+            "measurement.voltage_range": (panel.advanced_ranges_form, (panel.measure_voltage_autorange, panel.measure_voltage_range_field)),
+            "measurement.current_range": (panel.advanced_ranges_form, (panel.measure_current_autorange, panel.measure_current_range_field)),
+        }
+        for parameter, (form, widgets) in fields.items():
+            active = self.parameter_selectors[parameter].currentData() != "unchanged"
+            for widget in widgets:
+                form.setRowVisible(widget, True)
+                widget.setEnabled(active)
+        panel.source_autorange.setEnabled(False)
+
     def _refresh_comparison(self, *_args: object) -> None:
         if not hasattr(self, "_comparison_baselines"):
             return
@@ -1133,6 +1200,20 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             if baseline is not None and field.endswith("_range") and getattr(baseline, field.replace("_range", "_autorange")):
                 current = "AUTO"
             rows.append(ConfigurationComparisonRow(field, label, current, value, action))
+        if hasattr(self, "_recipe_context_resolver") and planned.source_mode in {"current", "voltage"}:
+            range_row = next(row for row in rows if row.key == "source_range")
+            mode_row = next(row for row in rows if row.key == "source_mode")
+            coupled = {f"measure_{planned.source_mode}_range"}
+            if (range_row.action in {"Set", "Sweep"} or mode_row.action == "Set"
+                    or any(row.key in coupled and row.action == "Set" for row in rows)):
+                rows = [replace(row, note="Retained measurement-range preference; see the effective range below.")
+                        if row.key in coupled else row for row in rows]
+                rows.append(ConfigurationComparisonRow(
+                    f"effective_measure_{planned.source_mode}_range",
+                    f"Effective measure {'I' if planned.source_mode == 'current' else 'V'} range",
+                    None, range_row.planned, "Derived",
+                    note="The effective numeric measurement range follows the source range; the saved preference is listed separately.",
+                ))
         policy = self.output_policy.currentData()
         selected = any(selector.currentData() != "unchanged" for selector in self.parameter_selectors.values())
         output = self.output_policy.currentText()
@@ -1146,6 +1227,13 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             "Output policy",
         ))
         self.comparison.set_rows(rows)
+        if hasattr(self, "_recipe_comparison_note"):
+            source_range = next(row for row in self.comparison.rows if row.key == "source_range")
+            self.comparison_note.setText(
+                f"Channel {planned.channel} · source range: {source_range.planned} "
+                f"({source_range.action}; {source_range.source}).\n"
+                + self._recipe_comparison_note
+            )
 
     def programmed_configuration_fields(self) -> set[str]:
         """Do not turn omitted recipe values into writes merely by opening Apply."""
@@ -1171,9 +1259,9 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             "measurement.nplc": snapshot.nplc,
             "measurement.settling_time": snapshot.settling_time,
             "measurement.sense_mode": snapshot.sense_mode,
-            "source.range": snapshot.source_range,
-            "measurement.voltage_range": snapshot.measure_voltage_range,
-            "measurement.current_range": snapshot.measure_current_range,
+            "source.range": "AUTO" if snapshot.source_autorange else snapshot.source_range,
+            "measurement.voltage_range": "AUTO" if snapshot.measure_voltage_autorange else snapshot.measure_voltage_range,
+            "measurement.current_range": "AUTO" if snapshot.measure_current_autorange else snapshot.measure_current_range,
         }
         actions: list[dict[str, object]] = [
             {
@@ -1364,6 +1452,10 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         self._active_selection = selection
         self.configuration_panel.load_snapshot(snapshot)
         self._source_mode_changed()
+        if hasattr(self, "_recipe_context_resolver"):
+            self._load_recipe_preserved_fields()
+            self._refresh_recipe_field_visibility()
+            self._refresh_comparison()
 
     def _validate(self) -> bool:
         snapshot = self.configuration_snapshot()

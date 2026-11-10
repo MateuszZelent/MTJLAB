@@ -167,7 +167,8 @@ def test_direct_baseline_overlays_and_subtraction_share_explicit_sample(repeat_a
         expected = session.reference_sweep(repeat_archive, collection, sweep)
         np.testing.assert_array_equal(trace.values, expected.powers_dbm)
     payload = read_private_view(session, point, ResultProcessing(),
-        replace(view, show_reference=True, show_background_spectrum=False))
+        replace(view, show_reference=True, show_background_spectrum=False,
+                reference_operation="subtract_reference_signed"))
     assert {trace.unit for trace in payload.traces} == {"W"}
     reference = session.reference_sweep(repeat_archive, 1, 3)
     raw = session.spectrum(repeat_archive, 0)

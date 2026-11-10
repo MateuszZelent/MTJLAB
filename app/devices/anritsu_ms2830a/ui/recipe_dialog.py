@@ -637,8 +637,8 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         self.open_roi_button.clicked.connect(self._open_roi)
         body.addWidget(self.open_roi_button)
         note = BodyLabel(
-            "The complete visible SG snapshot is stored and applied with RF OFF; "
-            "Unchanged still uses the visible value, Set exposes an explicit row, and "
+            "The visible SG snapshot is stored as an editing draft. Only selected Set / Sweep "
+            "fields are programmed; Unchanged preserves the earlier recipe value. "
             "Sweep defines the ROI axis. Safe ON configures and verifies with RF OFF "
             "before energizing. Continuous mode is accepted only after this recipe has "
             "already configured and confirmed RF OUTPUT ON."
@@ -670,7 +670,8 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         return [ConfigurationComparisonRow(
             key, label, values[key],
             (self.frequency if key == "sg.frequency" else self.power).text(),
-            "Sweep" if self.parameter_selectors[key].currentData() == "sweep" else "Set",
+            {"unchanged": "Preserve", "set": "Set", "sweep": "Sweep"}[
+                str(self.parameter_selectors[key].currentData())],
         ) for key, label, _ in self.parameter_specs]
 
     def _selected_sweep_parameter(self) -> str | None:

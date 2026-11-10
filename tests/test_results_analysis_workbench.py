@@ -30,7 +30,8 @@ def test_three_overlay_curves_subtract_in_power_and_preserve_signed_values(neste
     session = ResultReadSession(nested_archive)
     point = session.point(0)
     raw = session.spectrum(nested_archive, 0)
-    view = SpectrumView(show_analysis=False, show_raw=True, show_background=True, show_reference=True)
+    view = SpectrumView(show_analysis=False, show_raw=True, show_background=True, show_reference=True,
+                        reference_operation="subtract_reference_signed")
     if public:
         run = ThatecRunReader.describe(nested_archive)
         row = find_heatmap_rows(run)[0]
@@ -60,6 +61,9 @@ def test_recorded_markers_fixed_ranges_hold_float_and_export(nested_archive, she
     app = shell_qt_application
     tab = load_tab(app, nested_archive)
     try:
+        tab.view_controls.reference_operation.setCurrentIndex(
+            tab.view_controls.reference_operation.findData("subtract_reference_signed"))
+        tab.view_controls.boxes["show_raw"].setChecked(True)
         tab.view_controls.boxes["show_background"].setChecked(True)
         tab.view_controls.boxes["show_reference"].setChecked(True)
         wait_until(app, lambda: not tab._read_tasks)
@@ -103,7 +107,8 @@ def test_recorded_markers_fixed_ranges_hold_float_and_export(nested_archive, she
         assert "Raw − reference" in metadata["visible_traces"]
         assert metadata["hold_checkpoints"]["Max hold"] == [0, 1]
         assert {baseline["purpose"] for baseline in metadata["recorded_baselines"]} == {"background", "reference"}
-        tab.view_controls.unit.setCurrentIndex(tab.view_controls.unit.findData("dBm"))
+        tab.view_controls.reference_operation.setCurrentIndex(
+            tab.view_controls.reference_operation.findData("difference_db"))
         wait_until(app, lambda: not tab._read_tasks)
         assert plot._max_hold is None  # incompatible unit histories are discarded
         tab.view_controls.reset.click()

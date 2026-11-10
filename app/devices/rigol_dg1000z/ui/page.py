@@ -45,7 +45,7 @@ from app.safety.rigol_current import (
 from app.safety.quick_controls import quick_control_safety_bounds
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
-from app.ui.dialogs import StationMessageBox as QMessageBox
+from app.ui.dialogs import StationDialog, StationMessageBox as QMessageBox
 from app.ui.widgets import FluentTabView, LimitField, NotificationBanner, SpectrumPlotWidget
 from app.ui.workers import DeviceController
 
@@ -86,6 +86,33 @@ class _RigolUiOperation:
     purpose: str
     payload: object
     requested_output: bool | None = None
+
+
+class _RigolFloatingControlsWindow(StationDialog):
+    """Modeless host for the existing controls, with no second hardware writer."""
+
+    closed = Signal()
+
+    def __init__(self, panel: QWidget, parent: QWidget) -> None:
+        super().__init__(parent, resizable=True)
+        self.setObjectName("rigolFloatingControlsWindow")
+        self.setWindowTitle("Rigol DG1032Z — control")
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.use_modal_shell_content()
+        self.panel_layout = self.modal_content_layout(spacing=0)
+        self.panel_layout.setContentsMargins(0, 0, 0, 0)
+        self.panel_layout.addWidget(panel, 1)
+        self.resize(1440, 960)
+
+    def closeEvent(self, event) -> None:
+        self.closed.emit()
+        super().closeEvent(event)
+
+    def reject(self) -> None:
+        # Escape uses QDialog.reject() without delivering a close event.
+        self.closed.emit()
+        super().reject()
 
 
 class RigolPage(QWidget):
@@ -137,7 +164,13 @@ class RigolPage(QWidget):
         self._execution_controlled = False
         self._rigol_field_edited_while_live: set[str] = set()
         self._rigol_return_pressed_field: str | None = None
-        layout = QVBoxLayout(self)
+        self._control_window: _RigolFloatingControlsWindow | None = None
+        self._control_placeholder: QWidget | None = None
+        self._page_layout = QVBoxLayout(self)
+        self._page_layout.setContentsMargins(0, 0, 0, 0)
+        self._control_panel = QWidget(self)
+        self._page_layout.addWidget(self._control_panel)
+        layout = QVBoxLayout(self._control_panel)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
 
@@ -173,6 +206,12 @@ class RigolPage(QWidget):
         self.quick_controls_button = PushButton("Quick controls...", self.hero_card)
         self.quick_controls_button.clicked.connect(self.quick_controls_requested)
         header_layout.addWidget(self.quick_controls_button)
+
+        self.open_floating_button = PushButton("Floating window", self.hero_card)
+        self.open_floating_button.setAccessibleName("Open Rigol controls in a floating window")
+        self.open_floating_button.setToolTip("Move Rigol controls to a separate window")
+        self.open_floating_button.clicked.connect(self._toggle_floating_controls)
+        header_layout.addWidget(self.open_floating_button)
 
         self.device_led = BodyLabel("●")
         self.device_led.setObjectName("rigolLed")
@@ -544,6 +583,63 @@ class RigolPage(QWidget):
             output_on=self.output_on,
             output_off=self.output_off,
         )
+
+    def _toggle_floating_controls(self) -> None:
+        if self._control_window is not None:
+            self._control_window.close()
+            return
+        self._page_layout.removeWidget(self._control_panel)
+        placeholder = CardWidget(self)
+        placeholder.setObjectName("rigolFloatingControlsPlaceholder")
+        layout = QVBoxLayout(placeholder)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.addWidget(StrongBodyLabel("Rigol controls are open in a floating window", placeholder))
+        note = BodyLabel("The same controls, output state and safety actions remain available there.", placeholder)
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.show_floating_button = PushButton("Show floating window", placeholder)
+        self.show_floating_button.clicked.connect(self._show_floating_controls)
+        layout.addWidget(self.show_floating_button)
+        self.dock_controls_button = PushButton("Dock panel", placeholder)
+        self.dock_controls_button.clicked.connect(self._toggle_floating_controls)
+        layout.addWidget(self.dock_controls_button)
+        layout.addStretch(1)
+        self._page_layout.addWidget(placeholder)
+        self._control_placeholder = placeholder
+        window = _RigolFloatingControlsWindow(self._control_panel, self)
+        self._control_window = window
+        window.closed.connect(self._dock_controls)
+        self.open_floating_button.setText("Dock panel")
+        self.open_floating_button.setAccessibleName("Dock Rigol controls to the main page")
+        self.open_floating_button.setToolTip("Return Rigol controls to the main page")
+        self._control_panel.show()
+        self._show_floating_controls()
+
+    def _show_floating_controls(self) -> None:
+        if self._control_window is not None:
+            if self._control_window.isMinimized():
+                self._control_window.showNormal()
+            else:
+                self._control_window.show()
+            self._control_window.raise_()
+            self._control_window.activateWindow()
+
+    def _dock_controls(self) -> None:
+        window, self._control_window = self._control_window, None
+        if window is None:
+            return
+        window.panel_layout.removeWidget(self._control_panel)
+        self._page_layout.addWidget(self._control_panel)
+        self._control_panel.show()
+        if self._control_placeholder is not None:
+            self._page_layout.removeWidget(self._control_placeholder)
+            self._control_placeholder.hide()
+            self._control_placeholder.deleteLater()
+            self._control_placeholder = None
+        self.open_floating_button.setText("Floating window")
+        self.open_floating_button.setAccessibleName("Open Rigol controls in a floating window")
+        self.open_floating_button.setToolTip("Move Rigol controls to a separate window")
+        window.deleteLater()
 
     def _active_output_selected(self) -> bool:
         channel = int(self.channel.currentText())

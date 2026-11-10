@@ -26,7 +26,7 @@ class FluentResultsThemeTests(unittest.TestCase):
             for name in ("light", "dark"):
                 plot.apply_theme(name)
                 expected = plot_theme(tokens_for(name))
-                axis_pen = plot.plot.getAxis("bottom").pen().color().name()
+                axis_pen = plot.plot.getAxis("bottom").textPen().color().name()
                 self.assertEqual(axis_pen, expected.axes)
         finally:
             plot.close()
@@ -76,7 +76,7 @@ class FluentResultsThemeTests(unittest.TestCase):
                 heatmap = window.results_page.heatmap_tab.heatmap
                 self.assertEqual(heatmap._theme_name, name)
                 self.assertEqual(
-                    heatmap.plot.getAxis("bottom").pen().color().name(),
+                    heatmap.plot.getAxis("bottom").textPen().color().name(),
                     plot_theme(tokens_for(name)).axes,
                 )
         finally:

@@ -1,0 +1,10 @@
+{
+  "url": "https://github.com/MateuszZelent/mmpp/blob/main/mmpp/paper.mplstyle",
+  "repository": "MateuszZelent/mmpp",
+  "path": "mmpp/paper.mplstyle",
+  "blob_sha": "0ae94010f0851237a030ab56a3f3ef5032437002",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2024 Mateusz Zelent",
+  "export_dpi": 300,
+  "scope": "Drawing style only. Measurement units, palette, cell geometry, orientation and processing remain explicit Results settings."
+}

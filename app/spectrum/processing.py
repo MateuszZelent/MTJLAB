@@ -7,6 +7,15 @@ from collections.abc import Sequence
 
 import numpy as np
 
+REFERENCE_OPERATIONS = (
+    ("Choose an operation", "none"),
+    ("Subtract [dB]", "difference_db"),
+    ("Divide [ratio]", "ratio_linear"),
+    ("Add power [dBm]", "add_power"),
+    ("Subtract power [dBm]", "subtract_power"),
+    ("Multiply [mW²]", "multiply_linear"),
+)
+
 
 class LinearPowerAverager:
     """Streaming dBm averager retaining one accumulator instead of all traces."""

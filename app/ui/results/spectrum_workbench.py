@@ -1,13 +1,14 @@
 """Recorded-spectrum inspector reusing Anritsu's scientific view tools."""
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QSplitter, QWidget
 from qfluentwidgets import FlowLayout
-from pyqtgraph.exporters import ImageExporter, SVGExporter
-from pathlib import Path
 
 from app.devices.anritsu_ms2830a.ui.spectrum_workbench import SpectrumWorkbench
 from app.ui.dialogs import StationDialog, StationFileDialog
+
 from .analysis_export import ensure_derived_destination, write_analysis_manifest
 
 
@@ -157,6 +158,9 @@ class ResultSpectrumWorkbench(SpectrumWorkbench):
 
     def analysis_manifest(self):
         return {**self.export_metadata, "value_unit": self._y_unit,
+                "log_mode": [self.plot.plotItem.ctrl.logXCheck.isChecked(), self.plot.plotItem.ctrl.logYCheck.isChecked()],
+                "inverted_axes": [bool(self.plot.getViewBox().state["xInverted"]),
+                                  bool(self.plot.getViewBox().state["yInverted"])],
                 "visible_traces": [name for name, curve in self._curves.items()
                                    if curve.isVisible() and name in self._traces],
                 "measurement_trace": self.trace_selector.currentText(),
@@ -174,12 +178,9 @@ class ResultSpectrumWorkbench(SpectrumWorkbench):
         try:
             ensure_derived_destination(path, self.export_metadata.get("source_file"))
             suffix = Path(path).suffix.lower()
-            if "PNG" in selected or suffix == ".png":
-                ImageExporter(self.plot.plotItem).export(path)
-                write_analysis_manifest(path, self.analysis_manifest())
-            elif "SVG" in selected or suffix == ".svg":
-                SVGExporter(self.plot.plotItem).export(path)
-                write_analysis_manifest(path, self.analysis_manifest())
+            if suffix in {".png", ".svg"} or "PNG" in selected or "SVG" in selected:
+                presentation = self._export_figure(path)
+                write_analysis_manifest(path, {**self.analysis_manifest(), "figure_presentation": presentation})
             else:
                 self._export_csv(Path(path))
         except Exception as exc:

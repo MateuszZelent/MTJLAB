@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from .paper_plot_style import PAPER_STYLE
 
 SPACING = MappingProxyType({"xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 24})
 RADII = MappingProxyType({"sm": 4, "md": 8, "lg": 12})
@@ -11,6 +12,14 @@ TYPOGRAPHY = MappingProxyType({
     "body": 10,
     "subtitle": 12,
     "title": 20,
+})
+PLOT_TYPOGRAPHY = MappingProxyType({
+    **{key: PAPER_STYLE.font_size(source) for key, source in (
+        ("tick", "xtick.labelsize"), ("label", "axes.labelsize"),
+        ("title", "axes.titlesize"), ("legend", "legend.fontsize"))},
+    **{"print_" + key: PAPER_STYLE.font_size(source) for key, source in (
+        ("tick", "xtick.labelsize"), ("label", "axes.labelsize"),
+        ("title", "axes.titlesize"), ("legend", "legend.fontsize"))},
 })
 MOTION = MappingProxyType({"fast_ms": 120, "normal_ms": 180})
 

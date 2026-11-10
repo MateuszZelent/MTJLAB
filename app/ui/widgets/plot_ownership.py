@@ -73,3 +73,11 @@ def create_plot_widget(parent: QWidget | None = None, *, factory=None) -> pg.Plo
         plot.setParent(parent)
     own_plot_item_menus(plot.getPlotItem(), plot)
     return plot
+
+
+def set_plot_export_action(plot: pg.PlotWidget, callback) -> None:
+    """Use the owning page's scientific export from the native plot menu too."""
+    scene = plot.scene()
+    action = scene.contextMenu[0]
+    action.triggered.disconnect(scene.showExportDialog)
+    action.triggered.connect(callback)

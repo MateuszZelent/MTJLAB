@@ -6,7 +6,7 @@ from types import MappingProxyType
 import numpy as np
 
 from .display_model import SpectrumDisplayState, SpectrumDisplayTrace
-from .processing import frequency_grids_match
+from .processing import apply_reference_operation, frequency_grids_match
 from .streaming_statistics import dbm_to_w
 
 
@@ -43,7 +43,8 @@ def compare_power(raw, *, frame_id, show_raw=False, background_w=None, reference
     if reference is not None:
         if not frequency_grids_match(reference.frequencies_hz, frequencies):
             raise ValueError("Reference frequency grid differs from the current spectrum.")
-        add("reference_difference", "Raw − reference", power_w - dbm_to_w(reference.powers_dbm),
+        values, _unit = apply_reference_operation(raw.powers_dbm, reference.powers_dbm, "subtract_power_signed")
+        add("reference_difference", "Raw − reference", values,
             ("raw", "reference", reference.acquired_at_utc.isoformat(), "signed power subtraction"))
     return display_state(traces, frame_id)
 
