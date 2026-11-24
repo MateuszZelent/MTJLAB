@@ -1,6 +1,6 @@
 # Materiały audytu sweepów — 2026-10-04
 
-Główny dokument: [AUDYT_SWEEPS_2026-10-04.md](../../../AUDYT_SWEEPS_2026-10-04.md).
+Główny dokument: [AUDYT_SWEEPS_2026-10-04.md](../../engineering/AUDYT_SWEEPS_2026-10-04.md).
 
 Dowody dotyczą lokalnego drzewa roboczego bazującego na HEAD `c6697e2cee78277cd9125e8cc2a9e63c64ccc4a4` z wcześniejszymi zmianami użytkownika. Nie są kwalifikacją rzeczywistej aparatury. Komunikacja instrumentalna w testach używała wyłącznie symulatorów, a kwalifikacja i compliance w recepturze są syntetyczne.
 

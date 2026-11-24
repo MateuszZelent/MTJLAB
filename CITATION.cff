@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the release or Git commit you used."
+type: software
+title: "MTJLAB: Automated measurement software for spintronics"
+authors:
+  - family-names: Zelent
+    given-names: Mateusz
+    affiliation: "Fachbereich Physik and Landesforschungszentrum OPTIMAS, RPTU Kaiserslautern-Landau, Germany"
+repository-code: "https://github.com/MateuszZelent/MTJLAB"
+license: GPL-3.0-or-later

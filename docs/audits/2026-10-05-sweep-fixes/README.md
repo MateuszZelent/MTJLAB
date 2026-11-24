@@ -1,6 +1,6 @@
 # Dowody napraw sweepów
 
-[Raport i rozliczenie SW-01–SW-20](../../../SWEEPS_PRODUCTION_READINESS.md).
+[Raport i rozliczenie SW-01–SW-20](../../engineering/SWEEPS_PRODUCTION_READINESS.md).
 
 Wszystkie urządzenia w próbach są symulatorami. Nie zmieniono rzeczywistych profili stanowiska i nie wysłano pomiarów do zewnętrznego eLab.
 

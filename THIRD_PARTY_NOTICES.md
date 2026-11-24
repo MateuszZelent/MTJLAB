@@ -58,3 +58,10 @@ This project (`MTJLAB`) incorporates and links against open-source software pack
 - **License:** Python Software Foundation License (PSF) / BSD
 - **Copyright:** (C) Mark Hammond and contributors
 - **Website:** https://github.com/mhammond/pywin32
+
+## Institutional and funding marks
+
+The marks in `docs/branding/` retain their respective usage terms.
+
+- The RPTU wordmark identifies the host institution. [RPTU Corporate Communications](https://rptu.de/en/ueber-die-rptu/organisation/referate/corporate-communications) · [Official wordmark](https://physik.rptu.de/_assets/ae79e8fe97b597a30b2599e4220784f5/Images/RPTU_logo.svg)
+- The European Union emblem and English funding statement identify EU support for CNMA. [European Commission download centre](https://ec.europa.eu/regional_policy/information-sources/logo-download-center_en) · [REA visibility guidance](https://rea.ec.europa.eu/communicating-about-your-eu-funded-project/how-acknowledge-eu-funding_en)

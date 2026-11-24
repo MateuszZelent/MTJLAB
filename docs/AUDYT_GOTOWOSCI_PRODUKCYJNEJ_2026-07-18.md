@@ -418,5 +418,5 @@ produkcyjnym.
 - `docs/HIL_QUALIFICATION.md`
 - `docs/MACIERZ_KWALIFIKACJI_SPRZETOWEJ.md`
 - `docs/raports/PLAN_IMPLEMENTATION_MATRIX_2026-07-16.md`
-- `tmp/qualification-smoke/HIL-20260716T224623.789192Z-20a297d0.json`
+- Raport z kwalifikacji testowej w historii Git, commit `e948a64`, ścieżka `tmp/qualification-smoke/HIL-20260716T224623.789192Z-20a297d0.json`.
 

@@ -1,7 +1,7 @@
-__pycache__/dg1032z.cpython-314.pyc
-__pycache__/gui.cpython-314.pyc
+__pycache__/
 *.pyc
 *.egg-info/
+/.venv/
 measurements/
 /qualification/
 !app/qualification/
@@ -20,13 +20,21 @@ qualification-sim*/
 .env
 *.h5
 *.nc
+# Local scratch work and generated exports.
 tmp/
+.tmp*/
+/.tmp-*
+/.superpowers/
+scratch/
+/app/resources/logs/
+/heatmap.png
+/heatmap.png.analysis.json
+/stability.json
 artifacts/
 recipes/*
 !recipes/example_spectrum_background_filters.yml
 !recipes/anritsu_background_reference_smoke_test.yml
 !recipes/moke_30_50mV_keithley_B25_35mA_A0_1p6mA_avg32.yml
-.tmp-characterization/20260903T115022.922794Z_responsiveness.csv
 *.csv
 *.h5
 docs/
@@ -34,6 +42,9 @@ docs/
 # Version the MOKE engineering review, implementation plan and audit evidence.
 !docs/
 docs/*
+!docs/branding/
+!docs/screenshots/
+!docs/engineering/
 !docs/raports/
 docs/raports/*
 !docs/raports/MOKE_BOX_FIELD_CONTROL_AND_LAKESHORE_CALIBRATION_REPORT.md
@@ -51,7 +62,6 @@ docs/superpowers/*
 docs/superpowers/plans/*
 !docs/superpowers/plans/2026-10-02-moke-box-voltage-control-and-field-calibration.md
 docs/raports/
-scratch/moke-ui-preview-20261002/voltage-control-full-shell.png
 
 # Keep the final safety audit and its fresh source inventory reviewable.
 !docs/raports/
@@ -65,9 +75,7 @@ docs/raports/evidence/*
 !docs/raports/MOKE_BOX_OPERATOR_COMMISSIONING_AUTHORIZATION_2026-10-02.md
 *.db
 *.jsonl
-scratch/moke-planning-ui-20261002/logs/lab-control_20261002T132052.699155Z_79e97d60.jsonl
 docs/raports/evidence/moke_labview_final_audit_2026-10-02.json
-scratch/
 
 # Keep the simulator-only sweep audit report and reproducible evidence reviewable.
 !docs/audits/
@@ -128,7 +136,3 @@ docs/audits/*
 !docs/audits/2026-10-08-results-analysis-artifacts/*.png
 !docs/audits/2026-10-08-results-analysis-artifacts/*.json
 !docs/audits/2026-10-08-results-analysis-artifacts/*.py
-.tmp-rigol-dc-hardware/
-.tmp-anritsu-live-hardware/
-.tmp-anritsu-reference-hardware/
-.tmp*/
