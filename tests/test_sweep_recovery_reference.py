@@ -1,6 +1,7 @@
 """Reference-aware resume from a persisted, output-confirmed boundary."""
 
 import h5py
+import pytest
 
 from app.bootstrap import StationComposition
 from app.engine.recovery import RunRecoveryManager
@@ -10,12 +11,13 @@ from app.storage.thatec_validator import ThatecCompatibilityValidator
 from tests.test_sweep_audit_contracts import SETUP, audit_settings, compile_source
 
 
-def test_reference_recovery_keeps_original_identity_and_processes_remaining_spectrum(tmp_path):
+@pytest.mark.parametrize("mode", ["single_sweep", "continuous_live"])
+def test_reference_recovery_keeps_original_identity_and_processes_remaining_spectrum(tmp_path, mode):
     settings = audit_settings(tmp_path)
     plan = compile_source(settings, SETUP.splitlines()[0] + "\n" + """    - {id: ref, type: acquire_reference, average_count: 1}
     - {id: first, type: acquire_spectrum, reference_operation: difference_db}
     - {id: second, type: acquire_spectrum, reference_operation: difference_db}
-""")
+""".replace("type: acquire_", f"acquisition_mode: {mode}, type: acquire_"))
     path = tmp_path / "reference-resume.h5"
     composition = StationComposition(settings, simulation=True)
     devices = {name: composition.create_adapter(name) for name in ("rigol", "keithley", "anritsu")}
@@ -38,6 +40,7 @@ def test_reference_recovery_keeps_original_identity_and_processes_remaining_spec
         assert checkpoint.stored_points == 1
         assert checkpoint.reference is not None
         assert checkpoint.reference.index == 0
+        assert checkpoint.reference.acquisition_mode == mode
         writer = Hdf5RunWriter.resume(path, recipe_source=plan.recipe_source,
             settings_source=settings.model_dump_json(), plan_hash=plan.sha256,
             checkpoint_count=checkpoint.stored_points, expected_points=plan.total_points)

@@ -419,17 +419,21 @@ def test_large_spectrum_preview_is_decimated_before_plotting() -> None:
         page.show()
         app.processEvents()
         values = tuple(float(index) for index in range(10_001))
+        powers = [-80.0 + (index % 2) * 0.1 for index in range(len(values))]
+        powers[1], powers[2] = -20.0, -145.0
         page.update_spectrum_preview(
             {
                 "point_index": 1,
                 "frequency_hz": values,
-                "power_dbm": tuple(-80.0 for _ in values),
+                "power_dbm": powers,
                 "source_points": 10_001,
             }
         )
 
         rendered = page.spectrum_preview.trace_point_count("Stored spectrum")
         assert 512 <= rendered <= page.spectrum_preview.width() * 2
+        _, rendered_powers = page.spectrum_preview._traces["Stored spectrum"]
+        assert min(rendered_powers) == -145.0 and max(rendered_powers) == -20.0
         assert "10001 source values" in page.spectrum_preview.plot.plotItem.titleLabel.text
     finally:
         page.close()

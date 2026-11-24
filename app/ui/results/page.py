@@ -33,6 +33,8 @@ from app.storage import (
     read_pythat_run_data,
 )
 from app.storage.heatmap_analysis_store import read_heatmap_analysis
+from app.storage.filesystem_paths import native_path
+from app.ui.results.batch_dialog import BatchPostprocessDialog
 from app.ui.results.data_classifier import find_heatmap_rows
 from app.ui.results.file_browser import FileBrowserPanel
 from app.ui.results.heatmap_tab import HeatmapResultsTab
@@ -380,6 +382,14 @@ class ResultsPage(QWidget):
         self._heatmap_index = self.result_tabs.addTab(
             self.heatmap_tab, "Heatmaps", icon=FluentIcon.TILES
         )
+        self._batch_dialog = None
+        self.heatmap_tab.batch_requested.connect(self._open_batch_postprocessing)
+        self.heatmap_tab.powerpoint_requested.connect(
+            lambda identity, items, state, preview: self._open_batch_postprocessing(
+                identity, items, state, preview, power_point=True
+            )
+        )
+        self.spectrum_tab.batch_requested.connect(self._open_batch_postprocessing)
 
         result_card = CardWidget(self)
         result_card.setMinimumHeight(240)
@@ -547,7 +557,7 @@ class ResultsPage(QWidget):
         """Focus a result from a run callback while preserving catalogue context."""
 
         target = Path(path).expanduser().resolve()
-        if not target.is_file() or target.suffix.lower() not in {
+        if not native_path(target).is_file() or target.suffix.lower() not in {
             ".h5",
             ".hdf5",
             ".csv",
@@ -732,7 +742,7 @@ class ResultsPage(QWidget):
     @staticmethod
     def _file_signature(path):
         try:
-            info = path.stat()
+            info = native_path(path).stat()
             return (info.st_size, info.st_mtime_ns)
         except OSError:
             return None
@@ -788,6 +798,15 @@ class ResultsPage(QWidget):
                                           reference_index=None, reference_sweep=None))
         self._reference_view_active = self.spectrum_tab.view_controls.state.show_reference
 
+    def _open_batch_postprocessing(self, identity, items, state, preview, *, power_point=False):
+        if self._batch_dialog is not None and self._batch_dialog.isVisible():
+            self._batch_dialog.raise_()
+            return
+        if self._batch_dialog is not None:
+            self._batch_dialog.deleteLater()
+        self._batch_dialog = BatchPostprocessDialog(identity, items, state, preview, self, power_point=power_point)
+        self._batch_dialog.open()
+
     def closeEvent(self, event) -> None:
         if not self.shutdown():
             event.ignore()
@@ -812,12 +831,16 @@ class ResultsPage(QWidget):
         self.scalar_tab.cancel_read()
         self.scalar_tab._read_pool.clear()
         deadline = time.monotonic() + timeout_ms / 1000
+        if self._batch_dialog is not None:
+            self._batch_dialog.request_stop()
         for pool in (self._read_pool, self.file_browser._read_pool,
                      self.spectrum_tab._read_pool, self.spectrum_tab._filter_pool,
                      self.spectrum_tab.peak_tools.pool,
                      self.sweep_tree._detail_pool,
                      self.heatmap_tab._read_pool, self.heatmap_tab.heatmap._export_pool,
-                     self.scalar_tab._read_pool):
+                     self.scalar_tab._read_pool, self._batch_dialog.pool if self._batch_dialog else None):
+            if pool is None:
+                continue
             remaining = max(0, int((deadline-time.monotonic()) * 1000))
             if not pool.waitForDone(remaining):
                 return False

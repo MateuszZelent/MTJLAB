@@ -283,7 +283,8 @@ class RecipeRunner:
                     {"node_id": action.node_id, "kind": action.kind},
                 )
             if recovery_reference is not None:
-                identity = self._read_spectrum_identity()
+                sweep_method = "continuous_live" if recovery_reference.acquisition_mode == "continuous_live" else "qualified_single"
+                identity = self._read_spectrum_identity(sweep_method=sweep_method)
                 if identity is None or identity[3] != recovery_reference.fingerprint:
                     raise ExecutionError("Recovered reference differs from the confirmed analyzer settings; acquire a new reference.")
                 self._reference_trace = recovery_reference.trace
@@ -358,6 +359,7 @@ class RecipeRunner:
                         readback_si=readback_si,
                         verification=(
                             "timed_wait" if action.kind == "wait"
+                            else "command_accepted" if self._setpoint_readback_limitation(str(action.payload.get("target", "")))
                             else "readback" if readback_si is not None else "executed"
                         ),
                     )
@@ -792,6 +794,16 @@ class RecipeRunner:
             metadata["checkpoint_operation_id"] = action.semantic_id
         return metadata
 
+    def _setpoint_readback_limitation(self, target: str) -> str | None:
+        parts = target.split(".")
+        if (len(parts) == 3 and parts[0] == "rigol" and parts[1] in {"1", "2"}
+                and parts[2] in {"high_level", "low_level", "amplitude", "offset"}):
+            explain = getattr(self._rigol, "dc_readback_limitation", None)
+            detail = explain(int(parts[1])) if callable(explain) else None
+            if isinstance(detail, str) and detail:
+                return detail
+        return None
+
     def _setpoint_evidence(self, requested: dict[str, float]) -> dict[str, dict[str, object]]:
         from app.recipes.parameter_registry import persisted_quantity_unit
 
@@ -807,11 +819,17 @@ class RecipeRunner:
                 applied = self._executed_settling_times.get(target)
                 readback = None
                 verification = "executed_wait" if applied is not None else "unconfirmed"
+            limitation = self._setpoint_readback_limitation(target)
+            if limitation is not None:
+                readback = None
+                verification = "command_accepted"
             evidence[target] = {
                 "requested_si": value, "applied_si": applied, "readback_si": readback,
                 "unit": persisted_quantity_unit(target), "verification": verification,
                 "confirmed_at_utc": self._setpoint_confirmed_at.get(target),
             }
+            if limitation is not None:
+                evidence[target]["limitation"] = limitation
         return evidence
 
     def _semantic_event_data(
@@ -922,7 +940,7 @@ class RecipeRunner:
             actual = self._active_safety_context.get("moke_box", {})
             return actual.get("applied_v"), actual.get("actual_v")
         if isinstance(applied, (int, float)):
-            return float(applied), float(applied)
+            return float(applied), None if self._setpoint_readback_limitation(target) else float(applied)
         planned = action.payload.get("applied_si", requested)
         return (float(planned) if isinstance(planned, (int, float)) else None), None
 
@@ -1058,7 +1076,22 @@ class RecipeRunner:
         from app.spectrum.processing import peak_preserving_indices
 
         processed = acquisition.processed_values if acquisition is not None else None
-        indices = peak_preserving_indices(processed if processed is not None else trace.powers_dbm, 1_000)
+        difference_db = None
+        reference = self._reference_trace
+        if (
+            acquisition is not None
+            and reference is not None
+            and reference.trace_name == trace.trace_name
+            and self._reference_fingerprint is not None
+            and self._reference_fingerprint == (acquisition.processing_metadata or {}).get("configuration_fingerprint")
+            and frequency_grids_match(trace.frequencies_hz, reference.frequencies_hz)
+        ):
+            try:
+                difference_db, _ = apply_reference_operation(trace.powers_dbm, reference.powers_dbm, "difference_db")
+            except ValueError:
+                # A display-only calculation must not fault a committed measurement.
+                pass
+        indices = peak_preserving_indices(difference_db or trace.powers_dbm, 1_000)
         self._emit_telemetry(
             "reference_preview" if preview_kind == "reference" else "spectrum_preview",
             {
@@ -1067,6 +1100,7 @@ class RecipeRunner:
                 "trace_name": trace.trace_name,
                 "frequency_hz": tuple(trace.frequencies_hz[index] for index in indices),
                 "power_dbm": tuple(trace.powers_dbm[index] for index in indices),
+                "raw_minus_reference_db": tuple(difference_db[index] for index in indices) if difference_db is not None else None,
                 "source_points": len(trace.powers_dbm),
                 "processed_values": tuple(processed[index] for index in indices) if processed is not None else None,
                 "processed_unit": acquisition.processed_unit if acquisition is not None else None,
@@ -1659,13 +1693,17 @@ class RecipeRunner:
                 self._reference_fingerprint = (block.processing_metadata or {}).get("configuration_fingerprint")
             reference = block.raw
             average_count = block.average_count
+            acquisition_metadata = block.processing_metadata or {}
             reference_options = {}
-            if payload.get("minimum_duration_s") or "purpose" in payload:
+            if (payload.get("minimum_duration_s") or "purpose" in payload
+                    or not payload.get("store_source_spectra", True) or payload.get("acquisition_mode") == "continuous_live"):
                 reference_options["acquisition_metadata"] = {
-                    **(block.processing_metadata or {}),
+                    **acquisition_metadata,
                     "purpose": payload.get("purpose", "reference"),
                     "recipe_node_id": action.node_id,
-                    "requested_minimum_sweeps": payload.get("average_count", 1),
+                    "requested_minimum_sweeps": (
+                        average_count if "instrument_average" in acquisition_metadata else payload.get("average_count", 1)
+                    ),
                     "safety_context": self._safety_context_snapshot(),
                     "device_states": self._jsonable(self._device_states),
                     "output_status": dict(self._output_status),
@@ -1708,6 +1746,10 @@ class RecipeRunner:
 
             operation = str(payload.get("reference_operation", "none"))
             filters, parameters = parse_processing(payload.get("processing"))
+            if "emi_reject" in filters and (
+                "instrument_average_count" in payload or "instrument_average_duration_s" in payload
+            ):
+                raise ExecutionError("EMI requires individual PyLab sweeps within each point.")
             if operation != "none" and self._reference_trace is None:
                 raise ExecutionError("Acquire or load a matching reference after the last analyzer configuration.")
             average_count = payload.get("average_count", 1)
@@ -1722,10 +1764,15 @@ class RecipeRunner:
             operation = str(payload.get("reference_operation", "none"))
             processed: tuple[float, ...] | None = None
             processed_unit: str | None = None
+            acquisition_metadata = block.processing_metadata or {}
             metadata = {"schema": "recipe-spectrum-processing-v1", "processing": payload.get("processing", {}),
                         "reference_operation": operation, "reference_origin": dict(self._reference_origin) if operation != "none" else {},
-                        "configuration_fingerprint": (block.processing_metadata or {}).get("configuration_fingerprint"),
+                        "configuration_fingerprint": acquisition_metadata.get("configuration_fingerprint"),
+                        "acquisition_mode": payload.get("acquisition_mode", "single_sweep"),
+                        "source_spectra_stored": bool(block.source_sweep_indices),
                         "uncertainty_qualified": False}
+            if "instrument_average" in acquisition_metadata:
+                metadata["instrument_average"] = acquisition_metadata["instrument_average"]
             if operation != "none":
                 reference = self._reference_trace
                 if reference is None:
@@ -1739,7 +1786,7 @@ class RecipeRunner:
                     raise ExecutionError(
                         "The acquired spectrum frequency grid differs from the reference."
                     )
-                fingerprint = (block.processing_metadata or {}).get("configuration_fingerprint")
+                fingerprint = acquisition_metadata.get("configuration_fingerprint")
                 if self._reference_fingerprint is not None and fingerprint != self._reference_fingerprint:
                     raise ExecutionError("Analyzer input path or bandwidth changed since reference acquisition.")
                 processed, processed_unit = apply_reference_operation(
@@ -1767,7 +1814,7 @@ class RecipeRunner:
                 operation = "none"
             return _AcquiredSpectrum(
                 raw=trace,
-                average_count=average_count,
+                average_count=block.average_count,
                 processed_values=processed,
                 processed_unit=processed_unit,
                 processing_operation=operation,
@@ -1871,7 +1918,32 @@ class RecipeRunner:
         if type(average_count) is not int or not 1 <= average_count <= 9999:
             raise ExecutionError("Recipe spectrum average_count must be an integer in 1..9999.")
 
-        before = self._read_spectrum_identity()
+        acquisition_mode = action.payload.get("acquisition_mode", "single_sweep")
+        store_sources = action.payload.get("store_source_spectra", True)
+        if type(store_sources) is not bool:
+            raise ExecutionError("Recipe spectrum source retention must be a boolean.")
+        if acquisition_mode not in ("single_sweep", "continuous_live"):
+            raise ExecutionError(f"Unsupported recipe spectrum acquisition mode {acquisition_mode!r}.")
+        live = acquisition_mode == "continuous_live"
+        if live and trace_name != "TRAC1":
+            raise ExecutionError("Continuous spectrum acquisition requires Trace A.")
+        instrument_count = action.payload.get("instrument_average_count")
+        instrument_duration_s = action.payload.get("instrument_average_duration_s")
+        instrument_average = instrument_count is not None or instrument_duration_s is not None
+        if instrument_average:
+            if instrument_count is not None and instrument_duration_s is not None:
+                raise ExecutionError("Choose either an instrument sweep count or a target averaging time.")
+            if instrument_count is not None and (type(instrument_count) is not int or not 2 <= instrument_count <= 9999):
+                raise ExecutionError("The instrument average count must be an integer in 2..9999.")
+            if instrument_duration_s is not None and (
+                type(instrument_duration_s) not in (int, float) or not math.isfinite(instrument_duration_s)
+                or not 0 < instrument_duration_s < self._policy.acquisition_timeout_s
+            ):
+                raise ExecutionError("Instrument averaging time must be positive and shorter than the acquisition timeout.")
+            if (live or trace_name != "TRAC1" or average_count != 1 or store_sources
+                    or action.payload.get("inter_sweep_delay_s") or action.payload.get("minimum_duration_s")):
+                raise ExecutionError("Instrument averaging requires one triggered Trace A result and mean-only storage.")
+        before = self._read_spectrum_identity(sweep_method=acquisition_mode) if live else self._read_spectrum_identity()
         if before is not None:
             self._record_device_state("anritsu", "spectrum",
                 requested={"operation": "acquisition_readback"}, actual=before[0])
@@ -1882,6 +1954,10 @@ class RecipeRunner:
                 and self._reference_fingerprint is not None
                 and (before is None or before[3] != self._reference_fingerprint)):
             raise ExecutionError("Analyzer settings changed since reference; acquire or load a matching reference.")
+        if instrument_average:
+            return self._acquire_instrument_spectrum(
+                before, measurements, duration_s=instrument_duration_s, sweep_count=instrument_count,
+            )
         averager = LinearPowerAverager()
         history = deque(maxlen=24)
         first: SpectrumTrace | None = None
@@ -1896,60 +1972,62 @@ class RecipeRunner:
         if minimum_duration and role != SpectrumFrameRole.REFERENCE:
             raise ExecutionError("Timed collection requires a reference/background acquisition.")
         collection_started = time.monotonic()
-        for _index in range(9999 if minimum_duration else average_count):
-            self._raise_if_stop_requested()
-            if _index > 0 and delay > 0:
-                self._interruptible_wait(delay)
+        with ExitStack() as acquisition:
+            if live:
+                self._anritsu.start_live(True)
+                acquisition.callback(self._anritsu.stop_live)
+            for _index in range(9999 if minimum_duration else average_count):
                 self._raise_if_stop_requested()
-            safety_channels = []
-            for channel, enabled in tuple(self._keithley_output_active.items()):
-                if enabled:
-                    self._sample_keithley(channel, measurements)
-                    safety_channels.append(channel)
-            if self._compliance_channels(measurements):
-                return None
-            safety_sampled_at = datetime.now(timezone.utc).timestamp() if safety_channels else None
-            latest = self._anritsu.acquire_single_sweep(trace_name, restore_continuous=False)
-            setpoint_evidence = self._setpoint_evidence(action.setpoints_si)
-            # Commit before requesting another sweep or publishing a mean.
-            # Storage failure propagates through the established runner fault
-            # path and finally/shutdown; it cannot silently lose raw sources.
-            source_index = self._writer.store_recipe_spectrum_sweep(RecipeSpectrumSweep(
-                latest.frequencies_hz, latest.powers_dbm, action.node_id, self._correlation_id,
-                role, _index, None if minimum_duration else average_count, latest.acquired_at_utc.timestamp(),
-                latest.configuration_generation, latest.sweep_evidence, latest.sweep_id,
-                latest.acquisition_started_at_utc.timestamp() if latest.acquisition_started_at_utc else None,
-                latest.acquisition_completed_at_utc.timestamp() if latest.acquisition_completed_at_utc else None,
-                tuple(sorted((name, float(value)) for name, value in action.setpoints_si.items())),
-                setpoint_metadata_version=2,
-                requested_setpoints_si=tuple(sorted((name, float(value)) for name, value in action.setpoints_si.items())),
-                applied_setpoints_si=tuple(sorted((name, float(value["applied_si"])) for name, value in setpoint_evidence.items() if value["applied_si"] is not None)),
-                readback_setpoints_si=tuple(sorted((name, float(value["readback_si"])) for name, value in setpoint_evidence.items() if value["readback_si"] is not None)),
-                inter_sweep_delay_s=delay,
-                safety_measurements_si=tuple(sorted((name, value) for name, value in measurements.items()
-                    if any(name.startswith(f"keithley.{channel}.") for channel in safety_channels))),
-                safety_sampled_at_s=safety_sampled_at,
-                minimum_duration_s=minimum_duration,
-            ))
-            source_indices.append(source_index)
-            if first is None:
-                first = latest
-            elif not frequency_grids_match(
-                first.frequencies_hz, latest.frequencies_hz
-            ):
-                raise ExecutionError(
-                    "Anritsu averaging aborted because the frequency grid changed "
-                    "between complete spectra."
+                if _index > 0 and delay > 0:
+                    self._interruptible_wait(delay)
+                    self._raise_if_stop_requested()
+                latest, safety_channels, safety_sampled_at = self._read_recipe_source_trace(
+                    trace_name, measurements, live=live, previous=latest,
                 )
-            elif latest.configuration_generation != first.configuration_generation:
-                raise ExecutionError("Anritsu averaging aborted because its acquisition configuration changed.")
-            averager.add(latest.powers_dbm)
-            history.append(latest.powers_dbm)
-            if len(source_indices) >= average_count and time.monotonic() - collection_started >= minimum_duration:
-                break
+                if latest is None:
+                    return None
+                if store_sources:
+                    setpoint_evidence = self._setpoint_evidence(action.setpoints_si)
+                    # Commit before requesting another sweep or publishing a mean.
+                    # Storage failure propagates through the established runner fault
+                    # path and finally/shutdown; it cannot silently lose raw sources.
+                    source_index = self._writer.store_recipe_spectrum_sweep(RecipeSpectrumSweep(
+                        latest.frequencies_hz, latest.powers_dbm, action.node_id, self._correlation_id,
+                        role, _index, None if minimum_duration else average_count, latest.acquired_at_utc.timestamp(),
+                        latest.configuration_generation, latest.sweep_evidence, latest.sweep_id,
+                        latest.acquisition_started_at_utc.timestamp() if latest.acquisition_started_at_utc else None,
+                        latest.acquisition_completed_at_utc.timestamp() if latest.acquisition_completed_at_utc else None,
+                        tuple(sorted((name, float(value)) for name, value in action.setpoints_si.items())),
+                        setpoint_metadata_version=2,
+                        requested_setpoints_si=tuple(sorted((name, float(value)) for name, value in action.setpoints_si.items())),
+                        applied_setpoints_si=tuple(sorted((name, float(value["applied_si"])) for name, value in setpoint_evidence.items() if value["applied_si"] is not None)),
+                        readback_setpoints_si=tuple(sorted((name, float(value["readback_si"])) for name, value in setpoint_evidence.items() if value["readback_si"] is not None)),
+                        inter_sweep_delay_s=delay,
+                        safety_measurements_si=tuple(sorted((name, value) for name, value in measurements.items()
+                            if any(name.startswith(f"keithley.{channel}.") for channel in safety_channels))),
+                        safety_sampled_at_s=safety_sampled_at,
+                        minimum_duration_s=minimum_duration,
+                        acquisition_mode=acquisition_mode,
+                    ))
+                    source_indices.append(source_index)
+                if first is None:
+                    first = latest
+                elif not frequency_grids_match(
+                    first.frequencies_hz, latest.frequencies_hz
+                ):
+                    raise ExecutionError(
+                        "Anritsu averaging aborted because the frequency grid changed "
+                        "between complete spectra."
+                    )
+                elif latest.configuration_generation != first.configuration_generation:
+                    raise ExecutionError("Anritsu averaging aborted because its acquisition configuration changed.")
+                averager.add(latest.powers_dbm)
+                history.append(latest.powers_dbm)
+                if averager.count >= average_count and time.monotonic() - collection_started >= minimum_duration:
+                    break
         elapsed_s = time.monotonic() - collection_started
         if elapsed_s < minimum_duration:
-            raise ExecutionError("Timed reference reached 9999 sweeps before the requested duration; RAW sources were retained.")
+            raise ExecutionError("Timed reference reached 9999 sweeps before the requested duration.")
         if first is None or latest is None:
             raise ExecutionError("Anritsu averaging requires at least one spectrum.")
         averaged = SpectrumTrace(
@@ -1962,17 +2040,96 @@ class RecipeRunner:
             acquisition_started_at_utc=first.acquisition_started_at_utc,
             acquisition_completed_at_utc=latest.acquisition_completed_at_utc,
         )
-        after = self._read_spectrum_identity()
+        after = self._read_spectrum_identity(sweep_method=acquisition_mode) if live else self._read_spectrum_identity()
         if before is not None and (after is None or before[3] != after[3]):
-            raise ExecutionError("Analyzer settings changed during the acquisition block; RAW sources were retained.")
-        return _AcquiredSpectrum(averaged, len(source_indices), source_sweep_indices=tuple(source_indices),
+            raise ExecutionError("Analyzer settings changed during the acquisition block.")
+        return _AcquiredSpectrum(averaged, averager.count, source_sweep_indices=tuple(source_indices),
             processing_metadata={"configuration_fingerprint": before[3] if before else None,
+                                 "acquisition_mode": acquisition_mode,
+                                 "source_spectra_stored": store_sources,
                                  "inter_sweep_delay_s": delay,
                                  "minimum_duration_s": minimum_duration,
                                  "collection_elapsed_s": elapsed_s,
                                  "safety_sampling": "active_smu_iv_before_each_raw_frame"}, history_dbm=tuple(history))
 
-    def _read_spectrum_identity(self):
+    def _acquire_instrument_spectrum(
+        self, before, measurements: dict[str, float], *, duration_s: float | None, sweep_count: int | None,
+    ) -> _AcquiredSpectrum | None:
+        self._raise_if_stop_requested()
+        self._sample_spectrum_channels(measurements)
+        if self._compliance_channels(measurements):
+            return None
+        start = time.monotonic()
+        trace, count, sweep_time_s = self._anritsu.acquire_instrument_average(
+            duration_s, acquisition_timeout_s=self._policy.acquisition_timeout_s, sweep_count=sweep_count,
+        )
+        elapsed = time.monotonic() - start
+        self._raise_if_stop_requested()
+        self._sample_spectrum_channels(measurements)
+        if self._compliance_channels(measurements):
+            return None
+        after = self._read_spectrum_identity()
+        if before is None or after is None or before[3] != after[3]:
+            raise ExecutionError("Analyzer settings changed during instrument averaging.")
+        target = {"requested_sweep_count": sweep_count} if sweep_count is not None else {"target_duration_s": duration_s}
+        return _AcquiredSpectrum(trace, count, processing_metadata={
+            "configuration_fingerprint": before[3],
+            "acquisition_mode": "single_sweep",
+            "source_spectra_stored": False,
+            "safety_sampling": "active_smu_iv_before_and_after_instrument_average",
+            "instrument_average": {
+                **target,
+                "trace_storage_mode": "LAV",
+                "sweep_time_s": sweep_time_s,
+                "nominal_duration_s": count * sweep_time_s,
+                "elapsed_s": elapsed,
+                "sweep_count": count,
+            },
+        })
+
+    def _sample_spectrum_channels(self, measurements: dict[str, float]) -> list[str]:
+        channels = [channel for channel, enabled in self._keithley_output_active.items() if enabled]
+        for channel in channels:
+            self._sample_keithley(channel, measurements)
+        return channels
+
+    def _read_recipe_source_trace(
+        self,
+        trace_name: str,
+        measurements: dict[str, float],
+        *,
+        live: bool,
+        previous: SpectrumTrace | None,
+    ) -> tuple[SpectrumTrace | None, list[str], float | None]:
+        deadline = time.monotonic() + self._policy.acquisition_timeout_s
+        while True:
+            self._raise_if_stop_requested()
+            if time.monotonic() >= deadline:
+                raise ExecutionError("Timed out waiting for a distinct Anritsu Live spectrum.")
+            safety_channels = self._sample_spectrum_channels(measurements)
+            if self._compliance_channels(measurements):
+                return None, safety_channels, None
+            sampled_at = datetime.now(timezone.utc).timestamp() if safety_channels else None
+            if not live:
+                return self._anritsu.acquire_single_sweep(trace_name, restore_continuous=False), safety_channels, sampled_at
+            try:
+                trace = self._anritsu.fetch_current_trace_fast(trace_name)
+            except DeviceError as exc:
+                if "-999.0 unmeasured/error sentinel" not in str(exc):
+                    raise
+            else:
+                if previous is not None:
+                    if (trace.configuration_generation != previous.configuration_generation
+                            or not frequency_grids_match(trace.frequencies_hz, previous.frequencies_hz)):
+                        raise ExecutionError("Anritsu Live configuration or frequency grid changed during capture.")
+                    if trace.powers_dbm != previous.powers_dbm:
+                        return trace, safety_channels, sampled_at
+                # A baseline read after settling ensures the first stored
+                # update is newer than the trace already in the buffer.
+                previous = trace
+            self._interruptible_wait(0.01)
+
+    def _read_spectrum_identity(self, *, sweep_method: str = "qualified_single"):
         # Read through the adapter contract, including the owning-thread proxy.
         # Missing/failed readback must fail acquisition, never silently remove
         # configuration qualification for a whole GUI run.
@@ -1982,7 +2139,7 @@ class RecipeRunner:
 
         full, advanced = self._anritsu.read_acquisition_configuration()
         idn = self._anritsu.identity.idn
-        return full, advanced, idn, spectrum_configuration_fingerprint(full, advanced, idn)
+        return full, advanced, idn, spectrum_configuration_fingerprint(full, advanced, idn, sweep_method=sweep_method)
 
     def _interruptible_wait(self, duration_s: float) -> None:
         deadline = time.monotonic() + duration_s
@@ -2314,6 +2471,11 @@ class RecipeRunner:
     def _record_device_state(
         self, device: str, section: str, *, requested: object, actual: object
     ) -> None:
+        if device == "rigol" and section in {"channel_1", "channel_2"} and isinstance(actual, dict):
+            limitation = self._setpoint_readback_limitation(f"rigol.{section[-1]}.offset")
+            if limitation is not None:
+                actual = {**actual, "voltage_verification": "command_accepted",
+                          "voltage_readback_limitation": limitation}
         self._device_states.setdefault(device, {})[section] = {
             "requested": self._jsonable(requested),
             "actual": self._jsonable(actual),
@@ -2321,7 +2483,7 @@ class RecipeRunner:
         }
 
     def _apply_actual_setpoints(self, setpoints: dict[str, float]) -> None:
-        """Replace requested sweep floats with the last readback-confirmed values."""
+        """Use the last applied values; evidence records any readback limitation."""
 
         for name in tuple(setpoints):
             actual = self._actual_setpoint_value(name)

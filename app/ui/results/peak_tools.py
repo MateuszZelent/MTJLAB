@@ -53,6 +53,13 @@ class TrackedPoint:
 def _series_trace(session, record, source, processing, view, points, cancelled):
     label, variant, row_id, trace_index = source
     if isinstance(record, StoredPoint):
+        if not view.active and not processing.active and variant == "saved_view":
+            raw = session.spectrum(session.path, record.index)
+            if raw is not None and raw.saved_display is not None:
+                trace = next((trace for trace in raw.saved_display.traces if trace.label == label), None)
+                if trace is not None:
+                    return trace.frequencies_hz, trace.values, trace.unit
+            raise ValueError("The selected trace is missing from the saved Anritsu view.")
         if not view.active and not processing.active and variant == "processed":
             raw = session.spectrum(session.path, record.index)
             if raw is None or raw.processed_values is None:

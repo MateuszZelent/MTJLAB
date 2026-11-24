@@ -7,12 +7,13 @@ import json
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from html import escape
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QEvent, QRectF, QSize, QThreadPool, Signal
+from PySide6.QtCore import QEvent, QRectF, QSize, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
@@ -27,6 +28,7 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    CheckBox,
     ComboBox,
     FlowLayout,
     FluentIcon,
@@ -46,14 +48,18 @@ from app.ui.results.analysis_export import (
     processing_manifest,
     write_analysis_manifest,
 )
+from app.ui.results.batch_processing import HeatmapBatch, measurement_parameters, measurement_title, plan_heatmaps
 from app.ui.results.data_classifier import find_heatmap_rows
 from app.ui.results.filter_choices import FilterComboBox
 from app.ui.results.heatmap_cache import HeatmapSourceCache
 from app.ui.results.heatmap_coordinates import (
+    VISIT_DIMENSION_ID,
     HeatmapCoordinates,
     HeatmapDimension,
+    HeatmapRange,
     HeatmapRequest,
     build_heatmap_coordinates,
+    default_heatmap_ranges,
     read_heatmap_matrix,
 )
 from app.ui.results.heatmap_ranges import HeatmapRangeDialog
@@ -73,7 +79,7 @@ from app.ui.widgets.plot_ownership import (
 from app.ui.widgets.plot_style import apply_scientific_style
 
 
-def _read_coordinate_payload(path, run, row, points, *, cancelled=None):
+def _read_coordinate_payload(path, run, row, points, *, cancelled=None, spectrum_reader=None):
     coordinates = build_heatmap_coordinates(path, run, row, points)
     frequencies = ()
     if row.shape[0]:
@@ -83,15 +89,69 @@ def _read_coordinate_payload(path, run, row, points, *, cancelled=None):
             if cancelled is not None and cancelled():
                 raise InterruptedError("Heatmap coordinate read cancelled")
             try:
-                frequencies = tuple(ThatecRunReader.spectrum_slice(path, row.id, checkpoint).x_values)
+                read = spectrum_reader or ThatecRunReader.spectrum_slice
+                frequencies = tuple(read(path, row.id, checkpoint).x_values)
                 break
             except Exception:
                 continue
     return coordinates, frequencies
 
 
+def _archive_identity(path):
+    stat = path.stat()
+    return path, stat.st_mtime_ns, stat.st_size
+
+
+def _read_heatmap_archive(path, run, rows, points, *, expected_identity=None, cancelled=None, progress=None):
+    identity = _archive_identity(path)
+    if expected_identity is not None and identity != expected_identity:
+        raise ValueError("The archive changed. Reopen the result before reading it into memory.")
+    spectra = ThatecRunReader.read_spectral_rows(path, rows, cancelled=cancelled, progress=progress)
+    cache = HeatmapSourceCache(spectra)
+    coordinates = {
+        row.id: _read_coordinate_payload(path, run, row, points, cancelled=cancelled,
+                                         spectrum_reader=cache.spectrum_slice)
+        for row in rows
+    }
+    if identity != _archive_identity(path):
+        raise ValueError("The archive changed while reading. Reopen it and try again.")
+    return identity, cache, coordinates
+
+
 def _axis_export_label(label: str, unit: str) -> str:
     return f"{label} ({unit})" if unit else label
+
+
+def _absolute_map_view(matrix, colour_range):
+    values = np.abs(matrix)
+    if colour_range == "robust":
+        levels = tuple(map(float, np.nanquantile(values, (0.01, 0.99))))
+    else:
+        levels = float(np.nanmin(values)), float(np.nanmax(values))
+    return values, levels
+
+
+def _heatmap_display(payload, row, processing, state, show_absolute):
+    z_label = payload.z_label
+    if state.view not in {"component", "removed"}:
+        if payload.z_unit == "dB":
+            z_label = "Relative power"
+        elif payload.z_unit == "ratio":
+            z_label = "Power ratio"
+        elif payload.z_unit == "W" and (state.component.endswith("power")
+                                        or processing.math_operation == "subtract_power_signed"):
+            z_label = "Power difference"
+    signed = payload.z_unit == "dB" or (payload.z_unit == "W" and (
+        processing.math_operation == "subtract_power_signed"
+        or dict(row.definition).get("lab control role") == "spectrum_processed"
+        or state.view == "removed"
+        or state.view == "result" and state.component.endswith("power")
+    ))
+    absolute = signed and show_absolute
+    if absolute:
+        matrix, levels = _absolute_map_view(payload.matrix, state.colour_range)
+        return matrix, levels, f"Abs · {z_label}", signed, absolute
+    return payload.matrix, payload.levels, z_label, signed, absolute
 
 
 def _write_heatmap_companions(path, values, x, y, checkpoints, metadata, x_edges, y_edges):
@@ -119,6 +179,7 @@ class _HeatmapPayload:
     baselines: tuple = ()
     line_input_dbm: np.ndarray | None = None
     line_input_is_raw: bool = True
+    corrected_frequencies_hz: tuple[float, ...] = ()
 
 
 def _process_map_payload(payload, state, frequency_axis, *, cancelled=None):
@@ -143,9 +204,11 @@ def _process_map_payload(payload, state, frequency_axis, *, cancelled=None):
         coordinate_values=payload.y_values if frequency_axis == 1 else payload.x_values,
         frequency_axis=frequency_axis, state=state, line_input_dbm=payload.line_input_dbm, cancelled=cancelled)
     return replace(payload, matrix=result.values, z_unit=result.unit,
-                   z_label=("Common component" if state.view == "component" else
+                   z_label=("Stripe correction" if state.view == "component" and state.component == "repair_stripe_bands_db" else
+                            "Common component" if state.view == "component" else
                             "Removed by 2D filter" if state.view == "removed" else "Power / contrast"),
-                   levels=result.levels, processing_notes=payload.processing_notes + result.notes)
+                   levels=result.levels, processing_notes=payload.processing_notes + result.notes,
+                   corrected_frequencies_hz=result.corrected_frequencies_hz)
 
 
 def _read_heatmap_payload(
@@ -158,13 +221,15 @@ def _read_heatmap_payload(
     processing=None,
     points=(),
     source_cache=None,
+    checkpoint_indices=None,
 ) -> _HeatmapPayload:
     """Read the exact requested physical-coordinate plane."""
 
     processor = ResultSpectrumProcessor(path, processing, points, cancelled=cancelled, reader=source_cache) if processing and processing.active else None
     matrix = read_heatmap_matrix(path, row, coordinates, request, cancelled=cancelled, processor=processor,
                                 capture_input=processor is not None,
-                                spectrum_reader=source_cache.spectrum_slice if source_cache else None)
+                                spectrum_reader=source_cache.spectrum_slice if source_cache else None,
+                                checkpoint_indices=checkpoint_indices)
     return _HeatmapPayload(
         matrix=matrix.values,
         x_values=matrix.x_values,
@@ -250,10 +315,19 @@ class HeatmapPlotWidget(QWidget):
         export_btn.setObjectName("plotToolButton")
         export_btn.clicked.connect(self.export)
         toolbar.addWidget(export_btn)
+        self.batch_button = PushButton("Postprocess all measurements…", toolbar_host)
+        self.batch_button.setEnabled(False)
+        self.batch_button.setToolTip("Apply this heatmap's processing and axes to every recorded set in the sweep.")
+        toolbar.addWidget(self.batch_button)
 
         self.range_button = PushButton("Axis ranges…", self)
         self.range_button.clicked.connect(self.configure_ranges)
         toolbar.addWidget(self.range_button)
+        self.show_absolute = CheckBox("Abs", toolbar_host)
+        self.show_absolute.setAccessibleName("Show absolute heatmap difference")
+        self.show_absolute.setToolTip("Show the magnitude of signed dB or W differences.")
+        self.show_absolute.setEnabled(False)
+        toolbar.addWidget(self.show_absolute)
         self.export_button = export_btn
         self.readout = CaptionLabel("X: —   Y: —   Z: —", self)
         self.readout.setObjectName("plotReadout")
@@ -486,6 +560,7 @@ class HeatmapPlotWidget(QWidget):
 
     def clear(self) -> None:
         self._hide_crosshair()
+        self.show_absolute.setEnabled(False)
         self.export_metadata = {}
         self.pcolor_item.setData()
         self.raster_item.clear()
@@ -769,6 +844,8 @@ class HeatmapResultsTab(QWidget):
 
     checkpoint_clicked = Signal(str, int)  # (row_id, checkpoint)
     status_changed = Signal(str)
+    batch_requested = Signal(object, object, object, object)
+    powerpoint_requested = Signal(object, object, object, object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -792,9 +869,18 @@ class HeatmapResultsTab(QWidget):
         self._processing_dirty = False
         self._source_payload = None
         self._source_row = None
+        self._displayed_payload = None
+        self._displayed_analysis = None
         self._source_cache = None
         self._source_cache_key = None
         self._source_caches = OrderedDict()
+        self._archive_cache = None
+        self._archive_cache_key = None
+        self._selected_archive_identity = None
+        self._refresh_plane = QTimer(self)
+        self._refresh_plane.setSingleShot(True)
+        self._refresh_plane.setInterval(120)
+        self._refresh_plane.timeout.connect(self._load_selected_row)
         self._automatic_palette_key = None
 
         layout = QVBoxLayout(self)
@@ -838,7 +924,7 @@ class HeatmapResultsTab(QWidget):
         self.load_button = PushButton(parent=self.controls_card)
         self.load_button.setText("Load heatmap")
         self.load_button.setIcon(FluentIcon.TILES)
-        self.load_button.setToolTip("Read all checkpoints and render the heatmap")
+        self.load_button.setToolTip("Build the heatmap for the selected axes and filters")
         self.load_button.setObjectName("plotToolButton")
         self.load_button.setEnabled(False)
         row1.addWidget(self.load_button)
@@ -853,6 +939,14 @@ class HeatmapResultsTab(QWidget):
         self.row_combo.setMinimumWidth(240)
         self.row_combo.setToolTip("Select a THATEC row with 2-D spectral data")
         row2.addWidget(self.row_combo, 1)
+        self.read_file_button = PushButton("Read file", self.controls_card)
+        self.read_file_button.setToolTip("Read all heatmap spectra into memory so axes and filters can change without reading the spectra again.")
+        self.read_file_button.setEnabled(False)
+        row2.addWidget(self.read_file_button)
+        self.powerpoint_button = PushButton("Export sweep to PowerPoint…", self.controls_card)
+        self.powerpoint_button.setToolTip("Create one PowerPoint slide per recorded heatmap group using the selected axes and processing.")
+        self.powerpoint_button.setEnabled(False)
+        row2.addWidget(self.powerpoint_button)
 
         selector.addLayout(row1)
         selector.addLayout(row2)
@@ -876,6 +970,8 @@ class HeatmapResultsTab(QWidget):
 
         # --- Heatmap ---
         self.heatmap = HeatmapPlotWidget()
+        self.heatmap.batch_button.clicked.connect(self._open_batch)
+        self.heatmap.show_absolute.toggled.connect(self._absolute_view_changed)
         self.heatmap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.heatmap_state = ResultsStateCard(self)
         self.heatmap_view = QStackedWidget(self)
@@ -891,6 +987,8 @@ class HeatmapResultsTab(QWidget):
 
         # --- Connections ---
         self.load_button.clicked.connect(self._load_selected_row)
+        self.read_file_button.clicked.connect(self._read_file)
+        self.powerpoint_button.clicked.connect(lambda: self._open_batch(power_point=True))
         self.variant_combo.currentIndexChanged.connect(self._variant_changed)
         self.x_axis_combo.currentIndexChanged.connect(self._axis_changed)
         self.y_axis_combo.currentIndexChanged.connect(self._axis_changed)
@@ -919,7 +1017,11 @@ class HeatmapResultsTab(QWidget):
             self._load_selected_row()
 
     def _sync_selector_layout(self, width: int) -> None:
-        compact = width < 1100
+        left, right = (self.selector_layout.itemAt(index).layout() for index in range(2))
+        margins = self.controls_card.layout().contentsMargins()
+        combined_width = (left.minimumSize().width() + right.minimumSize().width()
+                          + self.selector_layout.spacing() + margins.left() + margins.right())
+        compact = width < max(1100, combined_width)
         if compact == self._selector_compact:
             return
         self._selector_compact = compact
@@ -943,6 +1045,7 @@ class HeatmapResultsTab(QWidget):
     ) -> None:
         """Prepare the tab with available spectrum rows from a THATEC result."""
         self._invalidate_pending_read()
+        self.powerpoint_button.setEnabled(False)
         self.controls_card.setEnabled(True)
         self.processing_controls.setEnabled(True)
         self.map_controls.setEnabled(True)
@@ -953,17 +1056,25 @@ class HeatmapResultsTab(QWidget):
         self._source_cache = None
         self._source_cache_key = None
         self._source_caches.clear()
+        self._clear_archive_cache()
         self._coordinates = None
         self._coordinate_row_id = None
         self._processing_dirty = False
         self._source_payload = None
         self._source_row = None
+        self._displayed_payload = None
+        self._displayed_analysis = None
         self.map_controls.set_state(MapProcessing())
         self.processing_controls.set_references(references)
         self._selected_path = path
+        try:
+            self._selected_archive_identity = _archive_identity(path)
+        except OSError:
+            self._selected_archive_identity = None
         self._run = run
         self._points = points
         self._spectrum_rows = find_heatmap_rows(run)
+        self.read_file_button.setEnabled(bool(self._spectrum_rows))
         self.heatmap.clear()
         self._spectrum_rows_by_variant = self._split_spectrum_rows_by_variant(
             self._spectrum_rows
@@ -1005,15 +1116,8 @@ class HeatmapResultsTab(QWidget):
         self.processing_controls.hide()
         self.map_controls.hide()
         metadata = analysis.metadata
-        axes = metadata["axes"]
-        self.heatmap.set_data(analysis.values, analysis.x_values, analysis.y_values,
-            x_label=axes["x"]["label"], x_unit=axes["x"].get("unit", ""),
-            y_label=axes["y"]["label"], y_unit=axes["y"].get("unit", ""),
-            z_label="Derived values", z_unit=metadata["value_unit"],
-            levels=tuple(metadata["colour_levels"]) if "colour_levels" in metadata else None,
-            cell_checkpoint_indices=analysis.checkpoints, x_cell_edges=analysis.x_edges, y_cell_edges=analysis.y_edges)
-        self.heatmap.export_metadata = metadata
-        self.heatmap.plot.setTitle("Exported heatmap · recorded derived data")
+        self._displayed_analysis = analysis
+        self._render_analysis(analysis)
         self.heatmap.colormap_combo.setCurrentText(metadata.get("palette", "viridis"))
         ranges = metadata.get("view_ranges")
         inverted = metadata.get("inverted_axes", (False, False))
@@ -1023,6 +1127,40 @@ class HeatmapResultsTab(QWidget):
             self.heatmap.plot.setRange(xRange=ranges[0], yRange=ranges[1], padding=0)
         self.info_label.setText(f"Loaded derived heatmap: {path.name}. Open the source sweep to change processing; axis ranges and export remain available.")
         self.heatmap_view.setCurrentWidget(self.heatmap)
+
+    def _render_analysis(self, analysis):
+        metadata = analysis.metadata
+        unit = metadata["value_unit"]
+        axes = metadata["axes"]
+        already_absolute = metadata.get("display_transform") == "absolute_difference"
+        spectrum_settings = metadata.get("spectrum_processing", {})
+        map_settings = metadata.get("map_processing", {})
+        signed = unit == "dB" or (unit == "W" and (
+            metadata.get("signed_difference") is True
+            or (isinstance(spectrum_settings, dict)
+                and spectrum_settings.get("operation") in {"subtract_power_signed", "subtract_reference_signed"})
+            or (isinstance(map_settings, dict) and (
+                map_settings.get("view") == "removed"
+                or map_settings.get("view", "result") == "result"
+                and map_settings.get("component") in {"median_power", "quantile_power", "reference_power"}
+            ))
+        ))
+        self.heatmap.show_absolute.setEnabled(signed and not already_absolute)
+        absolute = self.heatmap.show_absolute.isEnabled() and self.heatmap.show_absolute.isChecked()
+        values = analysis.values
+        levels = tuple(metadata["colour_levels"]) if "colour_levels" in metadata else None
+        if absolute:
+            values, levels = _absolute_map_view(values, "full")
+        label = "Abs · Derived values" if absolute or already_absolute else "Derived values"
+        self.heatmap.set_data(values, analysis.x_values, analysis.y_values,
+            x_label=axes["x"]["label"], x_unit=axes["x"].get("unit", ""),
+            y_label=axes["y"]["label"], y_unit=axes["y"].get("unit", ""),
+            z_label=label, z_unit=unit, levels=levels,
+            cell_checkpoint_indices=analysis.checkpoints, x_cell_edges=analysis.x_edges, y_cell_edges=analysis.y_edges)
+        self.heatmap.export_metadata = dict(metadata)
+        if absolute:
+            self.heatmap.export_metadata["display_transform"] = "absolute_difference"
+        self.heatmap.plot.setTitle(escape(metadata.get("title") or "Exported heatmap"))
 
     def load_heatmap_for_row(self, row_id: str) -> None:
         """Read all checkpoints for a given 2-D row and render the heatmap."""
@@ -1047,7 +1185,34 @@ class HeatmapResultsTab(QWidget):
         self.load_button.setEnabled(False)
         self._start_read(self._selected_path, row)
 
+    def _open_batch(self, *, power_point=False):
+        row_id = self.row_combo.currentData()
+        if self._coordinates is None or row_id != self._coordinate_row_id or self._selected_archive_identity is None:
+            return
+        row = self._run.rows[row_id]
+        items = plan_heatmaps(self._coordinates, self._request(), self._points)
+        if not items:
+            self._show_plot_status("No recorded measurement matches the selected axes and ranges.")
+            return
+        palette_name = self.heatmap.colormap_combo.currentText()
+        palette = pg.colormap.get(palette_name)
+        colours = tuple(tuple(colour) for colour in palette.getLookupTable(nPts=256, mode="float"))
+        processing, map_state = self.processing_controls.state, self.map_controls.state
+        absolute = self.heatmap.show_absolute.isChecked()
+        preview = manual_levels = None
+        if self.heatmap.batch_button.isEnabled():
+            preview = self.heatmap.plot.grab()
+            shown_levels = tuple(map(float, self.heatmap.color_bar.levels()))
+            if shown_levels != self._auto_colour_levels:
+                manual_levels = shown_levels
+        cached_row = self._archive_cache.preloaded_row(row.id) if self._archive_cache is not None else None
+        state = HeatmapBatch(row, self._coordinates, self._points, processing, map_state, absolute,
+                             palette_name, colours, manual_levels, cached_row)
+        signal = self.powerpoint_requested if power_point else self.batch_requested
+        signal.emit(self._selected_archive_identity, items, state, preview)
+
     def _render_payload(self, row: ThatecRow, payload: _HeatmapPayload) -> None:
+        self._displayed_payload = (row, payload)
         label = ("Post-processed spectrum" if self.processing_controls.state.active
                  else row.control_name or row.device_name or row.id)
         state = self.map_controls.state
@@ -1064,17 +1229,11 @@ class HeatmapResultsTab(QWidget):
                     and payload.levels[0] < 0 < payload.levels[1]):
                 self.heatmap.colormap_combo.setCurrentText("CET-D1")
             self._automatic_palette_key = palette_key
-        z_label = payload.z_label
-        if state.view not in {"component", "removed"}:
-            if payload.z_unit == "dB":
-                z_label = "Relative power"
-            elif payload.z_unit == "ratio":
-                z_label = "Power ratio"
-            elif payload.z_unit == "W" and (state.component.endswith("power")
-                    or self.processing_controls.state.math_operation == "subtract_power_signed"):
-                z_label = "Power difference"
+        matrix, levels, z_label, signed, absolute = _heatmap_display(
+            payload, row, self.processing_controls.state, state, self.heatmap.show_absolute.isChecked())
+        self.heatmap.show_absolute.setEnabled(signed)
         self.heatmap.set_data(
-            payload.matrix,
+            matrix,
             x_values=payload.x_values,
             y_values=payload.y_values,
             x_label=payload.x_label,
@@ -1082,14 +1241,17 @@ class HeatmapResultsTab(QWidget):
             y_label=payload.y_label,
             y_unit=payload.y_unit,
             z_label=z_label, z_unit=payload.z_unit,
-            levels=payload.levels,
+            levels=levels,
             cell_checkpoint_indices=payload.cell_checkpoints,
         )
-        self.heatmap.plot.setTitle(
-            f"{label} · {self.map_controls.view.currentText()} - {payload.y_label} × {payload.x_label}"
-        )
+        self._auto_colour_levels = tuple(map(float, self.heatmap.color_bar.levels()))
+        checkpoints = np.unique(payload.cell_checkpoints[payload.cell_checkpoints >= 0]).tolist()
+        parameters = measurement_parameters(self._coordinates, checkpoints, {p.index: p for p in self._points})
+        title = measurement_title(parameters) or f"{payload.y_label} × {payload.x_label}"
+        self.heatmap.plot.setTitle(escape(title))
         self.heatmap.export_metadata = {
             "source_file": str(self._selected_path), "spectrum_row": row.id,
+            "title": title,
             "spectrum_processing": processing_manifest(self.processing_controls.state),
             "recorded_baselines": [processing_manifest(r) for r in payload.baselines],
             "map_processing": processing_manifest(self.map_controls.state),
@@ -1098,6 +1260,9 @@ class HeatmapResultsTab(QWidget):
             "axes": {"x": {"label": payload.x_label, "unit": payload.x_unit},
                      "y": {"label": payload.y_label, "unit": payload.y_unit}},
             "value_unit": payload.z_unit, "notes": list(payload.processing_notes),
+            "corrected_frequencies_hz": list(payload.corrected_frequencies_hz),
+            "display_transform": "absolute_difference" if absolute else "none",
+            "signed_difference": signed,
         }
         unit = f" {payload.z_unit}" if payload.z_unit else ""
         missing = (
@@ -1107,19 +1272,31 @@ class HeatmapResultsTab(QWidget):
         )
         message = (
             f"Heatmap loaded: {payload.matrix.shape[0]} x {payload.matrix.shape[1]}, "
-            f"range {payload.levels[0]:.4g} to {payload.levels[1]:.4g}{unit}."
+            f"range {levels[0]:.4g} to {levels[1]:.4g}{unit}."
             f"{missing} Click to inspect the source checkpoint spectrum."
         )
+        checkpoint_count = len(checkpoints)
+        message += f" {checkpoint_count} recorded checkpoint(s) selected."
+        if checkpoint_count == 1:
+            message += " Only one checkpoint is selected; this map does not show a sweep."
         if payload.processing_notes:
             message += " " + "; ".join(payload.processing_notes)
         self.info_label.setText(message)
         self.heatmap_view.setCurrentWidget(self.heatmap)
         self.load_button.setEnabled(True)
+        self.heatmap.batch_button.setEnabled(self._coordinates is not None and self._selected_archive_identity is not None)
         self.status_changed.emit(f"Heatmap for {label} loaded")
+
+    def _absolute_view_changed(self) -> None:
+        if self._displayed_analysis is not None:
+            self._render_analysis(self._displayed_analysis)
+        elif self._displayed_payload is not None and self.heatmap_view.currentWidget() is self.heatmap:
+            self._render_payload(*self._displayed_payload)
 
     def clear(self) -> None:
         """Reset the tab."""
         self._invalidate_pending_read()
+        self.powerpoint_button.setEnabled(False)
         for combo in (self.row_combo, self.variant_combo, self.x_axis_combo, self.y_axis_combo):
             blocked = combo.blockSignals(True)
             combo.clear()
@@ -1128,9 +1305,11 @@ class HeatmapResultsTab(QWidget):
         self._spectrum_rows = []
         self._spectrum_rows_by_variant = {}
         self._selected_path = None
+        self._selected_archive_identity = None
         self._source_cache = None
         self._source_cache_key = None
         self._source_caches.clear()
+        self._clear_archive_cache()
         self._run = None
         self._points = ()
         self.processing_controls.set_references(())
@@ -1142,6 +1321,8 @@ class HeatmapResultsTab(QWidget):
         self._processing_dirty = False
         self._source_payload = None
         self._source_row = None
+        self._displayed_payload = None
+        self._displayed_analysis = None
         self._range_combos = {}
         self._filter_combos = {}
         self.load_button.setEnabled(False)
@@ -1178,14 +1359,64 @@ class HeatmapResultsTab(QWidget):
         if row_id is not None:
             self.load_heatmap_for_row(str(row_id))
 
+    def _clear_archive_cache(self) -> None:
+        self._archive_cache = None
+        self._archive_cache_key = None
+        self._source_cache = None
+        self.read_file_button.setText("Read file")
+        self.read_file_button.setEnabled(False)
+
+    def _read_file(self) -> None:
+        if self._selected_path is None or self._run is None or not self._spectrum_rows:
+            return
+        self._invalidate_pending_read()
+        self._source_cache = None
+        self._source_caches.clear()
+        self.read_file_button.setEnabled(False)
+        self.load_button.setEnabled(False)
+        request_id = self._active_read_request
+        self._show_heatmap_state(
+            "Reading file", "Loading the recorded spectra into memory…", loading=True,
+            progress_total=sum(row.shape[0] for row in self._spectrum_rows) or None,
+        )
+        task = ResultReadTask(request_id, _read_heatmap_archive, self._selected_path,
+                              self._run, tuple(self._spectrum_rows), self._points,
+                              expected_identity=self._selected_archive_identity,
+                              cooperative_cancel=True, report_progress=True)
+        self._read_tasks[request_id] = task
+        self._read_kinds[request_id] = "archive"
+        task.signals.loaded.connect(self._archive_loaded)
+        task.signals.progress.connect(self._archive_progress)
+        task.signals.failed.connect(self._read_failed)
+        task.signals.finished.connect(self._read_finished)
+        self._read_pool.start(task)
+
+    def _archive_progress(self, request_id: int, completed: int, total: int) -> None:
+        if request_id == self._active_read_request and self._read_kinds.get(request_id) == "archive":
+            self.heatmap_state.set_read_progress(completed, total)
+
+    def _archive_loaded(self, request_id, payload) -> None:
+        if request_id != self._active_read_request:
+            return
+        self._archive_cache_key, self._archive_cache, coordinates = payload
+        self._coordinate_cache.update(coordinates)
+        self.read_file_button.setText("File in memory")
+        self._load_selected_row()
+
     def _row_changed(self, *_args: object) -> None:
+        self.heatmap.batch_button.setEnabled(False)
         self._invalidate_pending_read()
         self._source_payload = None
         self.heatmap.clear()
-        if self.row_combo.currentData() is None:
+        row_id = self.row_combo.currentData()
+        if row_id is None:
+            self.powerpoint_button.setEnabled(False)
             return
-        if str(self.row_combo.currentData()) != self._coordinate_row_id:
+        if self._coordinates is None or row_id != self._coordinate_row_id:
             self._configure_coordinates()
+        if self._archive_cache is not None:
+            self._refresh_plane.start()
+            return
         self._show_heatmap_state(
             "Heatmap ready to load",
             "Load the selected spectral row to compare all recorded checkpoints.",
@@ -1194,6 +1425,7 @@ class HeatmapResultsTab(QWidget):
 
     def _configure_coordinates(self) -> None:
         self._coordinates = None
+        self.powerpoint_button.setEnabled(False)
         if self._selected_path is None or self._run is None:
             return
         row_id = self.row_combo.currentData()
@@ -1230,15 +1462,21 @@ class HeatmapResultsTab(QWidget):
                 suffix = f" ({dimension.unit})" if dimension.unit else ""
                 combo.addItem(f"{dimension.label}{suffix}", userData=dimension.id)
         self.x_axis_combo.setCurrentIndex(0)
-        # Recipe sweep order is outer-to-inner.  With Frequency on X, use the
-        # innermost physical sweep as the useful default Y coordinate.
-        self.y_axis_combo.setCurrentIndex(
-            len(coordinates.dimensions) - 1 if len(coordinates.dimensions) > 1 else 0
-        )
+        # Prefer the innermost authored sweep, rather than a derived setpoint
+        # appended after it (DC High/Low are recorded views of the offset).
+        if coordinates.sweep_dimension_ids:
+            self.y_axis_combo.setCurrentIndex(
+                self.y_axis_combo.findData(coordinates.sweep_dimension_ids[-1])
+            )
+        else:
+            self.y_axis_combo.setCurrentIndex(
+                len(coordinates.dimensions) - 1 if len(coordinates.dimensions) > 1 else 0
+            )
         for combo in (self.x_axis_combo, self.y_axis_combo):
             combo.blockSignals(False)
         self._rebuild_filters()
         self.load_button.setEnabled(True)
+        self.powerpoint_button.setEnabled(self._selected_archive_identity is not None)
         if self._processing_dirty and self.isVisible():
             self._processing_dirty = False
             self._load_selected_row()
@@ -1293,6 +1531,9 @@ class HeatmapResultsTab(QWidget):
             self.filter_host.hide()
             return
         axes = {self.x_axis_combo.currentData(), self.y_axis_combo.currentData()}
+        defaults = default_heatmap_ranges(
+            self._coordinates, str(self.x_axis_combo.currentData()), str(self.y_axis_combo.currentData())
+        )
         physical_dimensions = [
             dimension
             for dimension in self._coordinates.dimensions
@@ -1303,8 +1544,13 @@ class HeatmapResultsTab(QWidget):
             range_hdr.setObjectName("muted")
             self.filter_layout.addWidget(range_hdr)
         for dimension in physical_dimensions:
-            values = sorted(set(float(value) for value in dimension.values))
-            self._add_range_row(dimension, values, full_range=dimension.id in axes)
+            values = sorted({float(value) for value in dimension.values})
+            if not values:
+                continue
+            if dimension.id == VISIT_DIMENSION_ID and dimension.id not in axes:
+                self._add_visit_filter(values, defaults[dimension.id].minimum)
+            else:
+                self._add_range_row(dimension, values, selected_range=defaults[dimension.id])
         if "frequency" not in axes:
             row = QWidget(self.filter_host)
             row_layout = QHBoxLayout(row)
@@ -1329,12 +1575,29 @@ class HeatmapResultsTab(QWidget):
         self.filter_layout.addStretch(1)
         self.filter_host.setVisible(bool(physical_dimensions or self._filter_combos))
 
+    def _add_visit_filter(self, values: list[float], selected: float) -> None:
+        row = QHBoxLayout()
+        label = CaptionLabel("Visit:", self.filter_host)
+        label.setMinimumWidth(180)
+        row.addWidget(label)
+        combo = ComboBox(self.filter_host)
+        combo.setAccessibleName("Visit at the same physical settings")
+        combo.setToolTip("Select which recorded visit to show at repeated sweep settings.")
+        for value in values:
+            combo.addItem(f"{value:g}", userData=value)
+        combo.setCurrentIndex(combo.findData(selected))
+        combo.currentIndexChanged.connect(self._row_changed)
+        row.addWidget(combo)
+        row.addStretch(1)
+        self.filter_layout.addLayout(row)
+        self._filter_combos[VISIT_DIMENSION_ID] = combo
+
     def _add_range_row(
         self,
         dimension: HeatmapDimension,
         values: list[float],
         *,
-        full_range: bool,
+        selected_range: HeatmapRange,
     ) -> None:
         """Add two recorded-value selectors for one physical coordinate."""
 
@@ -1368,8 +1631,8 @@ class HeatmapResultsTab(QWidget):
             text = self._format_coordinate_value(dimension, value)
             minimum.addItem(text, userData=value)
             maximum.addItem(text, userData=value)
-        minimum.setCurrentIndex(0)
-        maximum.setCurrentIndex(len(values) - 1 if full_range else 0)
+        minimum.setCurrentIndex(minimum.findData(selected_range.minimum))
+        maximum.setCurrentIndex(maximum.findData(selected_range.maximum))
         dimension_id = str(dimension.id)
         minimum.currentIndexChanged.connect(
             lambda _index, dimension_id=dimension_id: self._range_changed(
@@ -1461,20 +1724,27 @@ class HeatmapResultsTab(QWidget):
         self._row_changed()
 
     def _start_read(self, path: Path, row: ThatecRow) -> None:
+        self.heatmap.batch_button.setEnabled(False)
         # Reuse full raw grids and baselines for the two most recent planes.
         # File changes receive a fresh cache; never show stale archive values.
         try:
-            stat = path.stat()
+            identity = _archive_identity(path)
         except OSError as exc:
             self.load_button.setEnabled(True)
             self._show_heatmap_error(f"Cannot read the result archive: {exc}")
             return
         request = self._request()
-        cache_key = (path, stat.st_mtime_ns, stat.st_size, row.id,
+        if self._archive_cache is not None and identity != self._archive_cache_key:
+            self._clear_archive_cache()
+            self.read_file_button.setEnabled(True)
+            self._show_heatmap_error("The archive changed. Reopen the result to refresh its data.")
+            return
+        cache_key = (*identity, row.id,
                      request.x_id, request.y_id, tuple(sorted(request.filters.items())))
-        reused = cache_key in self._source_caches
-        self._source_cache = self._source_caches.pop(cache_key, None) or HeatmapSourceCache()
-        self._source_caches[cache_key] = self._source_cache
+        reused = self._archive_cache is not None or cache_key in self._source_caches
+        self._source_cache = self._archive_cache or self._source_caches.pop(cache_key, None) or HeatmapSourceCache()
+        if self._archive_cache is None:
+            self._source_caches[cache_key] = self._source_cache
         self._source_cache_key = cache_key
         # Raw and the recorded processed row can coexist; do not accumulate
         # every visited plane or file in memory.
@@ -1551,6 +1821,7 @@ class HeatmapResultsTab(QWidget):
         # numeric processing stays in the existing serial result worker.
         if self._source_payload is None or self._source_row is None:
             return
+        self.heatmap.batch_button.setEnabled(False)
         self._invalidate_pending_read()
         row, source = self._source_row, self._source_payload
         if not self.map_controls.state.active:
@@ -1576,7 +1847,11 @@ class HeatmapResultsTab(QWidget):
 
     def _read_failed(self, request_id: int, message: str) -> None:
         if request_id == self._active_read_request:
-            self._show_heatmap_error(message)
+            if self._read_kinds.get(request_id) == "archive":
+                self._show_heatmap_state("Cannot read file into memory", message, action_text="Load selected heatmap")
+                self.status_changed.emit(message)
+            else:
+                self._show_heatmap_error(message)
 
     def _read_finished(self, request_id: int) -> None:
         self._read_tasks.pop(request_id, None)
@@ -1584,8 +1859,12 @@ class HeatmapResultsTab(QWidget):
         self.processing_overlay.finish(request_id)
         if request_id == self._active_read_request:
             self.load_button.setEnabled(self.row_combo.currentData() is not None)
+            self.read_file_button.setEnabled(bool(self._spectrum_rows) and self._archive_cache is None)
 
     def _invalidate_pending_read(self) -> None:
+        self._refresh_plane.stop()
+        if "archive" in self._read_kinds.values() and self._archive_cache is None:
+            self.read_file_button.setEnabled(bool(self._spectrum_rows))
         self.processing_overlay.clear()
         for task in self._read_tasks.values():
             task.cancel()
@@ -1602,13 +1881,16 @@ class HeatmapResultsTab(QWidget):
         *,
         loading: bool = False,
         action_text: str = "",
+        progress_total: int | None = None,
     ) -> None:
+        self.heatmap.batch_button.setEnabled(False)
         self.heatmap_state.show_state(
             title=title,
             description=description,
             accessible_name=title,
             loading=loading,
             action_text=action_text,
+            progress_total=progress_total,
         )
         self.heatmap_view.setCurrentWidget(self.heatmap_state)
         self.info_label.setText(description)

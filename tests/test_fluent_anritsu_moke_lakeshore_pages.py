@@ -552,6 +552,58 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
         self.assertEqual(page.width(), host.scroll_area.viewport().width())
 
+    def test_anritsu_setup_keeps_values_readable_when_the_drawer_is_narrow(self) -> None:
+        self.window._navigate_to("anritsu")
+        page = self.window.anritsu_page
+        page.toggle_acquisition_controls.click()
+        controls = (
+            (page.start, "100.123456789 MHz"),
+            (page.stop, "6.000000001 GHz"),
+            (page.reference, "-119.999999 dBm"),
+            (page.rbw, "999.123456 kHz"),
+            (page.vbw, "999.123456 kHz"),
+        )
+        for editor, value in controls:
+            editor.setText(value)
+        for window_size in ((1360, 880), (820, 560)):
+            with self.subTest(window_size=window_size):
+                self.window.resize(*window_size)
+                self.application.processEvents()
+                if page.workspace_splitter.orientation() == Qt.Orientation.Horizontal:
+                    page.workspace_splitter.setSizes([360, 900])
+                self.application.processEvents()
+                viewport = page.control_scroll.viewport()
+                self.assertEqual(page.control_scroll.horizontalScrollBar().maximum(), 0)
+                for editor, value in controls:
+                    self.assertTrue(editor.isVisibleTo(self.window))
+                    self.assertGreaterEqual(editor.width(), editor.fontMetrics().horizontalAdvance(value) + 32)
+                    self.assertLessEqual(editor.mapTo(viewport, editor.rect().bottomRight()).x(), viewport.rect().right())
+                self.assertFalse(page.setup_card.grab().isNull())
+
+    def test_anritsu_setup_keeps_an_invalid_draft_and_rejects_it_before_apply(self) -> None:
+        self.window._navigate_to("anritsu")
+        page = self.window.anritsu_page
+        page.toggle_acquisition_controls.click()
+        self.application.processEvents()
+        page.stop.setText("6 GHz")
+        for draft in ("0 Hz", "100.", "100 mV"):
+            with self.subTest(draft=draft):
+                page.start.setText(draft)
+                page.start.editingFinished.emit()
+                page.frequency_representation.setCurrentIndex(page.frequency_representation.findData("center_span"))
+                self.assertEqual(page.frequency_representation.currentData(), "start_stop")
+                self.assertEqual(page.frequency_label_a.text(), "Start")
+                self.assertEqual(page.start.text(), draft)
+                with patch.object(page._controller, "call") as call:
+                    self.assertFalse(page._configure_from_form())
+                call.assert_not_called()
+
+        page.start.setText("100 MHz")
+        with patch.object(page._controller, "call") as call:
+            self.assertTrue(page._configure_from_form())
+        call.assert_called_once()
+        self.assertEqual(call.call_args.args[1].start_hz, 100e6)
+
     def test_anritsu_spectrogram_controls_reflow_without_horizontal_overflow(self) -> None:
         self.window.resize(820, 560)
         self.window._navigate_to("anritsu")
@@ -582,6 +634,7 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         self.application.processEvents()
         page = self.window.anritsu_page
         page.analysis_tabs.setCurrentIndex(0)
+        page.auto_peak_detection.setChecked(True)
         page._show_trace(synthetic_anritsu_peaks())
         self.assertTrue(wait_for_ui(lambda: len(page._detected_peaks) >= 2))
         host = self.window.navigation_routes["anritsu"]

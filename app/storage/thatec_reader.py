@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import math
 from pathlib import Path
@@ -67,7 +68,7 @@ class ThatecSpectrumTrace:
     """One displayable trace extracted from a public THATEC spectrum row."""
 
     name: str
-    values: tuple[float, ...]
+    values: Sequence[float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +81,7 @@ class ThatecSpectrum:
     x_unit: str
     y_label: str
     y_unit: str
-    x_values: tuple[float, ...]
+    x_values: Sequence[float]
     traces: tuple[ThatecSpectrumTrace, ...]
     source_shape: tuple[int, ...]
 
@@ -91,6 +92,23 @@ class _AxisMetadata:
     unit: str
     offset: float
     multiplier: float
+
+
+@dataclass(frozen=True, slots=True)
+class ThatecSpectralRow:
+    """Committed public spectra held as compact numeric arrays."""
+
+    row: ThatecRow
+    values: Any
+    scales: Any
+
+    def spectrum(self, checkpoint: int) -> ThatecSpectrum:
+        if not 0 <= checkpoint < self.values.shape[0]:
+            raise ExecutionError(f"THATEC checkpoint {checkpoint} is outside row {self.row.id}.")
+        scale = tuple(map(float, self.scales[checkpoint])) if self.scales is not None else ()
+        return ThatecRunReader._decode_spectrum(
+            self.row, ThatecRowData(self.row.id, checkpoint, self.values[checkpoint], scale), compact=True,
+        )
 
 
 class ThatecRunReader:
@@ -207,10 +225,69 @@ class ThatecRunReader:
         frequency coordinate explicitly.
         """
 
-        import numpy as np
-
         row = ThatecRunReader.row(path, row_id)
         data = ThatecRunReader.row_slice(path, row_id, checkpoint)
+        return ThatecRunReader._decode_spectrum(row, data)
+
+    @staticmethod
+    def read_spectral_rows(path: str | Path, rows: Sequence[ThatecRow], *, cancelled=None,
+                           progress=None) -> dict[str, ThatecSpectralRow]:
+        """Load the committed spectral matrices in one open HDF5 session."""
+        import numpy as np
+
+        from .resource_budget import resolve_import_memory_budget
+
+        with ThatecRunReader._open(Path(path)) as file:
+            current = ThatecRunReader._rows_from_open_file(file)
+            datasets = []
+            required_bytes = 0
+            for row in rows:
+                if row.id not in current or current[row.id].shape != row.shape:
+                    raise ExecutionError("The archive changed. Reopen the result before reading it into memory.")
+                group = file[f"measurement/{row.id}"]
+                data, scales = group["data"], group.get("scale")
+                if data.ndim != 2 or data.dtype.kind not in "biuf":
+                    raise ExecutionError(f"THATEC row {row.id} is not a real spectral matrix.")
+                count, width = row.shape
+                required_bytes += count * (width * max(8, data.dtype.itemsize) + 32)
+                datasets.append((current[row.id], data, scales))
+            budget = resolve_import_memory_budget()
+            if required_bytes > budget:
+                raise ExecutionError(f"Spectra need {required_bytes / 1024**2:,.0f} MiB of RAM. The current budget is {budget / 1024**2:,.0f} MiB. Load a selected heatmap to read only the required spectra.")
+            result = {}
+            total = sum(row.shape[0] for row, _, _ in datasets)
+            completed = 0
+            last_percent = 0
+            for row, data, scales in datasets:
+                count, width = row.shape
+                values = np.empty((count, width), dtype=data.dtype)
+                for start in range(0, count, 32):
+                    if cancelled is not None and cancelled():
+                        raise InterruptedError("Spectral read cancelled.")
+                    stop = min(start + 32, count)
+                    data.read_direct(values, np.s_[start:stop, :], np.s_[start:stop, :])
+                    if progress is not None:
+                        completed += stop - start
+                        percent = 100 * completed // total
+                        if percent != last_percent:
+                            progress(completed, total)
+                            last_percent = percent
+                values.flags.writeable = False
+                if scales is not None:
+                    if scales.ndim != 1 or scales.size < count * 4:
+                        raise ExecutionError(f"THATEC scale for row {row.id} is incomplete or malformed.")
+                    scales = np.asarray(scales[:count * 4], dtype=float).reshape(count, 4)
+                    if not np.isfinite(scales).all():
+                        raise ExecutionError(f"THATEC scale for row {row.id} contains non-finite values.")
+                    scales.flags.writeable = False
+                result[row.id] = ThatecSpectralRow(row, values, scales)
+        return result
+
+    @staticmethod
+    def _decode_spectrum(row: ThatecRow, data: ThatecRowData, *, compact: bool = False) -> ThatecSpectrum:
+        import numpy as np
+
+        row_id, checkpoint = row.id, data.checkpoint
         try:
             raw_values = np.asarray(data.values)
             if np.iscomplexobj(raw_values):
@@ -261,7 +338,7 @@ class ThatecRunReader:
             traces = (
                 ThatecSpectrumTrace(
                     row.control_name or row.id,
-                    tuple(float(value) for value in values),
+                    values if compact else tuple(float(value) for value in values),
                 ),
             )
         else:
@@ -296,7 +373,7 @@ class ThatecRunReader:
             x_unit=x_unit,
             y_label=value_axis.name or "Amplitude",
             y_unit=ThatecRunReader._display_unit(value_axis.unit),
-            x_values=tuple(float(value) for value in x_values),
+            x_values=x_values if compact else tuple(float(value) for value in x_values),
             traces=traces,
             source_shape=tuple(int(size) for size in values.shape),
         )

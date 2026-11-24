@@ -10,6 +10,7 @@ from qfluentwidgets import (
     FluentIcon,
     IconWidget,
     IndeterminateProgressBar,
+    ProgressBar,
     PushButton,
     StrongBodyLabel,
 )
@@ -46,9 +47,7 @@ class ResultsStateCard(CardWidget):
         self.description.setWordWrap(True)
         self.description.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.description.setMaximumWidth(560)
-        self.card_layout.addWidget(
-            self.description, 0, Qt.AlignmentFlag.AlignHCenter
-        )
+        self.card_layout.addWidget(self.description)
 
         self.progress = IndeterminateProgressBar(self)
         self.progress.setFixedHeight(4)
@@ -57,6 +56,11 @@ class ResultsStateCard(CardWidget):
         self.card_layout.addWidget(
             self.progress, 0, Qt.AlignmentFlag.AlignHCenter
         )
+        self.read_progress = ProgressBar(self)
+        self.read_progress.setAccessibleName("Spectra read")
+        self.read_progress.setFixedSize(220, 4)
+        self.read_progress.hide()
+        self.card_layout.addWidget(self.read_progress, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.action = PushButton(parent=self)
         self.action.hide()
@@ -89,13 +93,25 @@ class ResultsStateCard(CardWidget):
         accessible_name: str,
         loading: bool = False,
         action_text: str = "",
+        progress_total: int | None = None,
     ) -> None:
         """Update the state while keeping its geometry and focus behavior stable."""
 
         self.title.setText(title)
         self.description.setText(description)
         self.setAccessibleName(accessible_name)
-        self.progress.setVisible(loading)
+        self.progress.setVisible(loading and progress_total is None)
+        self.read_progress.setVisible(loading and progress_total is not None)
+        if loading and progress_total is not None:
+            self.set_read_progress(0, progress_total)
         self.action.setText(action_text)
         self.action.setVisible(bool(action_text) and not loading)
         self.action.setAccessibleName(action_text or accessible_name)
+
+    def set_read_progress(self, completed: int, total: int) -> None:
+        self.read_progress.setRange(0, total)
+        self.read_progress.setValue(completed)
+        if completed == total:
+            self.description.setText(f"{total:,} spectra read (100%). Preparing heatmap…")
+        else:
+            self.description.setText(f"Spectra read: {completed:,} / {total:,} ({100 * completed // total}%)")

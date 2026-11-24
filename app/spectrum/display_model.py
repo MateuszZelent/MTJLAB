@@ -10,7 +10,7 @@ and analysis can use the same immutable snapshot.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
@@ -29,6 +29,16 @@ class SpectrumDisplayTrace:
     unit: str
     frame_id: int
     provenance: tuple[str, ...] = ()
+    estimated_bands_hz: tuple[tuple[float, float], ...] = ()
+
+    @property
+    def is_signed_difference(self) -> bool:
+        return self.unit == "dB" or (
+            self.unit == "W"
+            and any(source in self.provenance for source in (
+                "background", "subtract_power_signed", "signed power subtraction",
+            ))
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +61,7 @@ class SpectrumDisplayState:
             return None
         return self.by_key[self.selected_key]
 
-    def select(self, key: str) -> "SpectrumDisplayState":
+    def select(self, key: str) -> SpectrumDisplayState:
         if key not in self.by_key:
             raise KeyError(key)
         return SpectrumDisplayState(
@@ -60,6 +70,25 @@ class SpectrumDisplayState:
             primary_key=self.primary_key,
             frame_id=self.frame_id,
             by_key=self.by_key,
+        )
+
+    def absolute_differences(self) -> SpectrumDisplayState:
+        """Fold signed residuals at zero while preserving their physical units."""
+        traces = tuple(
+            replace(
+                trace,
+                label=f"Abs · {trace.label}",
+                values=tuple(abs(value) for value in trace.values),
+                provenance=(*trace.provenance, "absolute_difference"),
+            )
+            if trace.is_signed_difference else trace
+            for trace in self.traces
+        )
+        return replace(self, traces=traces, by_key=MappingProxyType({trace.key: trace for trace in traces}))
+
+    def with_overlay(self, trace: SpectrumDisplayTrace) -> SpectrumDisplayState:
+        return replace(
+            self, traces=(*self.traces, trace), by_key=MappingProxyType({**self.by_key, trace.key: trace}),
         )
 
 
@@ -86,6 +115,19 @@ def _trace(
     )
 
 
+def _with_reference(
+    source: SpectrumDisplayTrace, reference: SpectrumTrace, operation: str, *, key: str, label: str,
+) -> SpectrumDisplayTrace | None:
+    if not frequency_grids_match(source.frequencies_hz, reference.frequencies_hz):
+        return None
+    try:
+        values, unit = apply_reference_operation(source.values, reference.powers_dbm, operation)
+    except ValueError:
+        return None
+    return replace(source, key=key, label=label, values=values, unit=unit,
+                   provenance=(*source.provenance, "reference", operation))
+
+
 def build_display_state(
     *,
     raw: SpectrumTrace | None,
@@ -95,6 +137,9 @@ def build_display_state(
     visible: Mapping[str, bool],
     frame_id: int,
     preferred_key: str | None = None,
+    use_average_for_reference: bool = False,
+    live_average_label: str = "Live average",
+    show_live_frame: bool = False,
     analysis_values: tuple[float, ...] | None = None,
     analysis_unit: str = "dBm",
     analysis_source_key: str | None = None,
@@ -106,44 +151,50 @@ def build_display_state(
 ) -> SpectrumDisplayState:
     """Derive all visible traces and a stable analysis selection.
 
-    ``reference_operation`` is evaluated only when raw and reference grids
-    match.  An invalid/incompatible processed view is omitted rather than
+    ``reference_operation`` requires compatible grids. Use the acquired raw
+    trace by default, or the integrated average when explicitly selected.
+    An invalid/incompatible processed view is omitted rather than
     silently analysing a different source.  Visibility is applied after the
     derived views are built so a hidden raw trace can still be used to derive a
     visible processed trace.
     """
 
-    candidates: list[SpectrumDisplayTrace] = []
-    if raw is not None:
-        candidates.append(_trace(key="raw", label="Raw", source=raw, frame_id=frame_id, provenance=("raw",)))
-    if averaged is not None:
-        candidates.append(
-            _trace(key="averaged", label="Averaged", source=averaged, frame_id=frame_id, provenance=("averaged",))
-        )
+    raw_view = (_trace(key="raw", label="Raw", source=raw, frame_id=frame_id, provenance=("raw",))
+                if raw is not None else None)
+    average_view = (_trace(key="averaged", label=live_average_label if use_average_for_reference else "Averaged",
+                           source=averaged, frame_id=frame_id, provenance=("averaged",))
+                    if averaged is not None else None)
+    candidates = [view for view in (raw_view, average_view) if view is not None]
     if reference is not None:
         candidates.append(
             _trace(key="reference", label="Reference", source=reference, frame_id=frame_id, provenance=("reference",))
         )
 
     operation = reference_operation.strip().lower()
-    if raw is not None and reference is not None and operation not in {"", "none"}:
-        if frequency_grids_match(raw.frequencies_hz, reference.frequencies_hz):
-            try:
-                values, unit = apply_reference_operation(raw.powers_dbm, reference.powers_dbm, operation)
-            except ValueError:
-                pass
-            else:
-                candidates.append(
-                    SpectrumDisplayTrace(
-                        key="processed",
-                        label="Processed",
-                        frequencies_hz=tuple(float(value) for value in raw.frequencies_hz),
-                        values=tuple(float(value) for value in values),
-                        unit=unit,
-                        frame_id=frame_id,
-                        provenance=("raw", "reference", operation),
-                    )
-                )
+    reference_input = average_view if use_average_for_reference else raw_view
+    processed = None
+    if reference_input is not None and reference is not None and operation not in {"", "none"}:
+        processed = _with_reference(
+            reference_input, reference, operation, key="processed",
+            label=f"{live_average_label} · Processed" if use_average_for_reference else "Processed",
+        )
+        if processed is not None:
+            candidates.append(processed)
+
+    if (show_live_frame and use_average_for_reference and raw_view is not None and average_view is not None
+            and raw.configuration_generation == averaged.configuration_generation
+            and (raw.frequencies_hz is averaged.frequencies_hz
+                 or frequency_grids_match(raw.frequencies_hz, averaged.frequencies_hz))):
+        if processed is not None and raw is not reference:
+            subtraction = operation in {"difference_db", "subtract_power", "subtract_power_signed"}
+            overlay = _with_reference(
+                raw_view, reference, operation, key="live_frame",
+                label="Live − reference" if subtraction else "Live frame · Processed",
+            )
+            if overlay is not None:
+                candidates.append(overlay)
+        elif operation in {"", "none"}:
+            candidates.append(replace(raw_view, key="live_frame", label="Live frame"))
 
     if analysis_values is not None and analysis_source_key:
         if analysis_source_snapshot is not None and analysis_source_snapshot.key == analysis_source_key:

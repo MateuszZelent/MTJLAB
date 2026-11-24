@@ -28,7 +28,7 @@ class ReferenceHdf5Store:
     @classmethod
     def save(cls, path: str | Path, reference: ReferenceSpectrum) -> ReferenceSpectrum:
         target = Path(path)
-        metadata = cls._metadata(reference)
+        metadata = cls.metadata(reference)
         writer = Hdf5RunWriter(
             target,
             recipe_source=(
@@ -128,7 +128,7 @@ class ReferenceHdf5Store:
         return reference
 
     @classmethod
-    def _metadata(cls, reference: ReferenceSpectrum) -> dict[str, Any]:
+    def metadata(cls, reference: ReferenceSpectrum) -> dict[str, Any]:
         return {
             "reference_schema": cls.SCHEMA,
             "kind": reference.kind,

@@ -36,6 +36,7 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         "synchronize_phases": adapter.synchronize_phases,
         "configure_counter": lambda: adapter.configure_counter(payload),
         "read_counter": adapter.read_counter,
+        "capture_screen": adapter.capture_screen,
     }
     if operation == "set_output":
         channel, enabled = payload  # type: ignore[misc]

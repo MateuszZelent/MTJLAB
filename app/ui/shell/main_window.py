@@ -87,6 +87,7 @@ from app.safety.keithley_limit_reconciliation import (
 from app.ui.settings_page import SettingsPage
 from app.ui.settings_guidance import SettingsIssue, settings_issue_for_error
 from app.ui.dialogs import SweepDeviceReadinessDialog, StationMessageBox as QMessageBox
+from app.ui.moke_address_dialog import MokeAddressDialog
 from app.ui.settings_workers import KeithleyDefaultsSaveWorker
 from app.ui.run_worker import RunController, serialize_settings_snapshot
 from app.ui.dashboard import StationDashboardController, DeviceConnectionPanel
@@ -112,6 +113,7 @@ from app.ui.widgets import (
     LimitEditDialog,
     LimitField,
     SpectrumPlotWidget,
+    show_toast,
 )
 from app.ui.quick_controls import QuickControlCoordinator, QuickControlsWindow
 from app.ui.workers import DeviceController
@@ -402,7 +404,7 @@ class MainWindow(FluentWindow):
         self.quick_control_coordinator.set_hardware_request_builder(
             "rigol",
             lambda request, state: self.rigol_page.quick_control_hardware_request(
-                request.target, request.text, state
+                request.target, request.text, state, live_only=request.live_only,
             ),
         )
         self.quick_control_coordinator.set_hardware_request_builder(
@@ -456,7 +458,9 @@ class MainWindow(FluentWindow):
             mark_dirty=False,
         )
 
-        self.rigol_page.quick_setpoint_requested.connect(self.quick_control_coordinator.submit)
+        self.rigol_page.quick_setpoint_requested.connect(
+            lambda target, text: self.quick_control_coordinator.submit(target, text, live_only=True)
+        )
         self.keithley_page.quick_setpoint_requested.connect(self.quick_control_coordinator.submit)
         self.quick_control_coordinator.state_changed.connect(
             self.rigol_page.quick_setpoint_state_changed
@@ -845,6 +849,7 @@ class MainWindow(FluentWindow):
         self.dashboard.moke_assignment_requested.connect(self._save_moke_assignment)
         self.dashboard.status.connect(self._log)
         self.settings_page.settings_saved.connect(self._settings_saved)
+        self.settings_page.moke_address_change_requested.connect(self._change_moke_address)
         self.elab_page.settings_saved.connect(self._settings_saved)
         self.elab_page.configuration_changed.connect(self._sync_elab_upload_controls)
         self.anritsu_page.settings_readback_requested.connect(self._save_anritsu_readback_defaults)
@@ -2092,6 +2097,7 @@ class MainWindow(FluentWindow):
             len(plan.actions),  # type: ignore[union-attr]
             estimate.nominal_duration_s,
             plan_actions=plan.actions,  # type: ignore[union-attr]
+            rigol_level_modes=self.rigol_page.voltage_entry_modes(),
             safe_shutdown_actions=plan.safe_shutdown_actions,
             recipe_source=plan.recipe_source,  # type: ignore[union-attr]
             semantic_tree=semantic_tree,
@@ -2245,6 +2251,7 @@ class MainWindow(FluentWindow):
             remaining + len(checkpoint.prelude_actions),
             estimate.nominal_duration_s * remaining_fraction,
             timeline_action_offset=checkpoint.next_action_index - len(checkpoint.prelude_actions),
+            rigol_level_modes=self.rigol_page.voltage_entry_modes(),
             safe_shutdown_actions=plan.safe_shutdown_actions,
             plan_actions=(
                 *checkpoint.prelude_actions,
@@ -2272,6 +2279,13 @@ class MainWindow(FluentWindow):
 
     def _run_event(self, name: str, data: object) -> None:
         payload = data if isinstance(data, dict) else {"data": data}
+        if name == "spectrum_archive_ready":
+            self.run_monitor.spectrogram_preview.set_archive(
+                Path(str(payload["path"])), int(payload["stored_points"])
+            )
+            return
+        if name == "point_stored" and "stored_points" in payload:
+            self.run_monitor.spectrogram_preview.set_stored_points(int(payload["stored_points"]))
         if name == "run_started":
             self._execution_page_projection_cache.clear()
             self._last_execution_readback = None
@@ -2604,7 +2618,9 @@ class MainWindow(FluentWindow):
         self._flush_execution_readback()
         self._leased_run_devices.clear()
         self._set_run_ui_locked(False)
-        self.run_monitor.complete(result)
+        self.run_monitor.complete(
+            result, dialog_parent=self.navigation_routes["execution"].scroll_area.viewport()
+        )
         result_path = None
         if isinstance(result, dict) and result.get("path"):
             result_path = Path(str(result["path"]))
@@ -3597,7 +3613,25 @@ class MainWindow(FluentWindow):
                 f"VISA ASSIGN SUCCESS [{device}]: card and worker now use {resource!r} via {backend!r}"
             )
 
-    def _save_moke_assignment(self, endpoint: str) -> None:
+    def _change_moke_address(self) -> None:
+        if not self._access.allows(Permission.ASSIGN_VISA):
+            return
+        if self._run_controller.running or self.moke_box_page.field_workflow.busy:
+            QMessageBox.warning(self, "MOKE Box is in use", "Stop the active workflow before testing a new address.")
+            return
+        if not self._simulation and self._device_states["moke_box"] in {"connected", "verified", "armed"}:
+            QMessageBox.warning(self, "MOKE Box is connected", "Disconnect the current MOKE Box session first.")
+            return
+        dialog = MokeAddressDialog(
+            self.settings_page.current_moke_address, self, discovery_available=not self._simulation,
+        )
+        try:
+            if dialog.exec() and dialog.verified_endpoint:
+                self._save_moke_assignment(dialog.verified_endpoint, confirmed=True)
+        finally:
+            dialog.deleteLater()
+
+    def _save_moke_assignment(self, endpoint: str, *, confirmed: bool = False) -> None:
         try:
             self._require_permission(
                 Permission.ASSIGN_VISA,
@@ -3607,39 +3641,48 @@ class MainWindow(FluentWindow):
         except AuthorizationError as exc:
             QMessageBox.warning(self, "Access denied", str(exc))
             return
-        answer = QMessageBox.question(
-            self,
-            "Assign MOKE Box",
-            f"Save {endpoint} as the MOKE Box endpoint?\n\n"
-            "The read-only VOUT response was verified. VOUT control will remain disabled.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
+        if self._run_controller.running or self.moke_box_page.field_workflow.busy:
+            QMessageBox.warning(self, "MOKE Box is in use", "Stop the active workflow before changing its address.")
             return
+        existing = self._settings.moke_box
+        if existing.enabled and existing.protocol_qualified and existing.endpoint == endpoint:
+            message = f"MOKE Box is already assigned to {endpoint}."
+            self.dashboard.tcp_discovery_info.setText(message)
+            if confirmed:
+                show_toast(self.settings_page, message, severity="info", title="MOKE Box")
+            return
+        if not confirmed:
+            answer = QMessageBox.question(
+                self,
+                "Assign MOKE Box",
+                f"Save {endpoint} as the MOKE Box endpoint?\n\n"
+                "The read-only VOUT response was verified. Your channel profiles and limits are kept. "
+                "Review the wiring and enable voltage control in Settings → MOKE Box for the new address.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         try:
-            loaded = self._repository.load()
-            raw = deepcopy(loaded.raw)
-            profile = raw["devices"]["moke_box"]
-            profile["enabled"] = True
-            profile["endpoint"] = endpoint
-            profile["protocol_qualified"] = True
-            profile["allow_vout_control"] = False
-            profile["allowed_vout_channels"] = []
-            profile["test_vout_channels"] = []
-            profile["voltage_control"]["approved"] = False
-            for channel_profile in profile.get("channel_profiles", {}).values():
-                channel_profile["approved"] = False
-            settings = self._repository.save_raw(raw)
-        except Exception as exc:
+            def assign(raw: dict, _settings: StationSettings) -> dict:
+                profile = raw["devices"]["moke_box"]
+                if profile["endpoint"] != endpoint or not profile["protocol_qualified"]:
+                    profile.update(allow_vout_control=False, allowed_vout_channels=[], test_vout_channels=[])
+                profile.update(enabled=True, endpoint=endpoint, protocol_qualified=True)
+                return raw
+
+            settings, raw = self._repository.update_raw(assign)
+        except (ConfigurationError, OSError, ValueError) as exc:
             QMessageBox.critical(self, "MOKE Box assignment not saved", str(exc))
             return
-        self.settings_page.reload()
+        self.settings_page.accept_external_snapshot(settings, raw)
         self._settings_saved(settings)
-        self.dashboard.tcp_discovery_info.setText(
-            f"MOKE Box assigned to {endpoint}. Read-only control is ready."
-        )
-        self._log(f"MOKE BOX ASSIGN SUCCESS: endpoint={endpoint!r}; VOUT control remains disabled")
+        output_status = ("VOUT control permitted." if settings.moke_box.allow_vout_control else
+                         "Read-only access. Review VOUT permissions in Settings → MOKE Box.")
+        self.dashboard.tcp_discovery_info.setText(f"MOKE Box assigned to {endpoint}. {output_status}")
+        if confirmed:
+            show_toast(self.settings_page, output_status, severity="success", title=f"Assigned {endpoint}")
+        self._log(f"MOKE BOX ASSIGN SUCCESS: endpoint={endpoint!r}; {output_status}")
 
     def _set_run_ui_locked(self, locked: bool) -> None:
         self.quick_controls_window.setEnabled(not locked)
@@ -3680,8 +3723,6 @@ class MainWindow(FluentWindow):
             if hasattr(self, "keithley_characterization_page") and self.keithley_characterization_page is not None:
                 pages_to_lock.append(self.keithley_characterization_page)
             for page in pages_to_lock:
-                if isinstance(page, ExecutionTelemetryView):
-                    page.set_execution_controlled(True)
                 controls: set[QWidget] = set()
                 for widget_type in (
                     QAbstractButton,
@@ -3690,10 +3731,19 @@ class MainWindow(FluentWindow):
                     QLineEdit,
                 ):
                     controls.update(page.findChildren(widget_type))
-                for control in controls:
-                    if control.property("executionReadOnlyNavigation") is True:
+                # Preserve the widget's own disabled flag before page handlers
+                # or the lock disable its ancestors. isEnabled() includes
+                # inherited state, which cannot be restored with setEnabled().
+                enabled_states = {
+                    control: not control.testAttribute(Qt.WidgetAttribute.WA_ForceDisabled)
+                    for control in controls
+                }
+                if isinstance(page, ExecutionTelemetryView):
+                    page.set_execution_controlled(True)
+                for control, enabled in enabled_states.items():
+                    if not isValid(control) or control.property("executionReadOnlyNavigation") is True:
                         continue
-                    self._run_read_only_controls[control] = control.isEnabled()
+                    self._run_read_only_controls[control] = enabled
                     control.setEnabled(False)
             return
         for control, enabled in self._run_read_only_controls.items():

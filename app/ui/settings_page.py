@@ -87,6 +87,9 @@ from app.ui.settings_guidance import SettingsPath
 
 
 _LIMIT_VALIDATION_MESSAGE_ROLE = int(Qt.ItemDataRole.UserRole) + 101
+_MOKE_PATH = ("devices", "moke_box")
+_MOKE_DERIVED_FIELDS = {"allowed_vout_channels", "test_vout_channels"}
+_MOKE_ASSIGNMENT_FIELDS = ("enabled", "endpoint", "protocol_qualified", "allow_vout_control")
 
 _SETTINGS_SECTION_LABELS = {
     "defaults": "Startup form values (not safety limits)",
@@ -209,11 +212,14 @@ class SettingsPage(QWidget):
     """A generic validated leaf editor for every value in `.config/settings.yml`."""
 
     settings_saved = Signal(object)
+    moke_address_change_requested = Signal()
     status = Signal(str)
 
     _PROTECTED_PATHS = {
         ("devices", "anritsu", "safety", "reference_level", "min"),
         ("devices", "anritsu", "safety", "reference_level", "max"),
+        _MOKE_PATH + ("endpoint",),
+        _MOKE_PATH + ("protocol_qualified",),
     }
     _OPERATOR_EDITABLE_PATHS = {
         ("devices", "rigol", "safety", "allow_output_enable"),
@@ -547,16 +553,23 @@ class SettingsPage(QWidget):
         self._refresh_diagnostics()
         self.status.emit("settings.yml reloaded")
 
+    @property
+    def current_moke_address(self) -> str | None:
+        return self._settings.moke_box.endpoint if self._settings is not None else None
+
     def accept_external_snapshot(self, settings: StationSettings, raw: dict[str, Any]) -> None:
         """Refresh a clean settings page after a background external save.
 
-        An open local draft keeps its widgets untouched.  ``save_draft`` merges
-        only locally changed leaves into the latest file, so that draft cannot
-        later overwrite the background update with stale values.
+        An open draft keeps its edits and picks up any new MOKE address immediately.
+        ``save_draft`` merges locally edited leaves into the latest file.
         """
 
         self._settings = settings
         if self._dirty:
+            old_moke = self._get_path(self._persisted_raw, _MOKE_PATH)
+            new_moke = self._get_path(raw, _MOKE_PATH)
+            if any(old_moke[key] != new_moke[key] for key in ("endpoint", "protocol_qualified")):
+                self._refresh_moke_assignment(old_moke, new_moke)
             self.status.emit("External settings saved; the open local draft was preserved")
             return
         self._raw = deepcopy(raw)
@@ -564,6 +577,25 @@ class SettingsPage(QWidget):
         self._populate()
         self._update_subtitle()
         self._refresh_diagnostics()
+
+    def _refresh_moke_assignment(self, old_moke: dict, new_moke: dict) -> None:
+        """Refresh connection evidence and drop any permission edit for the old address."""
+        draft_moke = self._get_path(self._raw, _MOKE_PATH)
+        enabled = self._form_editors[_MOKE_PATH + ("enabled",)]
+        keep_enabled_edit = enabled.isChecked() != old_moke["enabled"]
+        was_changing = self._changing
+        self._changing = True
+        try:
+            for key in (*_MOKE_ASSIGNMENT_FIELDS, *_MOKE_DERIVED_FIELDS):
+                old_moke[key] = deepcopy(new_moke[key])
+                draft_moke[key] = deepcopy(new_moke[key])
+            if not keep_enabled_edit:
+                enabled.setChecked(new_moke["enabled"])
+            self._form_editors[_MOKE_PATH + ("allow_vout_control",)].setChecked(new_moke["allow_vout_control"])
+            self._form_editors[_MOKE_PATH + ("protocol_qualified",)].setChecked(new_moke["protocol_qualified"])
+            self._form_editors[_MOKE_PATH + ("endpoint",)].setText(self._format_scalar(new_moke["endpoint"]))
+        finally:
+            self._changing = was_changing
 
     def stage_external_snapshot(self, settings: StationSettings, raw: dict[str, Any]) -> None:
         """Replace the in-memory draft without persisting it."""
@@ -760,7 +792,7 @@ class SettingsPage(QWidget):
         layout.setSpacing(14)
         cards: dict[str, QFormLayout] = {}
 
-        def card_for(section: str) -> QFormLayout:
+        def card_for(section: str, target: QVBoxLayout = layout) -> QFormLayout:
             if section not in cards:
                 card = CardWidget(host)
                 card.setObjectName("settingsCard")
@@ -785,7 +817,7 @@ class SettingsPage(QWidget):
                 form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
                 form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
                 card_layout.addWidget(form_host)
-                layout.addWidget(card)
+                target.addWidget(card)
                 cards[section] = form
             return cards[section]
 
@@ -816,9 +848,137 @@ class SettingsPage(QWidget):
             label_widget.setToolTip(label)
             card_for(section).addRow(label_widget, self._form_editor(path, value))
 
-        walk(data, prefix, ())
+        if name == "moke_box":
+            connection = card_for("MOKE Box connection")
+            endpoint = self._form_editor(prefix + ("endpoint",), data["endpoint"])
+            change_address = PushButton("Change TCP address", icon=FluentIcon.SEARCH)
+            change_address.setEnabled(
+                not self._base_read_only and self._access.allows(Permission.ASSIGN_VISA)
+            )
+            change_address.clicked.connect(self.moke_address_change_requested)
+            address_row = QHBoxLayout()
+            address_row.setSpacing(8)
+            address_row.addWidget(endpoint, 1)
+            address_row.addWidget(change_address)
+            connection.addRow(BodyLabel("TCP address"), address_row)
+            connection.addRow(self._form_editor(prefix + ("enabled",), data["enabled"],
+                                                checkbox_text="Enable MOKE Box"))
+
+            permissions = card_for("VOUT permissions")
+            master_path = prefix + ("allow_vout_control",)
+            permissions.addRow(self._form_editor(master_path, data["allow_vout_control"],
+                                                 checkbox_text="Allow voltage control"))
+            primary = data["voltage_control"]
+            primary_path = prefix + ("voltage_control",)
+            channels = {
+                profile["channel"]: (prefix + ("channel_profiles", key), profile)
+                for key, profile in data["channel_profiles"].items()
+            }
+            channels[primary["channel"]] = (primary_path, primary)
+            guidance = BodyLabel()
+            guidance.setWordWrap(True)
+            permissions.addRow(guidance)
+            permissions.addRow(BodyLabel("Approved channels"))
+            approval_controls = QGridLayout()
+            approval_controls.setContentsMargins(0, 0, 0, 0)
+            approval_controls.setHorizontalSpacing(16)
+            approval_controls.setVerticalSpacing(6)
+            approval_host = QWidget()
+            approval_host.setLayout(approval_controls)
+            permissions.addRow(approval_host)
+
+            details = card_for("Channel profiles")
+            selector = ComboBox()
+            selector.setAccessibleName("VOUT channel profile")
+            stack = QStackedWidget()
+            stack.setMinimumWidth(0)
+            stack.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            details.addRow(selector)
+            details.addRow(stack)
+            for index, (channel, (path, profile)) in enumerate(sorted(channels.items())):
+                label = f"VOUT{channel}" + (" · Kepco coil" if path == primary_path else "")
+                approval_path = path + ("approved",)
+                field = self._form_editor(approval_path, profile["approved"], checkbox_text=label)
+                approval_controls.addWidget(field, index // 2, index % 2)
+                selector.addItem(label, userData=channel)
+                profile_page = QWidget()
+                profile_layout = QVBoxLayout(profile_page)
+                profile_layout.setContentsMargins(0, 0, 0, 0)
+                profile_form = QFormLayout()
+                profile_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+                profile_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+                for key, value in profile.items():
+                    if key in {"approved", "channel"}:
+                        continue
+                    profile_form.addRow(
+                        BodyLabel(self._title(key)), self._form_editor(path + (key,), value),
+                    )
+                profile_layout.addLayout(profile_form)
+                profile_layout.addStretch(1)
+                stack.addWidget(profile_page)
+                self._bind_moke_approval(path)
+            selector.currentIndexChanged.connect(stack.setCurrentIndex)
+            selector.setCurrentIndex(0)
+
+            master = self._form_editors[master_path]
+            enabled = self._form_editors[prefix + ("enabled",)]
+            primary_approval = self._form_editors[primary_path + ("approved",)]
+
+            def update_moke_permission() -> None:
+                saved_connection = self._get_path(self._raw, prefix)
+                qualified = bool(saved_connection["endpoint"] and saved_connection["protocol_qualified"])
+                if not qualified:
+                    reason = "Test and assign the MOKE Box address to allow voltage control."
+                elif not enabled.isChecked():
+                    reason = "Enable the MOKE Box connection to allow voltage control."
+                elif not primary_approval.isChecked():
+                    reason = f"Approve the Kepco coil profile for VOUT{primary['channel']} first."
+                else:
+                    reason = "Confirm the wiring and qualification for this address before allowing voltage control."
+                ready = qualified and enabled.isChecked() and primary_approval.isChecked()
+                if not ready:
+                    master.setChecked(False)
+                master.setEnabled(ready and self._form_editable(master_path))
+                guidance.setText(reason)
+
+            evidence_hint = BodyLabel("To approve a channel, enter its binding ID and qualification reference.")
+            evidence_hint.setWordWrap(True)
+            details.insertRow(0, evidence_hint)
+            other_fields = {key: value for key, value in data.items() if key not in {
+                "enabled", "endpoint", "allow_vout_control", "voltage_control", "channel_profiles",
+                *_MOKE_DERIVED_FIELDS,
+            }}
+            walk(other_fields, prefix, ("Connection and readout defaults",))
+            enabled.toggled.connect(update_moke_permission)
+            primary_approval.toggled.connect(update_moke_permission)
+            self._form_editors[prefix + ("endpoint",)].textChanged.connect(update_moke_permission)
+            self._form_editors[prefix + ("protocol_qualified",)].toggled.connect(update_moke_permission)
+            update_moke_permission()
+        else:
+            walk(data, prefix, ())
         layout.addStretch(1)
         self.forms[name].setWidget(host)
+
+    def _bind_moke_approval(self, path: tuple[str | int, ...]) -> None:
+        approval_path = path + ("approved",)
+        approval = self._form_editors[approval_path]
+        binding = self._form_editors[path + ("binding_id",)]
+        reference = self._form_editors[path + ("qualification_reference",)]
+
+        def update_approval() -> None:
+            has_evidence = bool(binding.text().strip() and reference.text().strip())
+            if not has_evidence:
+                approval.setChecked(False)
+            approval.setEnabled(has_evidence and self._form_editable(approval_path))
+            approval.setToolTip(
+                "Allow this channel when voltage control is permitted."
+                if has_evidence else
+                "Enter the binding ID and qualification reference in Channel profiles to approve this channel."
+            )
+
+        binding.editingFinished.connect(update_approval)
+        reference.editingFinished.connect(update_approval)
+        update_approval()
 
     def _form_editable(self, path: tuple[str | int, ...]) -> bool:
         role_path = bool(path) and path[0] == "access_control"
@@ -831,13 +991,16 @@ class SettingsPage(QWidget):
             (not self._read_only or operator_output)
             and (not role_path or self._access.allows(Permission.MANAGE_ROLES))
             and path not in self._PROTECTED_PATHS
+            and not (path[:2] == _MOKE_PATH and path[-1] == "channel")
         )
 
-    def _form_editor(self, path: tuple[str | int, ...], value: Any) -> QWidget:
+    def _form_editor(
+        self, path: tuple[str | int, ...], value: Any, *, checkbox_text: str = "Enabled"
+    ) -> QWidget:
         editable = self._form_editable(path)
         choices = self._choices_for_path(path, value)
         if isinstance(value, bool):
-            editor = CheckBox("Enabled")
+            editor = CheckBox(checkbox_text)
             editor.setChecked(value)
             if self._is_source_autorange_path(path):
                 editor.setText("Source AUTO (exception for other experiments)")
@@ -900,7 +1063,10 @@ class SettingsPage(QWidget):
                 precision_steppable = True
             editor.setProperty("precisionArrowStepping", precision_steppable)
             editor.editingFinished.connect(lambda path=path: self._form_changed(path))
-        editor.setEnabled(editable)
+        if path == _MOKE_PATH + ("endpoint",):
+            editor.setReadOnly(True)
+        else:
+            editor.setEnabled(editable)
         editor.setToolTip(" · ".join(str(part) for part in path))
         field = QWidget()
         field.setMinimumWidth(0)
@@ -949,6 +1115,8 @@ class SettingsPage(QWidget):
     ) -> None:
         if isinstance(value, dict):
             for key, nested in value.items():
+                if path == _MOKE_PATH and key in _MOKE_DERIVED_FIELDS:
+                    continue
                 item = QTreeWidgetItem([str(key), ""])
                 if parent is None:
                     tree.addTopLevelItem(item)
@@ -967,18 +1135,7 @@ class SettingsPage(QWidget):
             return
         item = QTreeWidgetItem(["value", self._format_scalar(value)])
         item.setData(0, Qt.ItemDataRole.UserRole, path)
-        role_path = bool(path) and path[0] == "access_control"
-        role_path_editable = not role_path or self._access.allows(Permission.MANAGE_ROLES)
-        operator_output_permission = (
-            path in self._OPERATOR_EDITABLE_PATHS
-            and not self._base_read_only
-            and self._access.allows(Permission.OPERATE_OUTPUT)
-        )
-        if (
-            (not self._read_only or operator_output_permission)
-            and role_path_editable
-            and path not in self._PROTECTED_PATHS
-        ):
+        if self._form_editable(path):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
             choices = self._choices_for_path(path, value)
             if choices:
@@ -2106,9 +2263,30 @@ class SettingsPage(QWidget):
         self._show_validation_errors(error, draft)
         QMessageBox.critical(self, title, format_settings_validation_error(error))
 
+    @staticmethod
+    def _sync_moke_vout_permissions(draft: dict[str, Any]) -> None:
+        """Keep the persisted channel lists in step with the editable approvals."""
+        moke = draft["devices"]["moke_box"]
+        allowed: list[int] = []
+        tests: list[int] = []
+        if moke["allow_vout_control"]:
+            allowed.append(moke["voltage_control"]["channel"])
+            for key in sorted(moke["channel_profiles"]):
+                profile = moke["channel_profiles"][key]
+                if profile["approved"]:
+                    allowed.append(profile["channel"])
+                    if profile["kepco_mode"] == "dac_test":
+                        tests.append(profile["channel"])
+        for key, eligible in (("allowed_vout_channels", allowed), ("test_vout_channels", tests)):
+            current = moke[key]
+            # Preserve the order in which already permitted outputs are shut down.
+            moke[key] = [channel for channel in current if channel in eligible]
+            moke[key].extend(channel for channel in eligible if channel not in current)
+
     def validate_draft(self) -> StationSettings | None:
         try:
             draft = self._apply_tree_values()
+            self._sync_moke_vout_permissions(draft)
             settings = StationSettings.model_validate(draft)
         except (ConfigurationError, ValueError) as exc:
             self._validation_failed("Validation error", exc, locals().get("draft"))
@@ -2173,6 +2351,18 @@ class SettingsPage(QWidget):
                 # A device page may have saved defaults in the background
                 # while this draft was open. Overlay only locally edited
                 # leaves onto the newest document under one repository lock.
+                moke_master = _MOKE_PATH + ("allow_vout_control",)
+                moke_endpoint = _MOKE_PATH + ("endpoint",)
+                if (
+                    moke_master in local_changed_paths
+                    and self._get_path(local_draft, moke_master)
+                    and self._get_path(latest, moke_endpoint)
+                    != self._get_path(self._persisted_raw, moke_endpoint)
+                ):
+                    raise ConfigurationError(
+                        "The MOKE Box address changed while this draft was open. "
+                        "Clear Allow voltage control, save your changes, then enable it for the new address."
+                    )
                 draft = deepcopy(latest)
                 for path in local_changed_paths:
                     if path in removed_paths:
@@ -2189,6 +2379,7 @@ class SettingsPage(QWidget):
                     )
                 if extra_transform is not None:
                     extra_transform(draft)
+                self._sync_moke_vout_permissions(draft)
                 repair_result[0] = self._repository.repair_known_issues(draft)
                 for channel in ("A", "B"):
                     path = ("devices", "keithley", "safety", "channels", channel, "defaults", "source_autorange")
@@ -2216,10 +2407,12 @@ class SettingsPage(QWidget):
         self._settings = settings
         self._dirty = False
         self._clear_validation_errors()
-        # Editors already show the committed values. Rebuilding the complete
-        # settings tree here is expensive and only necessary when automatic
-        # repair changed data that the user did not enter.
-        if not silent and repaired:
+        # Rebuild when a repair or concurrent MOKE assignment changed the editor values.
+        moke_connection_changed = any(
+            self._get_path(local_draft, _MOKE_PATH + (key,)) != self._get_path(draft, _MOKE_PATH + (key,))
+            for key in _MOKE_ASSIGNMENT_FIELDS
+        )
+        if (not silent and repaired) or moke_connection_changed:
             self._populate()
         self._update_subtitle()
         self._refresh_diagnostics()

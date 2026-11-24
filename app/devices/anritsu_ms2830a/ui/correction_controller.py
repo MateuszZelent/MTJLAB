@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 from pathlib import Path
 from threading import Event, Lock
@@ -12,7 +12,7 @@ import time
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 
-from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
+from app.devices.anritsu_ms2830a import InstrumentAverageResult, SpectrumTrace
 from app.domain.models import MeasurementPoint
 from app.domain.spectrum_decisions import SpectrumDecisionOperation, SpectrumProcessingChange
 from app.domain.spectrum_finalization import (
@@ -30,6 +30,7 @@ from app.spectrum.realtime_processor import RealtimeSpectrumProcessor
 from app.spectrum.resonance_bootstrap import ResonanceBootstrapConfig
 from app.spectrum.spectral_difference_test import SpectralDifferenceTestConfig
 from app.spectrum.reference_diagnostics import ReferenceDiagnosticConfig
+from app.spectrum.streaming_statistics import dbm_to_w
 from app.storage.hdf5_writer import Hdf5RunWriter
 from app.storage.background_profile_store import BackgroundProfileHdf5Store
 
@@ -69,6 +70,17 @@ class CorrectionSessionRequest:
 class CorrectionViewSnapshot:
     corrected: CorrectedSpectrumFrame
     source_raw: SpectrumTrace
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentBackgroundRequest:
+    context: SpectrumAcquisitionContext
+    average: InstrumentAverageResult
+    destination: Path
+    reference_state: str
+    settings_source: str
+    device_idn: str
+    simulation_mode: bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,11 +364,17 @@ class _CorrectionWorker(QObject):
             profiles = Hdf5RunReader.background_profiles(destination)
             return payload.journal_path, records, (destination, block, profiles)
         if operation == "import_profile":
-            return BackgroundProfileHdf5Store.load(payload)
+            path, require_raw_sweeps = payload
+            context, profile = BackgroundProfileHdf5Store.load(path)
+            if require_raw_sweeps and profile.averaging_source == "instrument":
+                raise ValueError("Stripes requires a background recorded with individual sweeps on the PC.")
+            return context, profile
         if operation == "export_profile":
             context, profile, destination = payload
             BackgroundProfileHdf5Store.save(destination, context, profile)
             return destination
+        if operation == "save_instrument_background":
+            return self._save_instrument_background(payload)
         if operation == "start":
             if self._writer is not None:
                 raise ValueError("A spectrum correction session is already open.")
@@ -522,6 +540,31 @@ class _CorrectionWorker(QObject):
             "view": CorrectionViewSnapshot(result, trace) if result is not None else None,
         }
 
+    def _save_instrument_background(self, request: InstrumentBackgroundRequest):
+        if self._writer is not None:
+            raise ValueError("Saving an instrument background requires an idle spectrum worker.")
+        self._check_processing_cancel()
+        average = request.average
+        trace = average.trace
+        started = trace.acquisition_started_at_utc
+        completed = trace.acquisition_completed_at_utc
+        if started is None or completed is None:
+            raise ValueError("The analyzer average is missing acquisition timestamps.")
+        profile = BackgroundProfile(
+            profile_id="pending", context_id=request.context.context_id,
+            mean_w=dbm_to_w(trace.powers_dbm), sample_variance_w2=None, mean_variance_w2=None,
+            sweep_count=average.count, started_at_s=started.timestamp(), completed_at_s=completed.timestamp(),
+            reference_state=request.reference_state, averaging_source="instrument",
+            nominal_sweep_time_s=average.nominal_sweep_time_s,
+        )
+        profile = replace(profile, profile_id=profile.content_hash)
+        BackgroundProfileHdf5Store.save(
+            request.destination, request.context, profile, settings_source=request.settings_source,
+            device_idn=request.device_idn, simulation_mode=request.simulation_mode,
+            cancellation_check=self._check_processing_cancel,
+        )
+        return request.context, profile, request.destination
+
     def _record_operator_confirmation(self, confirmation):
         if not isinstance(confirmation, SpectrumOperatorStateConfirmation) or self._writer is None:
             raise ValueError("State confirmation requires a typed operator report and an open archive.")
@@ -642,11 +685,14 @@ class SpectrumCorrectionController(QObject):
             raise ValueError("Unknown spectrum session terminal status.")
         self._submit("stop", status)
 
-    def load_profile(self, path: Path):
-        self._submit("import_profile", path)
+    def load_profile(self, path: Path, *, require_raw_sweeps=False):
+        self._submit("import_profile", (path, require_raw_sweeps))
 
     def save_profile(self, context, profile, destination: Path):
         self._submit("export_profile", (context, profile, destination))
+
+    def save_instrument_background(self, request: InstrumentBackgroundRequest):
+        self._submit_offline("save_instrument_background", request)
 
     def load_interference_calibrations(self, request: SpectrumInterferenceImportRequest):
         self._submit("import_interference", request)
@@ -702,7 +748,8 @@ class SpectrumCorrectionController(QObject):
     def _offline_finished(self, operation, *args):
         if operation in {"finalize", "finalize_batch", "resume_batch", "inspect_batch_resume",
                          "bootstrap_resonance", "spectral_difference", "train_interference", "validate_interference",
-                         "diagnose_reference", "inspect_finalization", "inspect_interleaved_blocks"}:
+                         "diagnose_reference", "inspect_finalization", "inspect_interleaved_blocks",
+                         "save_instrument_background"}:
             self._offline_busy = False
         if operation == "stop":
             self._session_pending = False

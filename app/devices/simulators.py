@@ -773,7 +773,9 @@ class AnritsuSimulator(_BaseSimulator):
         self.vbw_hz: float | None = 1e3
         self.vbw_mode = "VID"
         self.average_count = 10
+        self.completed_sweep_count = 0
         self.trace_write_mode = "WRIT"
+        self.trace_storage_modes = ["OFF"] * 6
         self.remote_language = "SCPI"
         self.trace_format = "ASC,0"
         self.byte_order = "SWAP"
@@ -860,17 +862,25 @@ class AnritsuSimulator(_BaseSimulator):
         if avg_count:
             self.average_count = int(avg_count.group(1))
             return
+        storage_command = (
+            r"TRAC:STOR:MODE ([1-6]),\s*(OFF|AVER|LAV|MAXH|MINH)" if self.remote_language == "NAT"
+            else r"TRAC([1-6]):STOR:MODE (OFF|AVER|LAV|MAXH|MINH)"
+        )
+        storage = re.fullmatch(storage_command, command, re.IGNORECASE)
+        if storage:
+            self.trace_storage_modes[int(storage.group(1)) - 1] = storage.group(2).upper()
+            return
         trace_mode = re.match(r"^(?:TRAC(?:1)?:TYPE)\s+(WRIT|VIEW|BLAN)$", command, re.IGNORECASE)
         if trace_mode:
             self.trace_write_mode = trace_mode.group(1).upper()
             return
-        indexed_trace_mode = re.fullmatch(r"TRAC:TYPE\s+1,\s*(WRIT|VIEW)", command, re.IGNORECASE)
+        indexed_trace_mode = re.fullmatch(r"TRAC:TYPE\s+1,\s*(WRIT|VIEW|BLAN)", command, re.IGNORECASE)
         if indexed_trace_mode:
             self.trace_write_mode = indexed_trace_mode.group(1).upper()
             return
-        trace_format = re.fullmatch(r"FORM\s+(ASC(?:,0)?|REAL,32)", command, re.IGNORECASE)
+        trace_format = re.fullmatch(r"FORM\s+(ASC(?:,0)?|REAL,32|INT,32)", command, re.IGNORECASE)
         if trace_format:
-            self.trace_format = "ASC,0" if trace_format.group(1).upper().startswith("ASC") else "REAL,32"
+            self.trace_format = "ASC,0" if trace_format.group(1).upper().startswith("ASC") else trace_format.group(1).upper()
             return
         byte_order = re.fullmatch(r"FORM:BORD\s+(SWAP|NORM)", command, re.IGNORECASE)
         if byte_order:
@@ -929,6 +939,7 @@ class AnritsuSimulator(_BaseSimulator):
             return
         if command.upper() == "INIT:MODE:SING":
             self.continuous_sweep = False
+            self.completed_sweep_count = self.average_count if self.trace_storage_modes[0] != "OFF" else 1
             self.trace_frame += 1
             return
         if command.upper() == "INIT:MODE:CONT":
@@ -983,11 +994,18 @@ class AnritsuSimulator(_BaseSimulator):
             return self.vbw_mode
         if command == "AVER:COUN?":
             return str(self.average_count)
+        if command == ("SWEEPCOUNT?" if self.remote_language == "NAT" else "TRAC:SWE:COUN?"):
+            return str(self.completed_sweep_count)
+        storage_query = r"TRAC:STOR:MODE\? ([1-6])" if self.remote_language == "NAT" else r"TRAC([1-6]):STOR:MODE\?"
+        storage = re.fullmatch(storage_query, command, re.IGNORECASE)
+        if storage:
+            return self.trace_storage_modes[int(storage.group(1)) - 1]
         if command == "FREQ:CENT?":
             return f"{(self.start_hz + self.stop_hz) / 2:.12g}"
         if command == "FREQ:SPAN?":
             return f"{self.stop_hz - self.start_hz:.12g}"
-        if re.fullmatch(r"TRAC:TYPE\?", command, re.IGNORECASE):
+        trace_type_queries = {"TRAC:TYPE? 1"} if self.remote_language == "NAT" else {"TRAC:TYPE?", "TRAC1:TYPE?"}
+        if command.upper() in trace_type_queries:
             return self.trace_write_mode
         if command == "DET?":
             return self.detector

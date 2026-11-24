@@ -217,17 +217,17 @@ class AnritsuFastAcquisitionTests(unittest.TestCase):
                 trace_name="TRAC1",
             )
             # Frame 1
-            controller.result.emit("single_sweep", trace)
+            controller.result.emit("unaveraged_sweep", trace)
             self.assertIn("Progress: 1 / 5 spectra", page.average_stats_label.text())
             self.assertIn("/s", page.average_stats_label.text())
 
             # Frames 2, 3, 4
             for i in range(2, 5):
-                controller.result.emit("single_sweep", trace)
+                controller.result.emit("unaveraged_sweep", trace)
                 self.assertIn(f"Progress: {i} / 5 spectra", page.average_stats_label.text())
 
             # Frame 5 (completion)
-            controller.result.emit("single_sweep", trace)
+            controller.result.emit("unaveraged_sweep", trace)
             self.assertFalse(page._averaging_active)
             self.assertIn("Completed: 5 spectra taken in ", page.average_stats_label.text())
             self.assertIn("/s", page.average_stats_label.text())
@@ -259,8 +259,8 @@ class AnritsuFastAcquisitionTests(unittest.TestCase):
                 acquired_at_utc=datetime.now(timezone.utc),
                 trace_name="TRAC1",
             )
-            controller.result.emit("single_sweep", trace)
-            controller.result.emit("single_sweep", trace)
+            controller.result.emit("unaveraged_sweep", trace)
+            controller.result.emit("unaveraged_sweep", trace)
             page.cancel_averaging()
             self.assertFalse(page._averaging_active)
             self.assertIn("Averaging cancelled at 2 / 10 spectra", page.average_stats_label.text())
@@ -391,6 +391,7 @@ class AnritsuFastAcquisitionTests(unittest.TestCase):
             self.assertTrue(page._timer.isActive())
             self.assertEqual(page._timer.interval(), 100)
             self.assertEqual(page.live.text(), "Stop Live")
+            self.assertFalse(page.auto_peak_detection.isChecked())
 
             # Simulate frames arriving
             sample_trace = SpectrumTrace(

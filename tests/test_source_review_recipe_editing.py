@@ -132,6 +132,32 @@ def test_editing_reference_to_zero_duration_removes_old_timing(monkeypatch, shel
         page.deleteLater()
 
 
+def test_editing_hardware_acquisition_removes_the_previous_target(monkeypatch, shell_qt_application):
+    source = yaml.safe_dump({"schema_version": 1, "name": "edit-capture", "root": {
+        "id": "capture", "type": "acquire_spectrum", "instrument_average_count": 50,
+    }})
+    node = parse_recipe_text(source).root
+    page = RecipePage(simulation_settings())
+    saved = []
+
+    def edit(dialog):
+        dialog.instrument_average_target.setCurrentIndex(dialog.instrument_average_target.findData("duration"))
+        dialog.instrument_average_duration.setText("2.5 s")
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(AnritsuAcquisitionEditorDialog, "exec", edit)
+    monkeypatch.setattr(page, "_builder_source", lambda: source)
+    monkeypatch.setattr(page, "_apply_builder_source", lambda text, *args, **kwargs: saved.append(text))
+    try:
+        page._edit_anritsu_acquisition_node(node)
+        edited = parse_recipe_text(saved[0]).root
+        assert edited.data["instrument_average_duration"] == "2.5 s"
+        assert "instrument_average_count" not in edited.data
+    finally:
+        page.close()
+        page.deleteLater()
+
+
 def test_changed_station_settings_reject_queued_preflight_result(shell_qt_application, monkeypatch):
     page = RecipePage(simulation_settings())
     try:

@@ -18,10 +18,17 @@ from qfluentwidgets import (
 )
 
 from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto, parse_quantity
+from app.spectrum.stripe_correction import parse_frequency_bands
 from app.ui.dialogs import StationDialog
 
 from .filter_choices import FilterComboBox
-from .map_processing import MAX_IMAGE_SIGMA, MAX_IMAGE_WINDOW, MIN_IMAGE_SIGMA, MapProcessing
+from .map_processing import (
+    MAX_IMAGE_SIGMA,
+    MAX_IMAGE_WINDOW,
+    MIN_IMAGE_SIGMA,
+    STRIPE_OPERATIONS,
+    MapProcessing,
+)
 
 
 class MapSettingsDialog(StationDialog):
@@ -29,9 +36,9 @@ class MapSettingsDialog(StationDialog):
         super().__init__(parent)
         self.setWindowTitle("Heatmap common component and stationary lines")
         self.set_resizable(True)
-        self.resize(760, 680)
+        self.resize(760, 720)
         root = self.modal_content_layout(spacing=10)
-        note = CaptionLabel("Classify narrow lines on recorded raw dBm, then mask the corresponding bins in the current map. Masked bins remain gaps. Optional 2D image denoising is configured separately in the Map controls and follows these operations.", self)
+        note = CaptionLabel("Stripe correction uses selected bands in a relative dB map. Compare Input and Common component to inspect the correction.", self)
         note.setWordWrap(True)
         root.addWidget(note)
         form = QFormLayout()
@@ -54,7 +61,8 @@ class MapSettingsDialog(StationDialog):
             self.numbers[key] = spin
         self.widths = {}
         for key, label in (("line_max_width_hz", "Maximum full line-lobe width"),
-                           ("line_neighbourhood_hz", "Local frequency neighbourhood width")):
+                           ("line_neighbourhood_hz", "Local frequency neighbourhood width"),
+                           ("stripe_shoulder_hz", "Stripe shoulder width on each side")):
             edit = LineEdit(self)
             edit.setText(format_quantity_auto(getattr(state, key), DIMENSION_FREQUENCY))
             edit.setAccessibleName(label)
@@ -64,8 +72,26 @@ class MapSettingsDialog(StationDialog):
         self.bands.setText("; ".join(f"{format_quantity_auto(lo, DIMENSION_FREQUENCY)} .. {format_quantity_auto(hi, DIMENSION_FREQUENCY)}"
                                     for lo, hi in state.protected_bands_hz))
         self.bands.setPlaceholderText("600 MHz .. 800 MHz; 1 GHz .. 1.2 GHz")
-        self.bands.setToolTip("Protected bands prevent stationary-line masking. Common-component subtraction still acts on the entire selected slice.")
-        form.addRow("Protect signal bands from line masking", self.bands)
+        self.bands.setToolTip("Protected bands are skipped by stripe subtraction and stationary-line masking.")
+        form.addRow("Protect frequency bands", self.bands)
+        self.stripe_bands = LineEdit(self)
+        self.stripe_bands.setAccessibleName("Stationary stripe frequency bands")
+        self.stripe_bands.setText("; ".join(
+            f"{format_quantity_auto(lo, DIMENSION_FREQUENCY)} .. {format_quantity_auto(hi, DIMENSION_FREQUENCY)}"
+            for lo, hi in state.stripe_bands_hz
+        ))
+        self.stripe_bands.setPlaceholderText("800 MHz .. 823 MHz")
+        self.stripe_bands.setToolTip("Separate the frequency bands with a semicolon.")
+        form.addRow("Stationary stripe bands", self.stripe_bands)
+        self.stripe_window = SpinBox(self)
+        self.stripe_window.setRange(3, MAX_IMAGE_WINDOW)
+        self.stripe_window.setSingleStep(2)
+        self.stripe_window.setValue(state.stripe_sweep_window)
+        self.stripe_window.setSuffix(" points")
+        self.stripe_window.setAccessibleName("Local stripe correction sweep window")
+        self.stripe_window.setToolTip("Number of consecutive sweep points used to estimate each band's correction.")
+        form.addRow("Stripe sweep median", self.stripe_window)
+        form.setRowVisible(self.stripe_window, state.component == "repair_stripe_bands_db")
         root.addLayout(form)
         self.error = CaptionLabel("", self)
         self.error.setWordWrap(True)
@@ -81,25 +107,25 @@ class MapSettingsDialog(StationDialog):
         footer.addWidget(save)
         root.addLayout(footer)
         self.state = state
+        if state.component in STRIPE_OPERATIONS:
+            self.stripe_bands.setFocus()
 
     def _save(self):
         try:
-            bands = []
-            for text in filter(str.strip, self.bands.text().split(";")):
-                bounds = text.split("..")
-                if len(bounds) != 2:
-                    raise ValueError("Use '600 MHz .. 800 MHz' for each protected band.")
-                bands.append(tuple(parse_quantity(v.strip(), DIMENSION_FREQUENCY).si_value for v in bounds))
+            bands = parse_frequency_bands(self.bands.text())
+            stripe_bands = parse_frequency_bands(self.stripe_bands.text())
+            if self.state.component in STRIPE_OPERATIONS and not stripe_bands:
+                raise ValueError("Enter at least one stationary stripe band.")
             self.state = replace(self.state,
                 **{key: control.value() / (100 if key in {"minimum_coverage", "line_stability_fraction"} else 1)
                    for key, control in self.numbers.items()},
                 **{key: parse_quantity(control.text(), DIMENSION_FREQUENCY).si_value for key, control in self.widths.items()},
-                protected_bands_hz=tuple(bands))
+                protected_bands_hz=bands, stripe_bands_hz=stripe_bands,
+                stripe_sweep_window=self.stripe_window.value())
         except (ValueError, TypeError) as exc:
             self.error.setText(str(exc))
             return
         self.accept()
-
 
 class MapProcessingControls(CardWidget):
     changed = Signal(object)
@@ -120,7 +146,9 @@ class MapProcessingControls(CardWidget):
         for label, key in (("Off — preserve input", "none"), ("Subtract median component — W", "median_power"),
                            ("Subtract lower-quantile component — W", "quantile_power"),
                            ("Subtract selected coordinate — W", "reference_power"),
-                           ("Contrast vs median — relative dB", "median_db")):
+                           ("Contrast vs median — relative dB", "median_db"),
+                           ("Remove stripe bands — dB", "repair_stripe_bands_db"),
+                           ("Subtract shared stripe offset — dB", "stationary_stripes_db")):
             self.operation.addItem(label, userData=key)
         self.operation.setAccessibleName("Heatmap common-component operation")
         self.operation.setToolTip("Use only this selected map slice. Median/quantile removal can suppress a physical signal that occupies most parameter values.")
@@ -263,6 +291,17 @@ class MapProcessingControls(CardWidget):
             f"width ≤ {format_quantity_auto(state.line_max_width_hz, DIMENSION_FREQUENCY)} · "
             f"{len(state.protected_bands_hz)} protected band(s). Original HDF5 unchanged."
             if state.active else "Map filters are off. A stationary line can be real signal; compare Input / Common component before interpreting the residual.")
+        self.note.setToolTip("")
+        if state.component in STRIPE_OPERATIONS:
+            bands = "; ".join(
+                f"{format_quantity_auto(lo, DIMENSION_FREQUENCY)} – {format_quantity_auto(hi, DIMENSION_FREQUENCY)}"
+                for lo, hi in state.stripe_bands_hz
+            )
+            self.note.setToolTip(bands)
+            scope = f"{len(state.stripe_bands_hz)} selected stripe band(s)"
+            if state.component == "repair_stripe_bands_db":
+                scope += f" · {state.stripe_sweep_window}-point sweep median"
+            self.note.setText(f"{scope}. Use Common component to inspect the correction.")
         if emit:
             self.changed.emit(state)
 
@@ -288,12 +327,20 @@ class MapProcessingControls(CardWidget):
             self.image_error.show()
             self.reset.setEnabled(True)
             return
-        self.set_state(state, emit=True)
+        if component in STRIPE_OPERATIONS and not state.stripe_bands_hz:
+            self._edit_settings(state)
+        else:
+            self.set_state(state, emit=True)
 
     def _settings(self):
-        dialog = MapSettingsDialog(self, self.state)
+        self._edit_settings(self.state)
+
+    def _edit_settings(self, state):
+        dialog = MapSettingsDialog(self, state)
         if dialog.exec():
             self.set_state(dialog.state, emit=True)
+        else:
+            self.set_state(self.state)
         dialog.deleteLater()
 
     def _sync_height(self):

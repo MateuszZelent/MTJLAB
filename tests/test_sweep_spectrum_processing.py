@@ -132,6 +132,29 @@ def test_signed_background_filters_archive_raw_and_match_shared_pipeline(tmp_pat
     np.testing.assert_array_equal(preview["processed_values"], stored.processed_values)
 
 
+@pytest.mark.parametrize("compatible", [True, False])
+def test_raw_only_checkpoint_reports_matching_reference_difference_for_preview(tmp_path, compatible):
+    path = tmp_path / "raw-preview.h5"
+    events = []
+    recipe = yaml.safe_load(recipe_with(reference_operation="none", store_processed=False))
+    if not compatible:
+        children = recipe["root"]["children"]
+        children.insert(2, dict(children[0], id="reconfigure", reference_level="-10 dBm"))
+    result, _ = execute(path, events=events, source=yaml.safe_dump(recipe))
+    assert result.error is None
+    stored = Hdf5RunReader.spectrum(path, 0)
+    baseline = Hdf5RunReader.reference(path, 0)
+    preview = next(payload for name, payload in events if name == "spectrum_preview")
+    assert stored.processed_values is None
+    if compatible:
+        np.testing.assert_allclose(
+            preview["raw_minus_reference_db"],
+            np.asarray(stored.powers_dbm) - baseline.powers_dbm,
+        )
+    else:
+        assert preview["raw_minus_reference_db"] is None
+
+
 def saved_reference(tmp_path, kind, *, mismatch=False):
     settings = simulation_settings()
     adapter = AnritsuAdapter(settings, session_factory=SimulatedVisaFactory("anritsu"))

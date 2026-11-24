@@ -12,6 +12,7 @@ from enum import StrEnum
 import hashlib
 import json
 import math
+from typing import Literal
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -158,7 +159,7 @@ class BackgroundProfile:
     profile_id: str
     context_id: str
     mean_w: FloatVector
-    sample_variance_w2: FloatVector
+    sample_variance_w2: FloatVector | None
     mean_variance_w2: FloatVector | None
     sweep_count: int
     started_at_s: float
@@ -166,20 +167,32 @@ class BackgroundProfile:
     reference_state: str
     signal_free_qualified: bool = False
     schema_version: int = 1
+    averaging_source: Literal["pc", "instrument"] = "pc"
+    nominal_sweep_time_s: float | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 1 or not self.profile_id or not self.context_id:
             raise ValueError("Unsupported profile schema or missing identity.")
         mean = immutable_vector(self.mean_w, name="mean_w", nonnegative=True)
-        variance = immutable_vector(
-            self.sample_variance_w2, name="sample_variance_w2", nonnegative=True
-        )
+        variance = self.sample_variance_w2
         mean_variance = self.mean_variance_w2
+        if self.averaging_source == "pc":
+            if variance is None or self.nominal_sweep_time_s is not None:
+                raise ValueError("PC backgrounds require sample variance from the recorded sweeps.")
+            variance = immutable_vector(variance, name="sample_variance_w2", nonnegative=True)
+        elif self.averaging_source == "instrument":
+            if variance is not None or mean_variance is not None or self.signal_free_qualified:
+                raise ValueError("An instrument mean cannot establish variance or signal-free qualification.")
+            if self.nominal_sweep_time_s is None:
+                raise ValueError("An instrument mean requires the nominal sweep time.")
+            positive_time(self.nominal_sweep_time_s, "Nominal sweep time")
+        else:
+            raise ValueError("Unknown background averaging source.")
         if mean_variance is not None:
             mean_variance = immutable_vector(
                 mean_variance, name="mean_variance_w2", nonnegative=True
             )
-        if variance.shape != mean.shape or (
+        if (variance is not None and variance.shape != mean.shape) or (
             mean_variance is not None and mean_variance.shape != mean.shape
         ):
             raise ValueError("Profile vectors must share one frequency grid.")
@@ -209,6 +222,9 @@ class BackgroundProfile:
             "schema_version": self.schema_version,
             "mean_variance_known": self.mean_variance_w2 is not None,
         }
+        if self.averaging_source == "instrument":
+            metadata["averaging_source"] = self.averaging_source
+            metadata["nominal_sweep_time_s"] = self.nominal_sweep_time_s
         digest = hashlib.sha256(json.dumps(metadata, sort_keys=True).encode())
         for values in (self.mean_w, self.sample_variance_w2, self.mean_variance_w2):
             if values is not None:

@@ -30,12 +30,16 @@ def retained_size(value, seen=None):
 
 
 class ResultReadSession:
-    def __init__(self, path, *, references=None, budget_bytes=64 * 1024 * 1024):
+    def __init__(self, path, *, references=None, budget_bytes=64 * 1024 * 1024,
+                 public_reader=None, spectrum_reader=None, points=None):
         self.path = Path(path)
         self.catalogue = None if references is None else tuple(references)
         self.budget_bytes = budget_bytes
         self.retained_bytes = 0
         self._cache = OrderedDict()
+        self._public_reader = public_reader
+        self._spectrum_reader = spectrum_reader
+        self._points = points or {}
 
     def cached(self, key, operation):
         if key in self._cache:
@@ -53,10 +57,13 @@ class ResultReadSession:
         return result
 
     def point(self, index):
+        if index in self._points:
+            return self._points[index]
         return self.cached(("point", index), lambda: Hdf5RunReader.point(self.path, index))
 
     def spectrum(self, path, index):
-        return self.cached(("raw", index), lambda: Hdf5RunReader.spectrum(self.path, index))
+        read = self._spectrum_reader or Hdf5RunReader.spectrum
+        return self.cached(("raw", index), lambda: read(self.path, index))
 
     def reference(self, path, index):
         return self.cached(("reference", index), lambda: Hdf5RunReader.reference(self.path, index))
@@ -76,6 +83,8 @@ class ResultReadSession:
         return resolved, trace
 
     def public_spectrum(self, path, row_id, checkpoint):
+        if self._public_reader is not None:
+            return self._public_reader(self.path, row_id, checkpoint)
         return self.cached(
             ("public", row_id, checkpoint),
             lambda: ThatecRunReader.spectrum_slice(self.path, row_id, checkpoint),

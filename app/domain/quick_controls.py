@@ -24,6 +24,7 @@ class QuickSetpoint:
     text: str
     value_si: float
     sequence: int
+    live_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +114,7 @@ def render_quantity_si_like(
     value_si: float,
     *,
     preferred_unit: str | None = None,
+    precision: int = 12,
 ) -> str:
     """Render an SI boundary in the user's current unit and written precision."""
 
@@ -134,7 +136,7 @@ def render_quantity_si_like(
     if abs(numeric_si) < 1e-15:
         value_in_unit = Decimal("0")
     else:
-        value_in_unit = Decimal(f"{numeric_si:.12g}") / scale
+        value_in_unit = Decimal(f"{numeric_si:.{precision}g}") / scale
     # A safety boundary may be finer than the operator's current display
     # precision (for example 0.15 A while the field shows 0.1 A).  Add only
     # the digits required to represent that boundary exactly; rounding it

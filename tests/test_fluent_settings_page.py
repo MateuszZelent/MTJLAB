@@ -19,6 +19,7 @@ from qfluentwidgets import (
     SpinBox,
 )
 
+from app.security import AccessPolicy
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
 from app.ui.settings_page import SettingsPage
@@ -29,6 +30,76 @@ from tests.helpers import SETTINGS_TEMPLATE
 from tests.shell_test_isolation import (  # noqa: F401
     isolated_shell_persistence, shell_qt_application,
 )
+
+
+def test_moke_vout0_and_independent_approval_render_and_save(tmp_path):
+    repository = SettingsRepository(tmp_path / "settings.yml")
+    raw = repository.load().raw
+    raw["access_control"]["user_roles"]["test-engineer"] = ["engineer"]
+    moke = raw["devices"]["moke_box"]
+    moke.update(enabled=True, endpoint="131.246.221.92:10001", protocol_qualified=True,
+                allow_vout_control=True, allowed_vout_channels=[0])
+    independent = moke["channel_profiles"]
+    independent["2"] = dict(independent.pop("0"), channel=2, binding_id="test-VOUT2")
+    independent["1"]["qualification_reference"] = "station approval"
+    moke["voltage_control"].update(channel=0, approved=True, binding_id="coil-VOUT0",
+                                   qualification_reference="station approval")
+    settings = repository.save_raw(raw)
+    page = SettingsPage(repository, access_policy=AccessPolicy.from_settings(
+        settings, username="test-engineer",
+    ))
+    try:
+        application = QApplication.instance()
+        prefix = ("devices", "moke_box")
+        test_channel = page._form_editors[prefix + ("channel_profiles", "1", "approved")]
+        primary = page._form_editors[prefix + ("voltage_control", "approved")]
+        master = page._form_editors[prefix + ("allow_vout_control",)]
+        missing_evidence = page._form_editors[prefix + ("channel_profiles", "2", "approved")]
+        assert not missing_evidence.isEnabled()
+        test_channel.setChecked(True)
+        with patch("app.ui.settings_page.QMessageBox.information"):
+            assert page.validate_draft().moke_box.test_vout_channels == (1,)
+        assert page.save_draft(silent=True)
+        saved = repository.load().settings.moke_box
+        assert saved.allowed_vout_channels == (0, 1)
+        assert saved.test_vout_channels == (1,)
+
+        page.tabs.setCurrentWidget(page.forms["moke_box"])
+        page.resize(1360, 880)
+        page.show()
+        application.processEvents()
+        assert "VOUT0" in primary.text() and "VOUT1" in test_channel.text()
+        assert primary.isVisibleTo(page) and test_channel.isVisibleTo(page)
+        assert primary.height() > 0 and primary.width() > 0
+        primary_position = primary.mapTo(page, primary.rect().topLeft())
+        test_position = test_channel.mapTo(page, test_channel.rect().topLeft())
+        assert (primary_position.y(), primary_position.x()) < (test_position.y(), test_position.x())
+        assert page.grab().save(str(tmp_path / "moke-settings.png"))
+        page.resize(820, 700)
+        application.processEvents()
+        viewport = page.forms["moke_box"].viewport()
+        assert viewport.rect().contains(master.mapTo(viewport, master.rect().center()))
+        assert page.grab().save(str(tmp_path / "moke-settings-narrow.png"))
+
+        master.setChecked(False)
+        assert page.save_draft(silent=True)
+        saved = repository.load().settings.moke_box
+        assert saved.channel_profiles["1"].approved
+        assert saved.allowed_vout_channels == saved.test_vout_channels == ()
+
+        master.setChecked(True)
+        test_channel.setChecked(False)
+        assert page.save_draft(silent=True)
+        saved = repository.load().settings.moke_box
+        assert saved.allowed_vout_channels == (0,)
+        assert saved.test_vout_channels == ()
+
+        primary.setChecked(False)
+        assert not master.isEnabled() and not master.isChecked()
+        assert page.save_draft(silent=True)
+        assert not repository.load().settings.moke_box.allow_vout_control
+    finally:
+        page.close()
 
 
 class FluentSettingsPageTests(unittest.TestCase):

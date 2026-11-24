@@ -1,5 +1,6 @@
 """Shared acquisition, correction, DSP and plot controls in the Fluent page."""
 
+import csv
 from dataclasses import fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,7 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, QThread
 from PySide6.QtTest import QTest
 
 from app.devices.anritsu_ms2830a.ui.analysis_settings_dialog import SpectrumAnalysisSettingsDialog
@@ -18,6 +19,9 @@ from app.spectrum import (
     apply_reference_operation,
     clean_spectrum_pipeline,
 )
+from app.spectrum.comparison_view import display_state
+from app.spectrum.display_model import SpectrumDisplayTrace
+from app.spectrum.streaming_statistics import dbm_to_w
 from app.ui.design_system import apply_application_theme
 from tests.shell_test_isolation import shell_qt_application as shell_qt_application  # noqa: PLC0414
 from tests.test_shared_background_filter import shared_page as shared_page  # noqa: PLC0414
@@ -90,6 +94,187 @@ def test_corrections_are_exclusive_and_reference_operation_is_remembered(shared_
     wait_until(app, lambda: page._cleanup_result is not None and page._cleanup_result.unit == "mW²")
 
 
+@pytest.mark.parametrize("width", [870, 1440])
+def test_absolute_reference_view_is_shared_by_both_spectrum_windows(shared_page, width, tmp_path):
+    app, page, _, _, trace, _, _, _ = shared_page
+    page.resize(width, 900)
+    page.show()
+    signed = np.resize(np.array((-2.5, 0., 1.25)), len(trace.powers_dbm))
+    reference = replace(trace, powers_dbm=tuple(np.full(len(signed), -60.)))
+    raw = replace(trace, powers_dbm=tuple(-60. + signed))
+    page._set_reference(page._build_reference(reference, kind="single", count=1))
+    page.reference_operation.setCurrentIndex(page.reference_operation.findData("difference_db"))
+    page._show_trace(raw, update_controls=False)
+    page._open_spectrum_window()
+    floating = page._spectrum_window
+    floating.resize(width, 680)
+    app.processEvents()
+    try:
+        for control in (page.show_absolute, floating.show_absolute):
+            assert control.isVisible() and control.isEnabled()
+            assert control.width() > 0 and control.height() > 0
+        floating.show_absolute.click()
+        assert page.show_absolute.isChecked()
+        for plot in (page.spectrum_plot, floating.spectrum):
+            np.testing.assert_array_equal(plot._traces["Processed"][1], np.abs(signed))
+            assert plot.plot.getAxis("left").labelUnits == "dB"
+            assert "Absolute difference" in plot.plot.getAxis("left").labelText
+        output = tmp_path / "magnitude.csv"
+        floating.spectrum._export_csv(output)
+        with output.open(newline="", encoding="utf-8") as stream:
+            row = next(csv.DictReader(stream))
+        assert float(row["absolute_difference_db"]) == 2.5
+        original, displayed, unit, provenance = page._manual_trace_payload("processed")
+        assert original is raw
+        np.testing.assert_array_equal(displayed, np.abs(signed))
+        assert unit == "dB" and "absolute_difference" in provenance
+        page.show_absolute.click()
+        assert not floating.show_absolute.isChecked()
+        np.testing.assert_array_equal(floating.spectrum._traces["Processed"][1], signed)
+        page.correction_controls.reference.setChecked(False)
+        assert not page.show_absolute.isEnabled() and not floating.show_absolute.isEnabled()
+        np.testing.assert_array_equal(page.spectrum_plot._traces["Raw"][1], raw.powers_dbm)
+    finally:
+        floating.close()
+
+
+def test_absolute_view_folds_power_averaged_reference_difference(shared_page):
+    app, page, _, _, trace, _, _, _ = shared_page
+    reference = replace(trace, powers_dbm=tuple(np.full(len(trace.powers_dbm), -60.)))
+    raw = replace(trace, powers_dbm=tuple(np.full(len(trace.powers_dbm), -62.)))
+    page._set_reference(page._build_reference(reference, kind="single", count=1))
+    page.reference_operation.setCurrentIndex(page.reference_operation.findData("difference_db"))
+    average = page.correction_controls.power_average
+    average.setCurrentIndex(average.findData(64))
+    page._spectrogram_buffer.clear()
+    page._show_trace(raw, update_controls=False)
+    wait_until(app, lambda: page._cleanup_result is not None
+               and page._cleanup_result.unit == "dB"
+               and "Power average" in page._cleanup_result.method
+               and np.allclose(page._cleanup_result.values, -2.))
+    assert page.show_absolute.isEnabled()
+    page.show_absolute.click()
+    np.testing.assert_allclose(page.spectrum_plot._traces["Analysis"][1], 2.)
+    np.testing.assert_allclose(page._cleanup_result.values, -2.)
+
+
+@pytest.mark.parametrize("mode", ["narrow_reject", "emi_reject", "denoise"])
+@pytest.mark.parametrize("average", ["off", "frames", "rolling", "rolling_reference"])
+def test_live_filters_render_after_the_selected_average(shared_page, mode, average):
+    app, page, _, _, trace, _, _, _ = shared_page
+    rolling = average.startswith("rolling")
+    corrected = average == "rolling_reference"
+    if corrected:
+        reference = replace(trace, powers_dbm=tuple(np.full(len(trace.powers_dbm), -90.0)))
+        page._set_reference(page._build_reference(reference, kind="single", count=1))
+        page.correction_controls.reference.setChecked(True)
+    if average != "off":
+        choice = page.correction_controls.power_average
+        choice.setCurrentIndex(choice.findData(4))
+
+    page._set_page_state(AnritsuPageState.LIVE)
+    page._timer.start(10000)
+    if rolling:
+        page.live_average_target.mode.setCurrentIndex(page.live_average_target.mode.findData("seconds"))
+        page.live_average_target.seconds.setValue(60)
+        page.start_live_average.click()
+    page._spectrogram_buffer.clear()
+    page.cleanup_filters[mode].setChecked(True)
+    rng = np.random.default_rng(12)
+    frames = []
+    for i in range(8):
+        powers = -82 + 0.14 * i + rng.normal(0, 0.10, len(trace.powers_dbm))
+        powers[400] += 19
+        frame = replace(trace, powers_dbm=tuple(powers))
+        frames.append(frame.powers_dbm)
+        page._result("fetch_current_trace_fast", frame)
+
+    key = "analysis:processed" if corrected else "analysis:averaged" if rolling else "analysis:raw"
+    wait_until(app, lambda: page._display_state.primary_key == key
+               and page._analysis_source_snapshot.frame_id == page._display_revision)
+    inputs = frames if rolling else frames[-4:] if average == "frames" else frames[-1:]
+    value = tuple(10 * np.log10(np.mean([dbm_to_w(row) for row in inputs], axis=0)) + 30)
+    history, unit = tuple(frames), "dBm"
+    if corrected:
+        value, unit = apply_reference_operation(value, reference.powers_dbm, "difference_db")
+        history = tuple(apply_reference_operation(row, reference.powers_dbm, "difference_db")[0] for row in frames)
+    result = clean_spectrum_pipeline(
+        value, unit=unit, modes=(mode,), history=history,
+        frequencies_hz=trace.frequencies_hz, parameters=page._analysis_parameters,
+    )
+    assert result.modified_bin_indices
+    assert mode in page._cleanup_result.applied_modes
+    np.testing.assert_allclose(page._display_state.by_key[key].values, result.values, atol=1e-10)
+    np.testing.assert_allclose(page.spectrum_plot._traces["Analysis"][1], result.values, atol=1e-10)
+    assert page._latest_trace is frame
+    if rolling:
+        assert "power_average" not in page._cleanup_result.applied_modes
+
+
+def test_rolling_reference_keeps_the_filtered_snapshot_and_latest_frame_distinct(shared_page):
+    app, page, _, _, trace, _, _, _ = shared_page
+    reference = replace(trace, powers_dbm=(-90.,) * len(trace.powers_dbm))
+    page._set_reference(page._build_reference(reference, kind="single", count=1))
+    page.correction_controls.reference.setChecked(True)
+    page.cleanup_filters["denoise"].setChecked(True)
+    page._set_page_state(AnritsuPageState.LIVE)
+    page._timer.start(10000)
+    page.start_live_average.click()
+    page._result("fetch_current_trace_fast", trace)
+    wait_until(app, lambda: page._display_state.primary_key == "analysis:processed")
+    page._open_spectrum_window()
+    floating = page._spectrum_window
+    try:
+        floating.show_live_frame.click()
+        completed = page._rolling_average_trace
+        latest = replace(trace, powers_dbm=tuple(np.asarray(trace.powers_dbm) + 3.))
+        with patch.object(page._analysis_controller, "submit"):
+            page._result("fetch_current_trace_fast", latest)
+        assert page._rolling_average_trace is not completed
+        assert page._manual_trace_payload("analysis:processed")[0] is completed
+        assert page._manual_trace_payload("live_frame")[0] is latest
+        assert page._display_state.by_key["live_frame"].frame_id == page._display_revision
+        assert page._display_state.by_key["analysis:processed"].frame_id < page._display_revision
+        assert floating.spectrum.trace_point_count("Analysis") == len(trace.powers_dbm)
+        np.testing.assert_allclose(floating.spectrum._traces["Live frame"][1], np.asarray(latest.powers_dbm) + 90.)
+    finally:
+        floating.close()
+
+
+def test_emi_reference_history_is_converted_in_the_analysis_worker(shared_page):
+    app, page, _, _, trace, _, _, _ = shared_page
+    reference = replace(trace, powers_dbm=(-90.,) * len(trace.powers_dbm))
+    page._set_reference(page._build_reference(reference, kind="single", count=1))
+    page.correction_controls.reference.setChecked(True)
+    called_threads = []
+
+    def measure_thread(signal, background, operation):
+        called_threads.append(QThread.currentThread())
+        return apply_reference_operation(signal, background, operation)
+
+    with patch("app.devices.anritsu_ms2830a.ui.analysis_worker.apply_reference_operation", side_effect=measure_thread):
+        page.cleanup_filters["emi_reject"].setChecked(True)
+        page._show_trace(replace(trace, acquired_at_utc=datetime.now(UTC)), update_controls=False)
+        wait_until(app, lambda: called_threads and page._display_state.primary_key == "analysis:processed")
+
+    assert set(called_threads) == {page._analysis_controller._thread}
+    assert app.thread() not in called_threads
+
+
+def test_absolute_difference_keeps_watts_and_preserves_missing_bins():
+    frequency = (1e6, 2e6, 3e6)
+    raw = SpectrumDisplayTrace("raw", "Raw", frequency, (1e-12, 2e-12, 3e-12), "W", 1)
+    residual = SpectrumDisplayTrace(
+        "reference_difference", "Raw − reference", frequency,
+        (-1e-12, 0., float("nan")), "W", 1, ("signed power subtraction",),
+    )
+    state = display_state((raw, residual), 1).absolute_differences()
+    assert state.by_key["raw"] is raw
+    folded = state.by_key["reference_difference"]
+    assert folded.unit == "W"
+    np.testing.assert_array_equal(folded.values, (1e-12, 0., float("nan")))
+
+
 def test_reference_averaging_uses_its_own_count_and_preserves_acquisition_metadata(shared_page):
     app, page, _, _, trace, _, _, _ = shared_page
     page.average_count.setValue(7)
@@ -98,12 +283,15 @@ def test_reference_averaging_uses_its_own_count_and_preserves_acquisition_metada
     second = replace(trace, powers_dbm=tuple(np.asarray(trace.powers_dbm) + 10),
                      acquired_at_utc=datetime.now(UTC))
     with patch.object(page._controller, "call") as request:
+        page._timer.start(10000)
         page.start_reference_averaging()
-        page._result("single_sweep", trace)
+        page._result("fetch_current_trace_fast", replace(trace, powers_dbm=tuple(np.asarray(trace.powers_dbm) - 10)))
+        page._result("fetch_current_trace_fast", trace)
         assert page._reference_trace is None and page.average_progress.value() == 1
         app.processEvents()
-        page._result("single_sweep", second)
-        assert [call.args[0] for call in request.call_args_list] == ["single_sweep", "single_sweep"]
+        page._result("fetch_current_trace_fast", second)
+        assert request.call_count >= 2
+        assert all(call.args[0] == "fetch_current_trace_fast" for call in request.call_args_list)
     reference = page._reference_trace
     assert reference is not None and "REFAVG2" in reference.trace_name
     assert reference.configuration_generation == trace.configuration_generation == 7
@@ -111,7 +299,7 @@ def test_reference_averaging_uses_its_own_count_and_preserves_acquisition_metada
     expected = 10 * np.log10((10 ** (np.asarray(trace.powers_dbm) / 10)
                              + 10 ** (np.asarray(second.powers_dbm) / 10)) / 2)
     np.testing.assert_allclose(reference.powers_dbm, expected)
-    assert not page._averaging_active and page._page_state == AnritsuPageState.IDLE
+    assert not page._averaging_active and page._page_state == AnritsuPageState.LIVE
 
 
 @pytest.mark.parametrize("correction", ["background", "reference"])

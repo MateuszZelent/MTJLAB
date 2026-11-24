@@ -9,12 +9,16 @@ crashing the Qt event loop.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.domain.errors import ExecutionError
 from app.spectrum import peak_preserving_indices
+
+if TYPE_CHECKING:
+    from .saved_spectrum_view import SavedSpectrumView
 
 
 def iter_recipe_spectrum_sweeps(path, *, selected_indices=None):
@@ -86,6 +90,7 @@ class StoredSpectrum:
     processed_unit: str | None = None
     processing_operation: str = "none"
     reference_index: int | None = None
+    saved_display: SavedSpectrumView | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,22 +280,25 @@ class Hdf5RunReader:
         dedicated output folder; catalogue browsers can opt into the
         recursive scan without changing the reader's compatibility surface.
         """
+        from .filesystem_paths import native_path
+
         output_dir = Path(directory)
+        scan_dir = native_path(directory, reserved=248)
         cancelled = cancelled or (lambda: False)
         def check_cancelled():
             if cancelled():
                 raise InterruptedError("Result catalogue indexing cancelled")
 
         check_cancelled()
-        if not output_dir.exists():
+        if not scan_dir.exists():
             return ()
         summaries: list[RunSummary] = []
-        glob = output_dir.rglob if recursive else output_dir.glob
+        glob = scan_dir.rglob if recursive else scan_dir.glob
         paths = set()
         for extension in ("*.h5", "*.hdf5"):
             for path in glob(extension):
                 check_cancelled()
-                paths.add(path)
+                paths.add(output_dir / path.relative_to(scan_dir))
         from app.storage.run_bundle import is_bundle_companion
         ordered = []
         for path in paths:
@@ -298,7 +306,7 @@ class Hdf5RunReader:
             if is_bundle_companion(path):
                 continue
             try:
-                modified = path.stat().st_mtime
+                modified = native_path(path).stat().st_mtime
             except OSError:
                 modified = 0
             ordered.append((modified, str(path), path))
@@ -474,7 +482,8 @@ class Hdf5RunReader:
         if not include_details:
             # Keep the recorded evidence required by spectral post-processing.
             # Arbitrary additional provenance is loaded on checkpoint selection.
-            metadata = {key: metadata[key] for key in ("raw_recipe_sweep_indices", "spectrum_processing_v1") if key in metadata}
+            metadata = {key: metadata[key] for key in ("raw_recipe_sweep_indices", "spectrum_processing_v1", "saved_display_v1")
+                        if key in metadata}
         return StoredPoint(
             index=int(name),
             timestamp_utc=Hdf5RunReader._attribute_text(group.attrs.get("timestamp_utc")),
@@ -514,6 +523,39 @@ class Hdf5RunReader:
             return int(frequency.shape[0])
 
     @staticmethod
+    def spectrum_preview_rows(path: str | Path, start: int, stop: int, *, cancelled):
+        """Read compact raw rows for a range of committed checkpoint indices."""
+        import numpy as np
+
+        rows = []
+        with Hdf5RunReader._open(path) as file:
+            spectra = file.get("spectra")
+            if spectra is None:
+                return rows
+            points = Hdf5RunReader._require_group(file, "points")
+            for index in range(start, stop):
+                if cancelled():
+                    break
+                key = str(index)
+                point = points.get(key)
+                if point is None or not bool(point.attrs.get("complete", False)):
+                    raise ExecutionError(f"Checkpoint {index + 1} is not committed.")
+                if key in spectra:
+                    frequencies, powers = Hdf5RunReader._read_spectrum_vectors(
+                        spectra[key], f"Spectrum {index}",
+                    )
+                    first, last = float(frequencies[0]), float(frequencies[-1])
+                    columns = min(512, len(frequencies))
+                    grid = np.linspace(first, last, columns)
+                    values = np.interp(grid, frequencies, powers)
+                    if len(frequencies) > columns:
+                        # Keep narrow peaks that fall between preview pixel centres.
+                        source_bins = np.searchsorted((grid[:-1] + grid[1:]) / 2, frequencies)
+                        np.maximum.at(values, source_bins, powers)
+                    rows.append((first, last, values.astype(np.float32)))
+        return rows
+
+    @staticmethod
     def spectrum(path: str | Path, index: int, *, max_points: int | None = None) -> StoredSpectrum | None:
         if index < 0:
             raise ExecutionError("Spectrum index cannot be negative.")
@@ -522,69 +564,94 @@ class Hdf5RunReader:
             if spectra is None or str(index) not in spectra:
                 return None
             Hdf5RunReader._require_committed_spectrum(file, index)
-            group = spectra[str(index)]
-            frequencies, powers = Hdf5RunReader._read_spectrum_axes(group, f"Spectrum {index}")
-            source_count = len(frequencies)
-            processed: tuple[float, ...] | None = None
-            if "processed_values" in group:
-                import numpy as np
+            return Hdf5RunReader._spectrum_from_group(spectra[str(index)], index, max_points)
 
-                dataset = group["processed_values"]
-                if (not hasattr(dataset, "dtype") or dataset.ndim != 1
-                        or dataset.shape != (source_count,) or dataset.dtype.kind not in "fiu"):
-                    raise ExecutionError(
-                        f"Spectrum {index} processed values must be a matching real numeric vector."
-                    )
-                values = dataset[:]
-                if not np.all(np.isfinite(values)):
-                    raise ExecutionError(f"Spectrum {index} processed values contain NaN or infinity.")
-                unit = Hdf5RunReader._attribute_text(group.attrs.get("processed_unit"))
-                operation = Hdf5RunReader._attribute_text(group.attrs.get("processing_operation"))
-                if not unit or not unit.strip() or not operation or not operation.strip() or operation == "none":
-                    raise ExecutionError(f"Spectrum {index} processed values require an explicit unit and operation.")
-                processed = tuple(float(value) for value in values)
-            if max_points is not None and max_points > 0 and source_count > max_points:
-                if processed is None or max_points < 2:
-                    selected = peak_preserving_indices(powers, max_points)
-                else:
-                    # Both curves share one returned frequency axis. Split
-                    # the interior budget and merge extrema from each unit
-                    # separately: comparing W and dBm magnitudes is invalid.
-                    raw_budget = 2 + (max_points - 2) // 2
-                    processed_budget = max_points - raw_budget + 2
-                    selected = tuple(sorted(
-                        set(peak_preserving_indices(powers, raw_budget))
-                        | set(peak_preserving_indices(processed, processed_budget))
-                    ))
-                frequencies = tuple(frequencies[item] for item in selected)
-                powers = tuple(powers[item] for item in selected)
-                if processed is not None:
-                    processed = tuple(processed[item] for item in selected)
-            return StoredSpectrum(
-                index=index,
-                trace_name=Hdf5RunReader._attribute_text(group.attrs.get("trace_name")) or "TRAC1",
-                acquired_at_utc=Hdf5RunReader._attribute_text(group.attrs.get("acquired_at_utc")),
-                frequencies_hz=frequencies,
-                powers_dbm=powers,
-                source_point_count=source_count,
-                processed_values=processed,
-                processed_unit=(
-                    Hdf5RunReader._attribute_text(group.attrs.get("processed_unit"))
-                    if processed is not None
-                    else None
-                ),
-                processing_operation=(
-                    Hdf5RunReader._attribute_text(
-                        group.attrs.get("processing_operation")
-                    )
-                    or "none"
-                ),
-                reference_index=(
-                    int(group.attrs["reference_index"])
-                    if "reference_index" in group.attrs
-                    else None
-                ),
-            )
+    @staticmethod
+    @contextmanager
+    def committed_spectrum_reader(path: str | Path):
+        """Reuse one read-only handle and validate the committed prefix once."""
+        with Hdf5RunReader._open(path) as file:
+            names = Hdf5RunReader._committed_point_names(file)
+            spectra = file.get("spectra")
+
+            def read(_path, index):
+                if index < 0 or index >= len(names):
+                    raise ExecutionError(f"Spectrum {index} belongs to an uncommitted checkpoint.")
+                group = spectra.get(names[index]) if spectra is not None else None
+                return Hdf5RunReader._spectrum_from_group(group, index, None) if group is not None else None
+
+            yield read
+
+    @staticmethod
+    def _spectrum_from_group(group, index: int, max_points: int | None) -> StoredSpectrum:
+        frequencies, powers = Hdf5RunReader._read_spectrum_axes(group, f"Spectrum {index}")
+        source_count = len(frequencies)
+        processed: tuple[float, ...] | None = None
+        if "processed_values" in group:
+            import numpy as np
+
+            dataset = group["processed_values"]
+            if (not hasattr(dataset, "dtype") or dataset.ndim != 1
+                    or dataset.shape != (source_count,) or dataset.dtype.kind not in "fiu"):
+                raise ExecutionError(
+                    f"Spectrum {index} processed values must be a matching real numeric vector."
+                )
+            values = dataset[:]
+            if not np.all(np.isfinite(values)):
+                raise ExecutionError(f"Spectrum {index} processed values contain NaN or infinity.")
+            unit = Hdf5RunReader._attribute_text(group.attrs.get("processed_unit"))
+            operation = Hdf5RunReader._attribute_text(group.attrs.get("processing_operation"))
+            if not unit or not unit.strip() or not operation or not operation.strip() or operation == "none":
+                raise ExecutionError(f"Spectrum {index} processed values require an explicit unit and operation.")
+            processed = tuple(float(value) for value in values)
+        if max_points is not None and max_points > 0 and source_count > max_points:
+            if processed is None or max_points < 2:
+                selected = peak_preserving_indices(powers, max_points)
+            else:
+                # Both curves share one returned frequency axis. Split
+                # the interior budget and merge extrema from each unit
+                # separately: comparing W and dBm magnitudes is invalid.
+                raw_budget = 2 + (max_points - 2) // 2
+                processed_budget = max_points - raw_budget + 2
+                selected = tuple(sorted(
+                    set(peak_preserving_indices(powers, raw_budget))
+                    | set(peak_preserving_indices(processed, processed_budget))
+                ))
+            frequencies = tuple(frequencies[item] for item in selected)
+            powers = tuple(powers[item] for item in selected)
+            if processed is not None:
+                processed = tuple(processed[item] for item in selected)
+        saved_display = None
+        if "saved_display_v1" in group:
+            from .saved_spectrum_view import read_saved_spectrum_view
+
+            saved_display = read_saved_spectrum_view(group["saved_display_v1"], index)
+        return StoredSpectrum(
+            index=index,
+            trace_name=Hdf5RunReader._attribute_text(group.attrs.get("trace_name")) or "TRAC1",
+            acquired_at_utc=Hdf5RunReader._attribute_text(group.attrs.get("acquired_at_utc")),
+            frequencies_hz=frequencies,
+            powers_dbm=powers,
+            source_point_count=source_count,
+            processed_values=processed,
+            processed_unit=(
+                Hdf5RunReader._attribute_text(group.attrs.get("processed_unit"))
+                if processed is not None
+                else None
+            ),
+            processing_operation=(
+                Hdf5RunReader._attribute_text(
+                    group.attrs.get("processing_operation")
+                )
+                or "none"
+            ),
+            reference_index=(
+                int(group.attrs["reference_index"])
+                if "reference_index" in group.attrs
+                else None
+            ),
+            saved_display=saved_display,
+        )
 
     @staticmethod
     def references(path: str | Path, *, metadata_only: bool = False) -> tuple[StoredReference | StoredReferenceSummary, ...]:
@@ -765,6 +832,11 @@ class Hdf5RunReader:
 
     @staticmethod
     def _read_spectrum_axes(group: Any, label: str) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        frequencies, powers = Hdf5RunReader._read_spectrum_vectors(group, label)
+        return tuple(float(value) for value in frequencies), tuple(float(value) for value in powers)
+
+    @staticmethod
+    def _read_spectrum_vectors(group: Any, label: str):
         import numpy as np
 
         frequency = group.get("frequency_hz")
@@ -782,7 +854,7 @@ class Hdf5RunReader:
             raise ExecutionError(f"{label} contains NaN or infinity.")
         if not (frequencies[1:] > frequencies[:-1]).all():
             raise ExecutionError(f"{label} frequency axis must be strictly increasing.")
-        return tuple(float(value) for value in frequencies), tuple(float(value) for value in powers)
+        return frequencies, powers
 
     @staticmethod
     def _reference_fingerprint(group):
@@ -825,12 +897,14 @@ class Hdf5RunReader:
 
     @staticmethod
     def _open(path: str | Path):
+        from .filesystem_paths import native_path
+
         try:
             import h5py
         except ImportError as exc:
             raise ExecutionError("Reading HDF5 results requires the h5py package.") from exc
         try:
-            return h5py.File(Path(path), "r")
+            return h5py.File(native_path(path), "r")
         except OSError as exc:
             raise ExecutionError(f"Cannot read HDF5 file {Path(path).name}: {exc}") from exc
 

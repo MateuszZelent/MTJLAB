@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
@@ -26,6 +27,7 @@ from app.ui.shell import MainWindow
 from app.ui.widgets import LimitField
 from app.ui.design_system import tokens_for
 from app.domain.models import DeviceCapabilities
+from tests.shell_test_isolation import isolated_shell_persistence as isolated_shell_persistence
 
 
 class FluentDevicePageTests(unittest.TestCase):
@@ -302,6 +304,8 @@ class FluentDevicePageTests(unittest.TestCase):
 
             rigol = window.rigol_page
             # Initially Rigol is disconnected and live control switch is off
+            rigol.waveform.setCurrentText("SIN")
+            rigol.vpp.setText("2 mV")
             self.assertFalse(rigol._is_device_connected())
             self.assertFalse(rigol.live_control_enabled)
             self.assertFalse(rigol.live_control_switch.isChecked())
@@ -313,11 +317,11 @@ class FluentDevicePageTests(unittest.TestCase):
 
             # Editing frequency and voltages while disconnected (live control off)
             rigol.frequency.setText("2.5 kHz")
-            rigol.frequency.editingFinished.emit()
+            rigol.frequency.number.editingFinished.emit()
             rigol.vpp.setText("10 mV")
-            rigol.vpp.editingFinished.emit()
+            rigol.vpp.number.editingFinished.emit()
             rigol.offset.setText("5 mV")
-            rigol.offset.editingFinished.emit()
+            rigol.offset.number.editingFinished.emit()
             self.application.processEvents()
 
             # No quick setpoints emitted and no configure operations dispatched
@@ -328,7 +332,7 @@ class FluentDevicePageTests(unittest.TestCase):
             rigol.set_live_control_enabled(True)
             self.assertTrue(rigol.live_control_enabled)
             rigol.frequency.setText("3.0 kHz")
-            rigol.frequency.editingFinished.emit()
+            rigol.frequency.number.editingFinished.emit()
             self.application.processEvents()
             self.assertEqual(emitted_signals, [])
 
@@ -348,27 +352,29 @@ class FluentDevicePageTests(unittest.TestCase):
 
             # With live control OFF, edits do not send
             rigol.vpp.setText("15 mV")
-            rigol.vpp.editingFinished.emit()
+            rigol.vpp.number.editingFinished.emit()
             self.application.processEvents()
             self.assertEqual(emitted_signals, [])
 
             # Now simulate output ON
             rigol._device_state_changed("output_on")
             rigol._set_rigol_channel_output(1, True)
-            rigol._record_visible_quick_readback(1)
+            rigol._cache_applied_carrier(rigol._visible_channel_config())
             self.assertTrue(rigol._active_output_selected())
 
             # With output ON but live control OFF, edits still do not send immediately
             rigol.vpp.setText("18 mV")
-            rigol.vpp.editingFinished.emit()
+            rigol.vpp.number.editingFinished.emit()
             self.application.processEvents()
             self.assertEqual(emitted_signals, [])
 
-            # Once live control is toggled ON, edits are immediately sent
+            # Live control requires an explicit commit even after focus loss.
             rigol.set_live_control_enabled(True)
             self.assertTrue(rigol.live_control_enabled)
             rigol.vpp.setText("20 mV")
-            rigol.vpp.editingFinished.emit()
+            rigol.vpp.number.editingFinished.emit()
+            self.assertEqual(emitted_signals, [])
+            QTest.keyClick(rigol.vpp.number, Qt.Key.Key_Return)
             self.application.processEvents()
             self.assertEqual(emitted_signals, [("rigol.1.amplitude", "20 mV")])
         finally:
@@ -718,6 +724,7 @@ class FluentDevicePageTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    @pytest.mark.usefixtures("isolated_shell_persistence")
     def test_rigol_arrow_stepping_requires_live_control(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -727,13 +734,16 @@ class FluentDevicePageTests(unittest.TestCase):
             self.application.processEvents()
 
             rigol = window.rigol_page
+            rigol.waveform.setCurrentText("SIN")
+            rigol.time_mode.setCurrentText("Frequency")
+            rigol.vpp.setText("2 mV")
             self.assertFalse(rigol.live_control_enabled)
             initial_freq = rigol.frequency.text()
 
             # With live control OFF, arrow stepping is blocked
             rigol.frequency.setFocus()
             self.application.processEvents()
-            QTest.keyClick(rigol.frequency, Qt.Key.Key_Up)
+            QTest.keyClick(rigol.frequency.number, Qt.Key.Key_Up)
             self.application.processEvents()
             self.assertEqual(rigol.frequency.text(), initial_freq)
 
@@ -741,9 +751,12 @@ class FluentDevicePageTests(unittest.TestCase):
             rigol._device_state_changed("OUTPUT_OFF")
             rigol.set_live_control_enabled(True)
             self.assertTrue(rigol.live_control_enabled)
+            QTest.keyClick(rigol.frequency.number, Qt.Key.Key_Up)
+            self.assertEqual(rigol.frequency.text(), initial_freq)
+            rigol._cache_applied_carrier(rigol._visible_channel_config())
 
             # With live control ON, arrow stepping works
-            QTest.keyClick(rigol.frequency, Qt.Key.Key_Up)
+            QTest.keyClick(rigol.frequency.number, Qt.Key.Key_Up)
             self.application.processEvents()
             self.assertNotEqual(rigol.frequency.text(), initial_freq)
         finally:

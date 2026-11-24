@@ -512,6 +512,8 @@ class InstrumentWorker(QObject):
                 return self._adapter.fetch_current_trace(str(payload or "TRAC1"))
             if operation == "single_sweep":
                 return self._adapter.acquire_single_sweep(str(payload or "TRAC1"), restore_continuous=False)
+            if operation == "unaveraged_sweep":
+                return self._adapter.acquire_unaveraged_sweep()
             if operation == "read_signal_generator":
                 return self._adapter.read_signal_generator_configuration()
             if operation == "configure_signal_generator":

@@ -37,6 +37,14 @@ _ADVANCED_FIELDS = frozenset({
     "rbw_mode", "rbw", "vbw_mode", "vbw", "detector", "attenuation_mode",
     "attenuation", "preamplifier_enabled", "sweep_time_mode", "sweep_time", "vbw_filter_mode",
 })
+ANRITSU_HARDWARE_AVERAGE_FIELDS: Final = ("instrument_average_count", "instrument_average_duration")
+_ANRITSU_ACQUISITION_OPTIONS = frozenset({
+    "acquisition_mode", "store_source_spectra", "inter_sweep_delay", *ANRITSU_HARDWARE_AVERAGE_FIELDS,
+})
+ANRITSU_ACQUISITION_OPTION_FIELDS: Final = MappingProxyType({
+    "acquire_reference": _ANRITSU_ACQUISITION_OPTIONS | {"source_file", "file_kind", "minimum_duration", "purpose"},
+    "acquire_spectrum": _ANRITSU_ACQUISITION_OPTIONS | {"processing"},
+})
 ACTION_FIELDS: Final = {
     "sequence": frozenset({"device_module", "operation", "configuration", "parameter_actions",
         "channel", "source_mode", "output_policy", "configuration_required", "trace", "post_configuration_operation",
@@ -76,8 +84,10 @@ ACTION_FIELDS: Final = {
     "checkpoint": frozenset(),
     "connect": frozenset({"device"}),
     "comment": frozenset({"text", "comment"}),
-    "acquire_reference": frozenset({"trace", "average_count", "inter_sweep_delay", "source_file", "file_kind", "minimum_duration", "purpose"}),
-    "acquire_spectrum": frozenset({"trace", "average_count", "inter_sweep_delay", "reference_operation", "processing", "store_raw", "store_processed"}),
+    "acquire_reference": ANRITSU_ACQUISITION_OPTION_FIELDS["acquire_reference"] | {"trace", "average_count"},
+    "acquire_spectrum": ANRITSU_ACQUISITION_OPTION_FIELDS["acquire_spectrum"] | {
+        "trace", "average_count", "reference_operation", "store_raw", "store_processed",
+    },
     **{kind: frozenset({"template_id", "template_name", "title_pattern", "tags", "attach_hdf5", "attach_csv"})
        for kind in ("upload_to_elab", "upload_elab")},
 }

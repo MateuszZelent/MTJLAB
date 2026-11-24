@@ -26,6 +26,7 @@ from app.devices.anritsu_ms2830a.ui.page import (
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, parse_quantity
 from app.recipes import RecipeNode
+from app.recipes.block_registry import ANRITSU_ACQUISITION_OPTION_FIELDS, ANRITSU_HARDWARE_AVERAGE_FIELDS
 from app.recipes.spectrum_processing import REFERENCE_OPERATIONS
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
@@ -143,10 +144,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         )
         right_layout.addWidget(BodyLabel("Node role"), 1, 0)
         right_layout.addWidget(self.node_role, 1, 1)
-        self.acquisition_hint = CaptionLabel(
-            "Acquisition is stored as a separate child step so its role remains visible in the tree.",
-            self,
-        )
+        self.acquisition_hint = CaptionLabel(right)
         self.acquisition_hint.setWordWrap(True)
         self.acquisition_hint.setObjectName("muted")
         right_layout.addWidget(self.acquisition_hint, 2, 0, 1, 2)
@@ -196,7 +194,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         note.setWordWrap(True)
         right_layout.addWidget(note, operation_row + 3, 0, 1, 2)
         self._acquisition_options = {}
-        self.acquisition_options_button = PushButton("Acquisition filters / reference source…", right)
+        self.acquisition_options_button = PushButton("Acquisition options…", right)
         self.acquisition_options_button.clicked.connect(self._edit_acquisition_options)
         right_layout.addWidget(self.acquisition_options_button, 5, 0, 1, 2)
         right_layout.setRowStretch(operation_row + 4, 1)
@@ -255,21 +253,29 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         spectrum = role == "acquire_spectrum"
         self.acquisition_options_button.setVisible(acquisition)
         self.acquisition_options_button.setText(
-            "Filters and reference operation…" if spectrum else "Reference / background source…"
+            "Spectrum acquisition options…" if spectrum else "Reference / background acquisition…"
         )
-        for widget in (
-            self.acquisition_hint,
-            self.average_count_label,
-            self.average_count,
-            self.trace_label,
-            self.trace,
-        ):
+        for widget in (self.acquisition_hint, self.trace_label, self.trace):
             widget.setVisible(acquisition)
         self.reference_operation_label.setVisible(spectrum)
         self.reference_operation.setVisible(spectrum)
-        imported = role == "acquire_reference" and bool(self._acquisition_options.get("source_file"))
-        self.average_count.setVisible(acquisition and not imported)
-        self.average_count_label.setVisible(acquisition and not imported)
+        options = self.acquisition_options()
+        imported = bool(options.get("source_file"))
+        hardware_average = any(field in options for field in ANRITSU_HARDWARE_AVERAGE_FIELDS)
+        pylab_average = acquisition and not imported and not hardware_average
+        self.average_count.setVisible(pylab_average)
+        self.average_count_label.setVisible(pylab_average)
+        if imported:
+            summary = "Load saved background" if options.get("file_kind") == "background" else "Load saved reference"
+        elif "instrument_average_count" in options:
+            summary = f"Anritsu Lin Average · {options['instrument_average_count']} sweeps"
+        elif "instrument_average_duration" in options:
+            summary = f"Anritsu Lin Average · ~{options['instrument_average_duration']}"
+        elif options.get("acquisition_mode") == "continuous_live":
+            summary = "PyLab Live averaging"
+        else:
+            summary = "PyLab triggered sweeps"
+        self.acquisition_hint.setText(summary)
         self.apply_button.setText(
             {
                 "configure": "Apply spectrum settings",
@@ -289,12 +295,13 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         return str(self.node_role.currentData() or "configure")
 
     def load_acquisition_options(self, fields):
-        self._acquisition_options = {key: fields[key] for key in ("processing", "source_file", "file_kind", "minimum_duration", "purpose", "inter_sweep_delay") if key in fields}
+        keys = ANRITSU_ACQUISITION_OPTION_FIELDS["acquire_reference"] | ANRITSU_ACQUISITION_OPTION_FIELDS["acquire_spectrum"]
+        self._acquisition_options = {key: fields[key] for key in fields if key in keys}
         self._role_changed()
 
     def acquisition_options(self):
-        keys = ("source_file", "file_kind", "minimum_duration", "purpose", "inter_sweep_delay") if self.selected_node_role() == "acquire_reference" else ("processing", "inter_sweep_delay")
-        return {key: self._acquisition_options[key] for key in keys if key in self._acquisition_options}
+        keys = ANRITSU_ACQUISITION_OPTION_FIELDS.get(self.selected_node_role(), ())
+        return {key: value for key, value in self._acquisition_options.items() if key in keys}
 
     def _edit_acquisition_options(self):
         from app.ui.recipes.common_dialogs import AnritsuAcquisitionEditorDialog

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections import deque
 import math
+from collections import deque
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -33,6 +33,74 @@ def dbm_to_w(values_dbm: ArrayLike, *, out: FloatVector | None = None) -> FloatV
     if not np.all(np.isfinite(out)) or np.any(out <= 0):
         raise ValueError("dBm cannot be represented as positive finite float64 watts.")
     return out
+
+
+class RollingPowerAverage:
+    """Equal weight per received spectrum in a trailing frame or time window."""
+
+    MEMORY_LIMIT_BYTES = 256 * 1024 * 1024
+
+    def __init__(self, frames: int, seconds: float | None) -> None:
+        if seconds is not None:
+            positive_time(seconds, "window seconds")
+        elif frames < 1:
+            raise ValueError("The rolling frame window must be positive.")
+        self.frames = frames
+        self.seconds = seconds
+        self._rows: deque[tuple[float, FloatVector]] = deque()
+        self._sum: FloatVector | None = None
+        self._updates = 0
+
+    @property
+    def count(self) -> int:
+        return len(self._rows)
+
+    @property
+    def span_s(self) -> float:
+        return self._rows[-1][0] - self._rows[0][0] if self._rows else 0.0
+
+    def clear(self) -> None:
+        self._rows.clear()
+        self._sum = None
+        self._updates = 0
+
+    def add(self, values_dbm: ArrayLike, at_s: float) -> FloatVector:
+        if not math.isfinite(at_s) or (self._rows and at_s < self._rows[-1][0]):
+            raise ValueError("Rolling average requires monotonic receive times.")
+        power = dbm_to_w(values_dbm)
+        if self._sum is None:
+            self._sum = np.zeros_like(power)
+        elif self._sum.shape != power.shape:
+            raise ValueError("Rolling average spectrum point count changed.")
+
+        max_frames = self.MEMORY_LIMIT_BYTES // power.nbytes - 1  # Reserve the running sum.
+        if self.seconds is None and self.frames > max_frames:
+            raise ValueError("The frame window exceeds the 256 MiB Live average buffer. Choose fewer frames.")
+
+        cutoff = at_s - self.seconds if self.seconds is not None else -math.inf
+        rebuild_sum = False
+        while self._rows and (self._rows[0][0] <= cutoff
+                              or (self.seconds is None and self.count >= self.frames)):
+            _, dropped = self._rows.popleft()
+            self._sum -= dropped
+            # Subtracting a much larger outgoing sample can erase the quieter
+            # samples that are still present. Rebuild from their stored powers.
+            rebuild_sum |= bool(np.any(self._sum < dropped * 1e-6))
+        if self.count >= max_frames:
+            raise ValueError("The time window exceeds the 256 MiB Live average buffer. Choose a shorter duration.")
+        self._rows.append((at_s, power))
+        self._updates += 1
+        with np.errstate(over="ignore"):
+            if rebuild_sum or self._updates % 1024 == 0:
+                self._sum.fill(0)
+                for _, row in self._rows:
+                    self._sum += row
+            else:
+                self._sum += power
+        if not np.all(np.isfinite(self._sum)):
+            self.clear()
+            raise ValueError("Accumulated spectrum power exceeds the numeric W range.")
+        return 10.0 * (np.log10(self._sum) - math.log10(self.count)) + 30.0
 
 
 class VectorWelford:

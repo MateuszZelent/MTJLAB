@@ -4,6 +4,7 @@ from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
+from threading import Event
 
 import numpy as np
 import pytest
@@ -184,6 +185,62 @@ def test_map_negative_validation_and_cooperative_cancellation(scientific_map):
                     state=MapProcessing(component="median_power"), cancelled=cancel)
 
 
+@pytest.mark.parametrize("transpose", [False, True])
+def test_stationary_stripe_subtraction_preserves_sweep_variation_and_gaps(transpose):
+    f = np.linspace(780e6, 850e6, 141)
+    current = np.arange(20, dtype=float)
+    baseline = (f - 810e6)[None, :] * 1e-8 + current[:, None] / 10
+    source = baseline.copy()
+    stripe = (f >= 801e6) & (f <= 808e6)
+    source[:, stripe] -= 3
+    source[:, f == 817e6] += 2
+    source[:5, f == 810e6] += 3
+    source[0, f == 805e6] = np.nan
+    state = MapProcessing(component="stationary_stripes_db", stripe_bands_hz=((797e6, 824e6),))
+    matrix = source.T if transpose else source
+    kwargs = dict(unit="dB", frequencies_hz=f, coordinate_values=current, frequency_axis=int(not transpose))
+    corrected = analyse_map(matrix, state=state, **kwargs)
+    actual = corrected.values.T if transpose else corrected.values
+    expected = baseline.copy()
+    expected[:5, f == 810e6] += 3
+    expected[0, f == 805e6] = np.nan
+    np.testing.assert_allclose(actual, expected, atol=1e-12)
+    np.testing.assert_array_equal(actual[:, (f < 797e6) | (f > 824e6)], source[:, (f < 797e6) | (f > 824e6)])
+    np.testing.assert_array_equal(analyse_map(matrix, state=replace(state, view="input"), **kwargs).values, matrix)
+    component = analyse_map(matrix, state=replace(state, view="component"), **kwargs)
+    np.testing.assert_allclose(component.component[stripe], -3, atol=1e-12)
+    with pytest.raises(ValueError, match="relative dB"):
+        analyse_map(matrix, state=state, **{**kwargs, "unit": "dBm"})
+
+
+@pytest.mark.parametrize("transpose", [False, True])
+def test_stripe_band_correction_tracks_sweep_and_preserves_local_features(transpose):
+    f = np.arange(775, 851, dtype=float) * 1e6
+    sweep = np.arange(31, dtype=float)
+    baseline = (f - 810e6)[None, :] * 1e-8 + sweep[:, None] * .01
+    band = (f >= 800e6) & (f <= 822e6)
+    protected = f == 815e6
+    corrected = band & ~protected
+    # Both a wide residual and its narrow core change with the sweep.
+    stripe = np.where(sweep < 15, -4., 1.4)[:, None] * (1 + (f == 807e6))
+    source = baseline + stripe * band
+    source[6, f == 805e6] += 2
+    source[25, f == 809e6] = np.nan
+    expected = source.copy()
+    expected[:, corrected] -= stripe[:, corrected]
+    state = MapProcessing(component="repair_stripe_bands_db",
+                          stripe_bands_hz=((800e6, 822e6),),
+                          protected_bands_hz=((814.5e6, 815.5e6),))
+    orient = lambda matrix: matrix.T if transpose else matrix
+    kwargs = dict(unit="dB", frequencies_hz=f, coordinate_values=sweep, frequency_axis=int(not transpose))
+    result = analyse_map(orient(source), state=state, **kwargs)
+    np.testing.assert_allclose(result.values, orient(expected), atol=1e-12)
+    np.testing.assert_array_equal(orient(result.values)[:, ~corrected], source[:, ~corrected])
+    component = analyse_map(orient(source), state=replace(state, view="component"), **kwargs)
+    np.testing.assert_allclose(component.values, orient(source - expected), atol=1e-12)
+    assert result.corrected_frequencies_hz == tuple(f[corrected])
+
+
 def test_map_ui_changes_reuse_one_exact_slice_off_gui_and_export_provenance(
     nested_archive, shell_qt_application, monkeypatch, tmp_path
 ):
@@ -229,9 +286,19 @@ def test_map_ui_changes_reuse_one_exact_slice_off_gui_and_export_provenance(
         np.testing.assert_allclose(tab.heatmap._data, expected_reference, atol=1e-24)
         assert len(calls) == initial_reads
         np.testing.assert_allclose(tab.heatmap.plot.viewRange(), viewport)
+        assert tab.heatmap.show_absolute.isEnabled() and tab.heatmap.show_absolute.isVisibleTo(tab)
+        tab.heatmap.show_absolute.click()
+        np.testing.assert_allclose(tab.heatmap._data, np.abs(expected_reference), atol=1e-24)
+        np.testing.assert_allclose(tab.heatmap.plot.viewRange(), viewport)
+        assert tab.heatmap.export_metadata["display_transform"] == "absolute_difference"
+        assert tab.heatmap.export_metadata["value_unit"] == "W"
+        assert len(calls) == initial_reads
+        tab.heatmap.show_absolute.click()
+        np.testing.assert_allclose(tab.heatmap._data, expected_reference, atol=1e-24)
         tab.processing_controls.set_state(ResultProcessing(), emit=True)
         wait_until(app, lambda: not tab._read_tasks)
         np.testing.assert_array_equal(tab.heatmap._data, raw)
+        assert not tab.heatmap.show_absolute.isEnabled()
         assert len(calls) == initial_reads
         np.testing.assert_allclose(tab.heatmap.plot.viewRange(), viewport)
         tab.map_controls.set_state(MapProcessing(component="median_power"), emit=True)
@@ -272,9 +339,75 @@ def test_map_ui_changes_reuse_one_exact_slice_off_gui_and_export_provenance(
         app.processEvents()
 
 
+def test_read_file_loads_spectra_off_gui_and_axis_and_filter_changes_use_memory(
+    nested_archive, shell_qt_application, monkeypatch,
+):
+    app = shell_qt_application
+    run = ThatecRunReader.describe(nested_archive)
+    points = Hdf5RunReader.points(nested_archive, include_details=False)
+    tab = HeatmapResultsTab()
+    tab.resize(820, 700)
+    tab.show()
+    resume_read = Event()
+    try:
+        tab.load(nested_archive, run, points)
+        wait_until(app, lambda: not tab._read_tasks)
+        tab.y_axis_combo.setCurrentIndex(tab.y_axis_combo.findData("keithley.A.current"))
+        open_file = ThatecRunReader._open
+        reads = []
+
+        def read(*args, **kwargs):
+            assert QThread.currentThread() != app.thread()
+            reads.append(1)
+            return open_file(*args, **kwargs)
+
+        monkeypatch.setattr(ThatecRunReader, "_open", read)
+        read_rows = ThatecRunReader.read_spectral_rows
+
+        def read_with_pause(*args, progress=None, **kwargs):
+            def report(completed, total):
+                progress(completed, total)
+                if 0 < completed < total and not resume_read.is_set():
+                    assert resume_read.wait(12), "Progress was not shown while reading"
+
+            return read_rows(*args, progress=report, **kwargs)
+
+        monkeypatch.setattr(ThatecRunReader, "read_spectral_rows", read_with_pause)
+        tab.read_file_button.click()
+        progress_bar = tab.heatmap_state.read_progress
+        wait_until(app, lambda: 0 < progress_bar.value() < progress_bar.maximum())
+        assert progress_bar.isVisibleTo(tab) and progress_bar.geometry().width() > 100
+        assert progress_bar.maximum() == sum(row.shape[0] for row in tab._spectrum_rows)
+        caption = tab.heatmap_state.description
+        assert f"{progress_bar.value():,} / {progress_bar.maximum():,}" in caption.text()
+        assert caption.contentsRect().width() >= caption.fontMetrics().horizontalAdvance(caption.text())
+        resume_read.set()
+        wait_until(app, lambda: tab.heatmap._data is not None and not tab._read_tasks)
+        assert not progress_bar.isVisibleTo(tab)
+        assert tab.read_file_button.isVisibleTo(tab)
+        assert tab.controls_card.rect().contains(tab.read_file_button.mapTo(tab.controls_card, tab.read_file_button.rect().bottomRight()))
+        assert tab.read_file_button.text() == "File in memory"
+        assert len(reads) == 1
+        count = tab.heatmap._data.size
+        tab.y_axis_combo.setCurrentIndex(tab.y_axis_combo.findData("keithley.B.current"))
+        wait_until(app, lambda: tab.heatmap._data is not None and not tab._read_tasks)
+        assert tab.heatmap._data.size != count
+        minimum, _ = tab._range_combos["keithley.A.current"]
+        minimum.setCurrentIndex(min(minimum.currentIndex() + 1, minimum.count() - 1))
+        wait_until(app, lambda: tab.heatmap._data is not None and not tab._read_tasks)
+        assert tab.heatmap.export_metadata["coordinate_selection"]["filters"]["keithley.A.current"][0] == minimum.currentData()
+        assert len(reads) == 1
+    finally:
+        resume_read.set()
+        tab.close()
+        assert tab._read_pool.waitForDone(5000)
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_map_settings_validate_frequency_units_without_accepting_bad_values(shell_qt_application, tmp_path):
     app = shell_qt_application
-    dialog = MapSettingsDialog(None, MapProcessing())
+    dialog = MapSettingsDialog(None, MapProcessing(component="stationary_stripes_db"))
     dialog.show()
     app.processEvents()
     assert dialog.grab().save(str(tmp_path / "results-map-settings.png"))
@@ -282,10 +415,15 @@ def test_map_settings_validate_frequency_units_without_accepting_bad_values(shel
     dialog._save()
     assert dialog.result() == 0 and dialog.error.text()
     dialog.widths["line_max_width_hz"].setText("4 MHz")
+    dialog.stripe_bands.setText("797 .. 824 mV")
+    dialog._save()
+    assert dialog.result() == 0 and dialog.error.text()
+    dialog.stripe_bands.setText("797 MHz .. 824 MHz")
     dialog.bands.setText("600 MHz .. 800 MHz; 1 GHz .. 1.2 GHz")
     dialog._save()
     assert dialog.result() == 1, dialog.error.text()
     assert dialog.state.protected_bands_hz == ((600e6, 800e6), (1e9, 1.2e9))
+    assert dialog.state.stripe_bands_hz == ((797e6, 824e6),)
     dialog.close()
     dialog.deleteLater()
     app.processEvents()

@@ -1,10 +1,13 @@
 """Real command acceptance, bounded diagnostics and receiver-only traffic."""
+from dataclasses import replace
+
 import pytest
 
 from app.devices.anritsu_ms2830a import AnritsuAdapter
 from app.devices.simulators import AnritsuSimulator
 from app.devices.visa import FakeVisaSessionFactory
 from app.domain.errors import DeviceError
+from app.domain.models import DeviceState
 from tests.helpers import simulation_settings
 
 
@@ -32,6 +35,157 @@ def test_live_reuses_binary_transfer_settings_and_keeps_grid_checks(connected):
     assert "FORM?" in session.commands and "FORM:BORD?" in session.commands
 
 
+class NativeGroupedSimulator(AnritsuSimulator):
+    def _query(self, command):
+        if command == "*IDN?":
+            return "ANRITSU,MS2830A,SIM000001,7.03.00"
+        return super()._query(command)
+
+    def query(self, command):
+        if ";" not in command:
+            return super().query(command)
+        query_single = super().query
+        answers = [query_single(part) for part in command.split(";")]
+        del self.commands[-len(answers):]
+        self.commands.append(command)
+        return ";".join(answers)
+
+
+@pytest.fixture
+def native_gpib():
+    baseline = simulation_settings()
+    raw = baseline.model_dump(mode="python")
+    raw["devices"]["anritsu"]["connection"]["resource"] = "GPIB0::23::INSTR"
+    settings = type(baseline).model_validate(raw)
+    session = NativeGroupedSimulator()
+    session.remote_language = "NAT"
+    session.trace_format = "REAL,32"
+    adapter = AnritsuAdapter(settings, session_factory=FakeVisaSessionFactory(session))
+    adapter.connect()
+    try:
+        yield adapter, session
+    finally:
+        adapter.disconnect()
+
+
+def test_grouped_live_checks_both_sides_of_binary_read_in_three_transactions(native_gpib):
+    adapter, session = native_gpib
+    session.trace_storage_modes[:2] = ["AVER", "LAV"]
+    adapter.start_live(True)
+    assert session.trace_storage_modes[:2] == ["OFF", "LAV"]
+    session.commands.clear()
+
+    trace = adapter.fetch_current_trace_fast()
+
+    assert len(trace.powers_dbm) == len(trace.frequencies_hz) == session.points
+    assert trace.frequencies_hz[0] == session.start_hz
+    assert trace.frequencies_hz[-1] == session.stop_hz
+    assert len(session.commands) == 3
+    before, binary, after = session.commands
+    assert binary == "TRAC? TRAC1"
+    for group in (before, after):
+        assert set(group.split(";")) == {
+            "SWE:POIN?", "FREQ:STAR?", "FREQ:STOP?", "FORM?", "FORM:BORD?", "TRAC:STOR:MODE? 1", "SYST:ERR?",
+        }
+
+    adapter.stop_live()
+    assert session.trace_storage_modes[:2] == ["AVER", "LAV"]
+    session.commands.clear()
+    adapter.fetch_current_trace_fast()
+    assert all(";" not in command for command in session.commands)
+
+
+@pytest.mark.parametrize("finish", ["abort_acquisition", "disconnect"])
+def test_raw_live_restores_trace_mode_on_transport_teardown(connected, finish):
+    adapter, session = connected
+    session.trace_storage_modes[0] = "AVER"
+    adapter.start_live(True)
+    assert session.trace_storage_modes[0] == "OFF"
+
+    getattr(adapter, finish)()
+
+    assert session.trace_storage_modes[0] == "AVER"
+    assert not adapter.live
+
+
+def test_failed_raw_live_start_restores_the_previous_trace_mode(connected):
+    adapter, session = connected
+    session.continuous_sweep = False
+    session.trace_storage_modes[0] = "AVER"
+    session.command_errors["INIT:MODE:CONT"] = '-200,"cannot start continuous sweep"'
+
+    with pytest.raises(DeviceError, match="cannot start continuous sweep"):
+        adapter.start_live(True)
+
+    assert session.trace_storage_modes[0] == "AVER"
+    assert not adapter.live
+
+
+@pytest.mark.parametrize("change,expected", [
+    ("axis", "frequency grid changed"),
+    ("format", "transfer format changed"),
+    ("storage", "storage mode changed"),
+    ("error", "capture failed; instrument diagnostic"),
+])
+def test_grouped_live_discards_frame_if_context_changes(native_gpib, monkeypatch, change, expected):
+    adapter, session = native_gpib
+    adapter.start_live(True)
+    read_binary = session.query_binary_values
+
+    def read_with_change(*args, **kwargs):
+        data = read_binary(*args, **kwargs)
+        if change == "axis":
+            session.start_hz += 100
+        elif change == "format":
+            session.byte_order = "NORM"
+        elif change == "storage":
+            session.trace_storage_modes[0] = "AVER"
+        else:
+            session.error_queue.append('-200,"capture failed; instrument diagnostic"')
+        return data
+
+    monkeypatch.setattr(session, "query_binary_values", read_with_change)
+    with pytest.raises(DeviceError, match=expected):
+        adapter.fetch_current_trace_fast()
+
+
+def test_grouped_queries_are_not_used_for_unqualified_firmware(native_gpib):
+    adapter, session = native_gpib
+    adapter._identity = replace(adapter._identity, firmware="7.02.00")
+    adapter.start_live(True)
+    session.commands.clear()
+    adapter.fetch_current_trace_fast()
+    assert all(";" not in command for command in session.commands)
+
+
+def test_grouped_live_reconfirms_binary_format_after_an_ascii_read(native_gpib):
+    adapter, session = native_gpib
+    adapter.start_live(True)
+    adapter.fetch_current_trace()
+    session.write("FORM:BORD NORM")
+    session.commands.clear()
+
+    trace = adapter.fetch_current_trace_fast()
+
+    assert len(trace.powers_dbm) == session.points
+    assert session.commands.index("FORM REAL,32") < session.commands.index("FORM?") < session.commands.index("TRAC? TRAC1")
+    assert session.commands.index("FORM:BORD SWAP") < session.commands.index("FORM:BORD?") < session.commands.index("TRAC? TRAC1")
+
+
+def test_grouped_live_rejects_incomplete_metadata_before_binary_read(native_gpib, monkeypatch):
+    adapter, session = native_gpib
+    adapter.start_live(True)
+    query = session.query
+    monkeypatch.setattr(session, "query", lambda command: "10001;123" if ";" in command else query(command))
+    session.commands.clear()
+
+    with pytest.raises(DeviceError, match="invalid grouped Live readback"):
+        adapter.fetch_current_trace_fast()
+
+    assert "TRAC? TRAC1" not in session.commands
+    assert "FORM REAL,32" not in session.commands
+
+
 def test_binary_after_ascii_or_external_byte_order_change_reconfigures(connected):
     adapter, session = connected
     adapter.fetch_current_trace_fast()
@@ -41,6 +195,73 @@ def test_binary_after_ascii_or_external_byte_order_change_reconfigures(connected
     adapter.fetch_current_trace_fast()
     assert session.commands.count("FORM REAL,32") == 1
     assert session.commands.count("FORM:BORD SWAP") == 1
+
+
+@pytest.mark.parametrize("fixture_name,prefix", [
+    ("connected", "TRAC1:STOR:MODE "),
+    ("native_gpib", "TRAC:STOR:MODE 1,"),
+])
+def test_application_average_uses_one_unaveraged_sweep_per_request(request, fixture_name, prefix):
+    from app.devices.anritsu_ms2830a.module import MODULE
+
+    adapter, session = request.getfixturevalue(fixture_name)
+    other_prefix = prefix.replace("1", "2")
+    session.write(prefix + "AVER")
+    session.write(other_prefix + "LAV")
+    session.write("AVER:COUN 50")
+    session.commands.clear()
+
+    traces = [MODULE.dispatch(adapter, "unaveraged_sweep", "TRAC1") for _ in range(3)]
+
+    assert len({trace.sweep_id for trace in traces}) == 3
+    relevant = [command for command in session.commands
+                if command.startswith((prefix, other_prefix)) or command in {"INIT:MODE:SING", "TRAC? TRAC1"}]
+    assert relevant == [
+        prefix + "OFF", other_prefix + "OFF", "INIT:MODE:SING", "TRAC? TRAC1",
+        other_prefix + "LAV", prefix + "AVER",
+    ] * 3
+    assert session.average_count == 50
+    assert session.trace_storage_modes[:2] == ["AVER", "LAV"]
+
+
+def test_unaveraged_sweep_restores_storage_mode_on_failed_read(connected, monkeypatch):
+    adapter, session = connected
+    session.trace_storage_modes[:2] = ["LAV", "AVER"]
+
+    def failed_read(_trace):
+        raise DeviceError("trace transfer failed")
+
+    monkeypatch.setattr(adapter, "fetch_trace", failed_read)
+    with pytest.raises(DeviceError, match="trace transfer failed"):
+        adapter.acquire_unaveraged_sweep()
+    assert session.trace_storage_modes[:2] == ["LAV", "AVER"]
+
+
+def test_unaveraged_sweep_requires_off_readback_before_trigger(connected):
+    adapter, session = connected
+    session.trace_storage_modes[0] = "AVER"
+    session.command_errors["TRAC1:STOR:MODE OFF"] = '-200,"storage change rejected"'
+    with pytest.raises(DeviceError, match="storage change rejected"):
+        adapter.acquire_unaveraged_sweep()
+    assert "INIT:MODE:SING" not in session.commands
+    assert session.trace_storage_modes[0] == "AVER"
+
+
+def test_unaveraged_sweep_attempts_remaining_restorations_after_a_failed_write(connected, monkeypatch):
+    adapter, session = connected
+    session.trace_storage_modes[:2] = ["AVER", "LAV"]
+    write = session.write
+
+    def fail_trace_b_restoration(command):
+        if command == "TRAC2:STOR:MODE LAV":
+            raise DeviceError("Trace B restoration failed")
+        return write(command)
+
+    monkeypatch.setattr(session, "write", fail_trace_b_restoration)
+    with pytest.raises(DeviceError, match="storage restoration could not be confirmed"):
+        adapter.acquire_unaveraged_sweep()
+    assert session.trace_storage_modes[:2] == ["AVER", "OFF"]
+    assert adapter.state == DeviceState.UNKNOWN
 
 
 @pytest.mark.parametrize("command,operation", [

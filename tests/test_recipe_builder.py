@@ -831,13 +831,13 @@ root:
             self.assertEqual(
                 dialog.reference_operation.currentData(), "difference_db"
             )
-            self.assertTrue(dialog.store_raw.isChecked())
+            self.assertIs(dialog.spectrum_storage.currentData(), True)
             self.assertTrue(dialog.store_processed.isChecked())
             dialog.average_count.setValue(7)
             dialog.reference_operation.setCurrentIndex(
                 dialog.reference_operation.findData("ratio_linear")
             )
-            dialog.store_raw.setChecked(False)
+            dialog.spectrum_storage.setCurrentIndex(dialog.spectrum_storage.findData(False))
             self.assertEqual(
                 dialog.node_fields(),
                 {
@@ -845,7 +845,8 @@ root:
                     "average_count": 7,
                     "inter_sweep_delay": "0 s",
                     "reference_operation": "ratio_linear",
-                    "store_raw": False,
+                    "store_raw": True,
+                    "store_source_spectra": False,
                     "store_processed": True,
                 },
             )
@@ -862,7 +863,7 @@ root:
             dialog.show()
             QApplication.processEvents()
             self.assertFalse(dialog.reference_operation.isVisible())
-            self.assertFalse(dialog.store_raw.isVisible())
+            self.assertTrue(dialog.spectrum_storage.isVisible())
             self.assertFalse(dialog.store_processed.isVisible())
             self.assertTrue(dialog.trace.isVisible())
             self.assertGreater(dialog.trace.geometry().top(), 0)

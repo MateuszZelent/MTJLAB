@@ -240,11 +240,11 @@ finally:
             )
             self.assertFalse(
                 monitor.activity_splitter.geometry().intersects(
-                    monitor.spectrum_preview.geometry()
+                    monitor.preview_tabs.geometry()
                 )
             )
             self.assertLessEqual(
-                monitor.spectrum_preview.geometry().right(),
+                monitor.preview_tabs.geometry().right(),
                 monitor.monitor_splitter.width(),
             )
         finally:

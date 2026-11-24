@@ -6,16 +6,20 @@ from importlib import import_module
 from typing import Any
 
 __all__ = [
-    "MODULE",
     "ANRITSU_FREQUENCY_OPTIONS",
+    "ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS",
+    "ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS",
     "ANRITSU_PREAMPLIFIER_OPTIONS",
     "ANRITSU_SIGNAL_GENERATOR_OPTIONS",
+    "MODULE",
     "AdvancedSpectrumConfig",
     "AdvancedSpectrumSnapshot",
     "AnritsuAdapter",
     "AnritsuConfigurationSnapshot",
     "AnritsuFrequencyOption",
     "AnritsuFullConfigurationReadback",
+    "InstrumentAverageResult",
+    "InstrumentAverageTarget",
     "ReferenceSpectrum",
     "SignalGeneratorConfig",
     "SignalGeneratorSnapshot",

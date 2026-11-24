@@ -14,10 +14,12 @@ from typing import Sequence
 from app.domain.errors import ExecutionError
 from app.domain.manual_metadata import ManualMetadataValue
 from app.domain.models import MeasurementPoint
-from app.devices.anritsu_ms2830a import SpectrumTrace
+from app.devices.anritsu_ms2830a import ReferenceSpectrum, SpectrumTrace
 from app.spectrum import frequency_grids_match
 
 from .hdf5_writer import Hdf5RunWriter
+from .reference_store import ReferenceHdf5Store
+from .saved_spectrum_view import SavedSpectrumView
 
 
 MANUAL_SPECTRUM_SCHEMA = "manual-spectrum-v1"
@@ -69,6 +71,7 @@ class ManualSpectrumArchive:
         self._writer: Hdf5RunWriter | None = None
         self._path: Path | None = None
         self._frequency_grid: tuple[float, ...] | None = None
+        self._last_reference: tuple[ReferenceSpectrum, int] | None = None
 
     def __del__(self) -> None:
         # A page can be destroyed without receiving a Qt close event (for
@@ -109,6 +112,8 @@ class ManualSpectrumArchive:
         processed_unit: str | None = None,
         processing_operation: str = "none",
         capture_context: dict[str, object] | None = None,
+        reference: ReferenceSpectrum | None = None,
+        saved_display: SavedSpectrumView | None = None,
     ) -> ManualSpectrumSaveResult:
         """Append one complete trace and return the actual output path."""
 
@@ -162,6 +167,22 @@ class ManualSpectrumArchive:
             for value in metadata_values
         ]
         measurements = {value.key: float(value.value_si) for value in metadata_values}
+        reference_metadata = {}
+        if reference is not None:
+            if self._last_reference is not None and self._last_reference[0] == reference:
+                reference_index = self._last_reference[1]
+            else:
+                reference_index = writer.store_reference(
+                    reference.trace,
+                    kind="loaded" if reference.kind == "imported" else reference.kind,
+                    average_count=reference.average_count,
+                    acquisition_metadata={
+                        **ReferenceHdf5Store.metadata(reference),
+                        "source_file": reference.source_file,
+                    },
+                )
+                self._last_reference = reference, reference_index
+            reference_metadata["reference_index"] = reference_index
         point = MeasurementPoint(
             index=point_index,
             setpoints={},
@@ -177,6 +198,8 @@ class ManualSpectrumArchive:
                 "metadata_sampled_at_utc": datetime.now(timezone.utc).isoformat(),
                 "metadata_snapshot_kind": "last_confirmed_at_save",
                 "capture_context_at_save": capture_context or {},
+                **({"saved_display_v1": True} if saved_display is not None else {}),
+                **reference_metadata,
             },
         )
         writer.append(
@@ -185,6 +208,7 @@ class ManualSpectrumArchive:
             processed_values=processed,
             processed_unit=processed_unit,
             processing_operation=processing_operation,
+            saved_display=saved_display,
         )
         writer.flush_checkpoint()
         if selected_mode is ManualSpectrumSaveMode.TIMESTAMPED:
@@ -192,6 +216,7 @@ class ManualSpectrumArchive:
             self._writer = None
             self._path = None
             self._frequency_grid = None
+            self._last_reference = None
         return ManualSpectrumSaveResult(
             path=path,
             point_index=point_index,
@@ -206,6 +231,7 @@ class ManualSpectrumArchive:
         self._writer = None
         self._path = None
         self._frequency_grid = None
+        self._last_reference = None
         if writer is not None:
             # This is an explicit operator stop with committed checkpoints.
             # Keep it resumable and importable; "incomplete" denotes a crash.

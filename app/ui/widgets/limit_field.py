@@ -89,7 +89,7 @@ class SafetyRangePill(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setObjectName("safetyRangePill")
 
-        if isinstance(field.editor, QLineEdit):
+        if hasattr(field.editor, "textChanged"):
             field.editor.textChanged.connect(self._on_editor_changed)
         elif hasattr(field.editor, "currentTextChanged"):
             field.editor.currentTextChanged.connect(self._on_editor_changed)
@@ -296,6 +296,8 @@ class LimitField(QWidget):
         *,
         range_mode: bool = True,
         editor_accessory: QWidget | None = None,
+        stack_range: bool = False,
+        clamp_on_editing_finished: bool = True,
     ) -> None:
         super().__init__()
         self.editor = editor
@@ -314,6 +316,7 @@ class LimitField(QWidget):
         row.addWidget(editor, 1)
         if editor_accessory is not None:
             row.addWidget(editor_accessory)
+        if editor_accessory is not None or stack_range:
             layout.addLayout(row)
             row = QHBoxLayout()
             row.setSpacing(6)
@@ -350,7 +353,7 @@ class LimitField(QWidget):
         self.set_range_mode(range_mode)
         self.set_limits(minimum, maximum)
         editing_finished = getattr(editor, "editingFinished", None)
-        if editing_finished is not None:
+        if clamp_on_editing_finished and editing_finished is not None:
             editing_finished.connect(self.validate_and_clamp)
 
     def set_range_mode(self, enabled: bool) -> None:

@@ -29,6 +29,7 @@ from qfluentwidgets import (
     StrongBodyLabel,
 )
 
+from app.devices.anritsu_ms2830a import InstrumentAverageResult, InstrumentAverageTarget
 from app.devices.anritsu_ms2830a.acquisition_context import spectrum_configuration_fingerprint
 from app.devices.anritsu_ms2830a.adapter import (
     AdvancedSpectrumSnapshot,
@@ -58,9 +59,11 @@ from app.spectrum.interleaved_acquisition import InterleavedPhase, InterleavedSp
 from app.ui.dialogs import StationFileDialog
 from app.ui.widgets import NotificationBanner, SpectrumPlotWidget
 
+from .background_assistant import BackgroundAveragingControls
 from .correction_controller import (
     CorrectionSessionRequest,
     CorrectionViewSnapshot,
+    InstrumentBackgroundRequest,
     SpectrumCorrectionController,
     SpectrumFinalizationRequest,
     SpectrumInterferenceImportRequest,
@@ -125,6 +128,7 @@ class SpectrumCorrectionWorkspace(QWidget):
         self._last_rejection_message = ""
         self._kind = "signal"
         self._expected_device: str | None = None
+        self._instrument_target: InstrumentAverageTarget | None = None
         self._sweep_requested_at = None
         self._live_timings_s = {}
         self._full: AnritsuFullConfigurationReadback | None = None
@@ -201,12 +205,14 @@ class SpectrumCorrectionWorkspace(QWidget):
         grid.addWidget(self.reference_state, 1, 0, 1, 2)
         self.duration = LineEdit(controls)
         self.duration.setText(settings.anritsu.spectrum_correction.calibration_duration)
-        self.duration.setAccessibleName("Background acquisition duration with unit")
+        self.background_averaging = BackgroundAveragingControls(
+            self.duration, controls, allow_instrument=single_sweep_available,
+            minimum_sweeps=settings.anritsu.spectrum_correction.calibration_min_sweeps,
+        )
         self.tau = LineEdit(controls)
         self.tau.setText(settings.anritsu.spectrum_correction.temporal_average.time_constant)
         self.tau.setAccessibleName("Temporal time constant with unit")
-        grid.addWidget(BodyLabel("Reference duration", controls), 2, 0)
-        grid.addWidget(self.duration, 2, 1)
+        grid.addWidget(self.background_averaging, 2, 0, 1, 2)
         grid.addWidget(BodyLabel("Preview time constant", controls), 3, 0)
         grid.addWidget(self.tau, 3, 1)
         self.mode = ComboBox(controls)
@@ -341,6 +347,7 @@ class SpectrumCorrectionWorkspace(QWidget):
         self.frame_label.setWordWrap(True)
         root.addWidget(self.frame_label)
         self.acquire_reference.clicked.connect(lambda: self._start_dialog("reference"))
+        self.background_averaging.backend.currentIndexChanged.connect(lambda: self.set_available(self._allowed))
         self.acquire_signal.clicked.connect(lambda: self._start_dialog("signal"))
         self.acquire_interleaved.clicked.connect(lambda: self._start_dialog("interleaved"))
         self.confirm_interleaved_state.clicked.connect(self._confirm_cycle_state)
@@ -411,7 +418,10 @@ class SpectrumCorrectionWorkspace(QWidget):
             "Record or load a background profile first." if self._profile is None
             else "Selecting a new archive starts recording immediately."
         )
-        self.acquire_reference.setToolTip("Selecting a new archive starts recording immediately.")
+        self.acquire_reference.setToolTip(
+            "Selecting a new archive starts instrument averaging immediately."
+            if self.background_averaging.uses_instrument else "Selecting a new archive starts recording immediately."
+        )
         self.stop.setText("Cancel processing" if self._finalization_busy else "Stop acquisition")
         self.stop.setAccessibleName("Cancel offline spectrum processing" if self._finalization_busy
                                     else "Stop quantitative spectrum acquisition")
@@ -433,10 +443,11 @@ class SpectrumCorrectionWorkspace(QWidget):
         self.validate_model.setEnabled(not self._running and not self._profile_io_busy)
         self.diagnose_reference.setEnabled(not self._running and not self._profile_io_busy)
         idle = not self._running and not self._profile_io_busy
-        self.load_interference.setEnabled(idle and self._profile is not None and self._context is not None)
+        self.load_interference.setEnabled(idle and self._profile is not None and self._context is not None
+                                          and self._profile.averaging_source == "pc")
         self.interference_mode.setEnabled(idle and bool(self._interference_calibrations))
         self.clear_interference.setEnabled(idle and self.interference_mode.currentIndex() > 0)
-        for control in (self.duration, self.tau, self.mode, self.reference_state, self.signal_state,
+        for control in (self.background_averaging, self.tau, self.mode, self.reference_state, self.signal_state,
                         self.interleaved_ref_duration, self.interleaved_signal_duration,
                         self.interleaved_minimum_sweeps):
             control.setEnabled(not self._running)
@@ -487,8 +498,9 @@ class SpectrumCorrectionWorkspace(QWidget):
         if not self._single_sweep_available:
             self._show_start_issue(ValueError("Quantitative acquisition requires a qualified single-sweep protocol."))
             return
+        instrument_target = self.background_averaging.instrument_target() if kind == "reference" else None
         try:
-            self._prepare_start(kind)
+            self._prepare_start(kind, instrument_target=instrument_target)
         except ValueError as exc:
             self._show_start_issue(exc)
             return
@@ -496,16 +508,17 @@ class SpectrumCorrectionWorkspace(QWidget):
         directory = getattr(self, "_sample_measurement_directory", None) or Path(str(self._settings.storage.get("output_directory", "./measurements")))
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
         destination, _filter = StationFileDialog.getSaveFileName(
-            self, "Record every raw spectrum", str(directory / f"spectrum_{kind}_{stamp}.h5"),
+            self, "Save instrument background" if instrument_target else "Record every raw spectrum",
+            str(directory / f"spectrum_{kind}_{stamp}.h5"),
             "HDF5 measurement (*.h5)",
         )
         if destination:
-            self.start_acquisition(kind, Path(destination))
+            self.start_acquisition(kind, Path(destination), instrument_target=instrument_target)
         else:
             self.recording_title.setText("Recording canceled")
             self._message("No archive selected. Recording has not started.")
 
-    def _prepare_start(self, kind):
+    def _prepare_start(self, kind, *, instrument_target=None):
         if kind not in {"reference", "signal", "interleaved"}:
             raise ValueError("Unknown spectrum acquisition role.")
         if kind in {"reference", "interleaved"} and not self.reference_state.text().strip():
@@ -513,14 +526,20 @@ class SpectrumCorrectionWorkspace(QWidget):
                                        self.reference_state)
         if kind == "signal" and self._profile is None:
             raise ValueError("Record or load a background profile first.")
+        if instrument_target is not None:
+            if kind != "reference" or not isinstance(instrument_target, InstrumentAverageTarget):
+                raise ValueError("Instrument background averaging requires a reference recording and a valid target.")
+            return 0.0, self._processor_config
         if kind == "interleaved":
             if not self.signal_state.text().strip():
                 raise _RecordingInputError("Describe the SIGNAL state before starting alternating REF / SIGNAL.",
                                            self.signal_state)
             cycle = self._interleaved_config()
             duration = cycle.reference_duration_s
-        else:
+        elif kind == "reference":
             duration = self._recording_duration(self.duration, "Reference duration")
+        else:
+            duration = 0.0
         config = replace(
             self._settings.anritsu.spectrum_correction.processor_config(),
             average_mode=self.mode.currentData(),
@@ -538,12 +557,12 @@ class SpectrumCorrectionWorkspace(QWidget):
             maximum_reference_blocks=self._settings.anritsu.spectrum_correction.reference_policy.maximum_reference_blocks,
         )
 
-    def start_acquisition(self, kind: str, destination: Path):
+    def start_acquisition(self, kind: str, destination: Path, *, instrument_target: InstrumentAverageTarget | None = None):
         if self._running or not self._allowed or not self._single_sweep_available or self._profile_io_busy:
             self._show_start_issue(ValueError("Acquisition is unavailable while another workflow owns the instrument."))
             return
         try:
-            self._duration_s, self._processor_config = self._prepare_start(kind)
+            self._duration_s, self._processor_config = self._prepare_start(kind, instrument_target=instrument_target)
         except ValueError as exc:
             self._show_start_issue(exc)
             return
@@ -557,6 +576,7 @@ class SpectrumCorrectionWorkspace(QWidget):
         self._segment_reset_pending = False
         self.segment_status.setText("New segments restart averaging; they do not change the instruments.")
         self._archive_path = destination
+        self._instrument_target = instrument_target
         self._full = None
         self._advanced = None
         self._context = None
@@ -577,9 +597,13 @@ class SpectrumCorrectionWorkspace(QWidget):
         self._committed_count = 0
         self._last_rejection_message = ""
         self.recording_title.setText(
+            "Starting instrument background…" if instrument_target is not None else
             "Starting background recording…" if kind == "reference" else "Starting corrected spectrum recording…"
         )
-        self.archive_label.setText(f"Selected archive: {destination} · waiting for the first raw spectrum")
+        self.archive_label.setText(
+            f"Selected archive: {destination} · waiting for the instrument mean" if instrument_target is not None else
+            f"Selected archive: {destination} · waiting for the first raw spectrum"
+        )
         self.recording_activity.show()
         self.recording_activity.start()
         self.progress.setRange(0, 100)
@@ -596,11 +620,11 @@ class SpectrumCorrectionWorkspace(QWidget):
         self._message("Save accepted. Reading analyzer settings before recording the first sweep…")
         self._request("read_acquisition_configuration")
 
-    def _request(self, operation):
+    def _request(self, operation, payload=None):
         self._expected_device = operation
         if operation == "single_sweep":
             self._sweep_requested_at = time.perf_counter()
-        self.request_device.emit(operation, "TRAC1" if operation == "single_sweep" else None)
+        self.request_device.emit(operation, "TRAC1" if operation == "single_sweep" else payload)
 
     def handle_result(self, operation: str, result: object) -> bool:
         if operation != self._expected_device or not self._running:

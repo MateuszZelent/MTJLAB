@@ -24,13 +24,14 @@ from app.devices.rigol_dg1000z import RigolChannelConfig
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_FREQUENCY, DIMENSION_RESISTANCE, DIMENSION_TIME, DIMENSION_VOLTAGE, parse_quantity
 from app.recipes import RecipeNode
-from app.safety.rigol_current import quantize_rigol_voltage, validate_rigol_waveform
+from app.safety.rigol_current import quantize_rigol_level_pair, validate_rigol_waveform
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
 from app.ui.recipes import SweepGeneratorDialog
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 from app.ui.recipes.configuration_comparison import ConfigurationReview, ConfigurationComparisonRow
 from app.ui.design_system.tokens import SPACING
+from app.ui.widgets.notification_banner import show_toast
 
 
 class RigolNodeEditorDialog(FluentRecipeDialog):
@@ -280,7 +281,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         # the destination baseline without importing its device-page draft.
         self.waveform.currentTextChanged.connect(self._waveform_changed)
         self.time_mode.currentTextChanged.connect(self._dynamic_controls_changed)
-        self.level_mode.currentTextChanged.connect(self._dynamic_controls_changed)
+        self.level_mode.currentTextChanged.connect(self._level_representation_changed)
         self.frequency.editingFinished.connect(self._sync_period_from_frequency)
         self.period.editingFinished.connect(self._sync_frequency_from_period)
         self.high_level.editingFinished.connect(self._sync_vpp_offset_from_levels)
@@ -475,7 +476,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
 
     @staticmethod
     def _format_voltage(value_v: float, preferred_unit: str | None = None) -> str:
-        value_v = quantize_rigol_voltage(value_v)
+        # Presentation must not round raw requests or derived half-step endpoints.
         if abs(value_v) < 1e-12:
             value_v = 0.0
             if preferred_unit == "mV":
@@ -484,21 +485,19 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
                 return "0 V"
             return "0 V"
         if preferred_unit == "mV":
-            return f"{value_v * 1e3:.12g} mV"
+            return f"{value_v * 1e3:.15g} mV"
         if preferred_unit == "V":
-            return f"{value_v:.12g} V"
+            return f"{value_v:.15g} V"
         if 0 < abs(value_v) < 1:
-            return f"{value_v * 1e3:.12g} mV"
-        return f"{value_v:.12g} V"
+            return f"{value_v * 1e3:.15g} mV"
+        return f"{value_v:.15g} V"
 
-    def _sync_vpp_offset_from_levels(self) -> None:
+    def _sync_vpp_offset_from_levels(self) -> bool:
         try:
             high = parse_quantity(self.high_level.text(), DIMENSION_VOLTAGE).si_value
             low = parse_quantity(self.low_level.text(), DIMENSION_VOLTAGE).si_value
         except Exception:
-            return
-        high = quantize_rigol_voltage(high)
-        low = quantize_rigol_voltage(low)
+            return False
         preferred = (
             "mV"
             if (
@@ -520,8 +519,9 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         )
         self.vpp.setText(self._format_voltage(high - low, preferred_unit=preferred))
         self.offset.setText(self._format_voltage((high + low) / 2, preferred_unit=preferred))
+        return True
 
-    def _sync_levels_from_vpp_offset(self, *, strict: bool = False) -> None:
+    def _sync_levels_from_vpp_offset(self, *, strict: bool = False) -> bool:
         try:
             offset = parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value
             amplitude = (
@@ -531,12 +531,10 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             )
             if amplitude < 0:
                 raise ConfigurationError("Rigol amplitude must not be negative.")
-            offset = quantize_rigol_voltage(offset)
-            amplitude = quantize_rigol_voltage(amplitude)
         except (ConfigurationError, ValueError):
             if strict:
                 raise
-            return
+            return False
         preferred = (
             "mV"
             if (
@@ -558,12 +556,13 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         )
         self.high_level.setText(self._format_voltage(offset + amplitude / 2, preferred_unit=preferred))
         self.low_level.setText(self._format_voltage(offset - amplitude / 2, preferred_unit=preferred))
+        return True
 
     def _sync_period_from_frequency(self) -> None:
         try:
             frequency = parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY).si_value
             if frequency > 0:
-                self.period.setText(f"{1 / frequency:.12g} s")
+                self.period.setText(f"{1 / frequency:.15g} s")
         except Exception:
             return
 
@@ -571,9 +570,21 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         try:
             period = parse_quantity(self.period.text(), DIMENSION_TIME).si_value
             if period > 0:
-                self.frequency.setText(f"{1 / period:.12g} Hz")
+                self.frequency.setText(f"{1 / period:.15g} Hz")
         except Exception:
             return
+
+    def _level_representation_changed(self, mode: str) -> None:
+        if self.waveform.currentText() == "DC" or mode == "High Level / Low Level":
+            converted = self._sync_levels_from_vpp_offset()
+        else:
+            converted = self._sync_vpp_offset_from_levels()
+        if not converted:
+            previous = "Amplitude / Offset" if mode == "High Level / Low Level" else "High Level / Low Level"
+            with QSignalBlocker(self.level_mode):
+                self.level_mode.setCurrentText(previous)
+            show_toast(self, "Complete the voltage values before changing their representation.", severity="warning")
+        self._dynamic_controls_changed()
 
     def _dynamic_controls_changed(self, *_args: object) -> None:
         self._waveform_changed(self.waveform.currentText())
@@ -633,7 +644,9 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         return str(self.output_policy.currentData())
 
     def _effective_frequency(self) -> str:
-        if self.time_mode.currentText() != "Period" or self.waveform.currentText() in {"DC", "NOIS"}:
+        if self.waveform.currentText() in {"DC", "NOIS"}:
+            return "1 Hz"
+        if self.time_mode.currentText() != "Period":
             return self.frequency.text().strip()
         period = parse_quantity(self.period.text(), DIMENSION_TIME).si_value
         if not math.isfinite(period) or period <= 0:
@@ -641,7 +654,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         frequency = 1 / period
         if not math.isfinite(frequency):
             raise ConfigurationError("Rigol period produces a non-finite frequency.")
-        return f"{frequency:.12g} Hz"
+        return f"{frequency:.15g} Hz"
 
     def configuration_snapshot(self) -> RigolConfigurationSnapshot:
         if self.waveform.currentText() == "DC":
@@ -879,6 +892,14 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
                     low_level=config.low_level_v,
                     output_load=config.output_load,
                 )
+                if self._carrier_only:
+                    high, low = quantize_rigol_level_pair(config.high_level_v, config.low_level_v, waveform=config.waveform)
+                    validate_rigol_waveform(
+                        channel=self._settings.rigol.safety.channels[str(config.channel)],
+                        safety=self._settings.rigol.safety, waveform=config.waveform,
+                        frequency=config.frequency_hz, high_level=high, low_level=low,
+                        output_load=config.output_load,
+                    )
                 sync_delay_s = parse_quantity(
                     snapshot.sync_delay, DIMENSION_TIME
                 ).si_value

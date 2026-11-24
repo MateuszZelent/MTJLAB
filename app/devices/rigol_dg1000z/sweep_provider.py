@@ -23,7 +23,7 @@ class RigolSweepProvider:
 
         if binding.parameter_id == "carrier.frequency":
             return frozenset({"update_rigol_frequency"})
-        if binding.parameter_id in {"carrier.high_level", "carrier.low_level"}:
+        if binding.parameter_id in {"carrier.high_level", "carrier.low_level", "carrier.amplitude", "carrier.offset"}:
             return frozenset({"update_rigol_levels"})
         return frozenset()
 
@@ -117,23 +117,24 @@ class RigolSweepProvider:
             return CompiledAxisSetpoint("update_rigol_frequency", {"channel": channel, "frequency_hz": applied}, value.si_value, applied)
         high = level(f"rigol.{channel}.high_level", "high_level")
         low = level(f"rigol.{channel}.low_level", "low_level")
+        applied_value = quantize_rigol_voltage(value.si_value)
         if binding.parameter_id == "carrier.high_level":
-            high = value.si_value
+            high = applied_value
         elif binding.parameter_id == "carrier.low_level":
-            low = value.si_value
+            low = applied_value
         elif binding.parameter_id == "carrier.amplitude":
             offset = (high + low) / 2
-            high, low = offset + value.si_value / 2, offset - value.si_value / 2
+            high, low = offset + applied_value / 2, offset - applied_value / 2
         else:
             amplitude = high - low
-            high, low = value.si_value + amplitude / 2, value.si_value - amplitude / 2
-        applied_high = quantize_rigol_voltage(high)
-        applied_low = quantize_rigol_voltage(low)
+            high, low = applied_value + amplitude / 2, applied_value - amplitude / 2
+        # Quantize the authored control, not its two derived endpoints. An odd
+        # Vpp step legitimately has half-step HighL/LowL values.
         return CompiledAxisSetpoint(
             "update_rigol_levels",
-            {"channel": channel, "high_level_v": applied_high, "low_level_v": applied_low},
+            {"channel": channel, "high_level_v": high, "low_level_v": low},
             value.si_value,
-            applied_high if binding.parameter_id == "carrier.high_level" else applied_low if binding.parameter_id == "carrier.low_level" else applied_high - applied_low if binding.parameter_id == "carrier.amplitude" else (applied_high + applied_low) / 2,
+            applied_value,
         )
 
 

@@ -21,6 +21,7 @@ class RecoveredReference:
     index: int
     fingerprint: str
     origin: dict[str, Any]
+    acquisition_mode: str = "single_sweep"
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,9 +179,15 @@ class RunRecoveryManager:
             origin = state.get("origin", {})
             if not isinstance(origin, dict):
                 raise ValueError("origin must be a mapping")
+            metadata = json.loads(group.attrs.get("acquisition_metadata_json", "{}"))
+            if not isinstance(metadata, dict):
+                raise ValueError("acquisition metadata must be a mapping")
+            acquisition_mode = metadata.get("acquisition_mode", "single_sweep")
+            if acquisition_mode not in ("single_sweep", "continuous_live"):
+                raise ValueError("unsupported reference acquisition mode")
         except (KeyError, TypeError, ValueError) as exc:
             raise ExecutionError("Recovery reference is malformed.") from exc
-        return RecoveredReference(trace, index, fingerprint, origin)
+        return RecoveredReference(trace, index, fingerprint, origin, acquisition_mode)
 
     @staticmethod
     def _configuration_prelude(

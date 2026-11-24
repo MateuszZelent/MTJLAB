@@ -25,6 +25,7 @@ from app.domain.quantities import (
     parse_quantity,
 )
 from app.recipes import RecipeNode, generate_sweep_points
+from app.recipes.block_registry import ANRITSU_HARDWARE_AVERAGE_FIELDS
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS as _SWEEPABLE_PARAMETERS
 from app.recipes.parameter_registry import sweep_default as _sweep_default
 from app.settings.models import StationSettings
@@ -761,14 +762,47 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         )
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
-        note = BodyLabel(
-            "This editor changes only the declarative plan. The selected trace "
-            "and storage policy are validated again during preflight."
+        self.acquisition_description = BodyLabel(surface)
+        self.acquisition_description.setWordWrap(True)
+        self.acquisition_description.setObjectName("muted")
+        layout.addWidget(self.acquisition_description)
+        form = self.acquisition_form = QFormLayout()
+        self.acquisition_mode = ComboBox(surface)
+        self.acquisition_mode.addItem("PyLab Live averaging", userData="continuous_live")
+        self.acquisition_mode.addItem("Anritsu Lin Average", userData="instrument_average")
+        self.acquisition_mode.addItem("PyLab triggered sweeps", userData="single_sweep")
+        self.acquisition_mode.setAccessibleName("Averaging method")
+        mode = node.data.get("acquisition_mode", "single_sweep")
+        if any(field in node.data for field in ANRITSU_HARDWARE_AVERAGE_FIELDS):
+            mode = "instrument_average"
+        mode_index = self.acquisition_mode.findData(mode)
+        self.acquisition_mode.setCurrentIndex(
+            self.acquisition_mode.findData("single_sweep") if mode_index < 0 else mode_index
         )
-        note.setWordWrap(True)
-        note.setObjectName("muted")
-        layout.addWidget(note)
-        form = QFormLayout()
+        form.addRow("Averaging method", self.acquisition_mode)
+        self.instrument_average_target = ComboBox(surface)
+        self.instrument_average_target.addItem("Exact sweep count", userData="count")
+        self.instrument_average_target.addItem("Nominal duration", userData="duration")
+        self.instrument_average_target.setAccessibleName("Anritsu averaging target")
+        self.instrument_average_target.setCurrentIndex(
+            self.instrument_average_target.findData(
+                "duration" if "instrument_average_duration" in node.data else "count"
+            )
+        )
+        form.addRow("Averaging target", self.instrument_average_target)
+        self.instrument_average_count = SpinBox(surface)
+        self.instrument_average_count.setRange(2, 9999)
+        self.instrument_average_count.setValue(int(node.data.get("instrument_average_count", 50)))
+        self.instrument_average_count.setAccessibleName("Anritsu device sweep count")
+        self.instrument_average_count.setToolTip("Number of complete sweeps averaged by the analyzer.")
+        form.addRow("Device sweeps", self.instrument_average_count)
+        self.instrument_average_duration = LineEdit(surface)
+        self.instrument_average_duration.setText(str(node.data.get("instrument_average_duration", "5 s")))
+        self.instrument_average_duration.setAccessibleName("Anritsu target averaging time")
+        self.instrument_average_duration.setToolTip(
+            "The analyzer averages a whole number of sweeps based on its current sweep time."
+        )
+        form.addRow("Target averaging time", self.instrument_average_duration)
         self.trace = ComboBox(surface)
         self.trace.addItems(("TRAC1",))
         self.trace.setCurrentText(str(node.data.get("trace", "TRAC1")))
@@ -777,10 +811,18 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         self.average_count.setRange(1, 9999)
         self.average_count.setValue(int(node.data.get("average_count", 1)))
         self.average_count.setToolTip(
-            "Every complete raw sweep is archived. Spectra are averaged in linear mW, never directly in dBm."
+            "Number of complete spectra averaged in linear power."
         )
         form.addRow("Average complete spectra", self.average_count)
-        self.average_count_label = form.labelForField(self.average_count)
+        self.spectrum_storage = ComboBox(surface)
+        self.spectrum_storage.addItem("Average + all RAW frames", userData=True)
+        self.spectrum_storage.addItem("Average only", userData=False)
+        self.spectrum_storage.setCurrentIndex(
+            self.spectrum_storage.findData(node.data.get("store_source_spectra", True))
+        )
+        self.spectrum_storage.setAccessibleName("Spectrum storage policy")
+        self.spectrum_storage.setToolTip("Choose whether to retain the individual input frames alongside the mean in HDF5.")
+        form.addRow("Save to HDF5", self.spectrum_storage)
         self.minimum_duration = LineEdit(surface)
         self.minimum_duration.setText(str(node.data.get("minimum_duration", "0 s")))
         self.minimum_duration.setToolTip("Collect for at least this time AND the requested sweep count. 0 s uses the count only.")
@@ -804,26 +846,18 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         operation = str(node.data.get("reference_operation", "none"))
         index = self.reference_operation.findData(operation)
         self.reference_operation.setCurrentIndex(index if index >= 0 else 0)
-        self.store_raw = CheckBox("Store raw spectrum", surface)
-        self.store_raw.setChecked(True)
-        self.store_raw.setEnabled(False)
-        self.store_raw.setToolTip(
-            "RAW is always stored as the scientific source record and frequency-grid provenance."
-        )
         self.store_processed = CheckBox("Store processed spectrum", surface)
         self.store_processed.setChecked(
             bool(node.data.get("store_processed", operation != "none"))
         )
         if not self._reference_only:
             form.addRow("Reference operation", self.reference_operation)
-            form.addRow("", self.store_raw)
             form.addRow("", self.store_processed)
         else:
             # These controls still exist so node_fields and shared signal
             # handling stay simple, but an unlaid-out child defaults to (0,0)
             # and used to overlap the dialog heading.
             self.reference_operation.hide()
-            self.store_raw.hide()
             self.store_processed.hide()
         layout.addLayout(form)
         self.processing_options = RecipeSpectrumOptions(surface, reference_only=self._reference_only, fields=node.data)
@@ -847,23 +881,50 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         self.reference_operation.currentIndexChanged.connect(
             self._operation_changed
         )
+        self.acquisition_mode.currentIndexChanged.connect(self._operation_changed)
+        self.instrument_average_target.currentIndexChanged.connect(self._update_acquisition_controls)
         self._operation_changed()
         if operation != "none" and not any(box.isChecked() for box in self.processing_options.filters.values()):
             self.store_processed.setChecked(bool(node.data.get("store_processed", True)))
 
+    def _update_acquisition_controls(self) -> None:
+        acquiring = not self._reference_only or self.processing_options.source.currentData() == "acquire"
+        mode = self.acquisition_mode.currentData()
+        hardware_average = acquiring and mode == "instrument_average"
+        pylab_average = acquiring and not hardware_average
+        timed = self.instrument_average_target.currentData() == "duration"
+        self.acquisition_description.setVisible(acquiring)
+        self.acquisition_description.setText({
+            "instrument_average": "Anritsu averages Trace A internally and saves one mean per acquisition.",
+            "continuous_live": "PyLab averages distinct frames from continuous Trace A.",
+            "single_sweep": "PyLab triggers and averages each complete Trace A sweep.",
+        }[mode])
+        form = self.acquisition_form
+        form.setRowVisible(self.acquisition_mode, acquiring)
+        form.setRowVisible(self.trace, acquiring)
+        form.setRowVisible(self.instrument_average_target, hardware_average)
+        form.setRowVisible(self.instrument_average_count, hardware_average and not timed)
+        form.setRowVisible(self.instrument_average_duration, hardware_average and timed)
+        for control in (self.average_count, self.spectrum_storage, self.inter_sweep_delay):
+            form.setRowVisible(control, pylab_average)
+        self.average_count.setEnabled(pylab_average)
+        if self._reference_only:
+            form.setRowVisible(self.minimum_duration, pylab_average)
+
     def _operation_changed(self) -> None:
+        self._update_acquisition_controls()
         operation = self.reference_operation.currentData()
         self.processing_options.source_unit = REFERENCE_UNITS[operation]
-        emi_allowed = self.processing_options.source_unit in {"dB", "dBm"}
+        hardware_average = self.acquisition_mode.currentData() == "instrument_average"
+        emi_allowed = not hardware_average and self.processing_options.source_unit in {"dB", "dBm"}
         emi = self.processing_options.filters["emi_reject"]
         emi.setEnabled(emi_allowed or emi.isChecked())
-        self.processing_options.filters["emi_reject"].setToolTip("EMI lines requires dB/dBm and 3 to 24 sweeps within this point.")
+        emi.setToolTip(
+            "EMI lines requires individual PyLab sweeps."
+            if hardware_average else "EMI lines requires dB/dBm and 3 to 24 sweeps within this point."
+        )
         filters = any(box.isChecked() for box in self.processing_options.filters.values())
         processed = self.reference_operation.currentData() != "none" or filters
-        acquiring = not self._reference_only or self.processing_options.source.currentData() == "acquire"
-        self.average_count.setEnabled(acquiring)
-        self.average_count.setVisible(acquiring)
-        self.average_count_label.setVisible(acquiring)
         self.store_processed.setEnabled(processed)
         if processed:
             self.store_processed.setChecked(True)
@@ -873,18 +934,33 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             self.store_processed.setChecked(False)
 
     def node_fields(self) -> dict[str, object]:
-        delay = parse_quantity(self.inter_sweep_delay.text().strip(), DIMENSION_TIME).si_value
+        instrument_average = self.acquisition_mode.currentData() == "instrument_average"
+        delay_text = "0 s" if instrument_average else self.inter_sweep_delay.text().strip()
+        delay = parse_quantity(delay_text, DIMENSION_TIME).si_value
         if not 0 <= delay <= 3600:
             raise ValueError("Delay between raw spectra must be in 0..3600 s.")
         fields: dict[str, object] = {
             "trace": self.trace.currentText(),
-            "average_count": self.average_count.value(),
-            "inter_sweep_delay": self.inter_sweep_delay.text().strip(),
+            "average_count": 1 if instrument_average else self.average_count.value(),
+            "inter_sweep_delay": delay_text,
         }
         fields.update(self.processing_options.node_fields())
+        if self.acquisition_mode.currentData() == "continuous_live" and not fields.get("source_file"):
+            fields["acquisition_mode"] = "continuous_live"
+        if self.spectrum_storage.currentData() is False and not fields.get("source_file"):
+            fields["store_source_spectra"] = False
+        if instrument_average and not fields.get("source_file"):
+            if self.instrument_average_target.currentData() == "count":
+                fields["instrument_average_count"] = self.instrument_average_count.value()
+            else:
+                target = self.instrument_average_duration.text().strip()
+                if parse_quantity(target, DIMENSION_TIME).si_value <= 0:
+                    raise ValueError("Target averaging time must be positive.")
+                fields["instrument_average_duration"] = target
+            fields["store_source_spectra"] = False
         if self._reference_only:
             fields["purpose"] = self.reference_purpose.currentData()
-            duration = parse_quantity(self.minimum_duration.text().strip(), DIMENSION_TIME).si_value
+            duration = 0.0 if instrument_average else parse_quantity(self.minimum_duration.text().strip(), DIMENSION_TIME).si_value
             if not 0 <= duration <= 3600:
                 raise ValueError("Minimum collection time must be in 0..3600 s.")
             if duration:
@@ -893,25 +969,25 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
                 fields["minimum_duration"] = self.minimum_duration.text().strip()
         if not self._reference_only:
             if self.processing_options.filters["emi_reject"].isChecked():
+                if instrument_average:
+                    raise ValueError("EMI lines requires individual PyLab sweeps within each point.")
                 if self.processing_options.source_unit not in {"dB", "dBm"}:
                     raise ValueError("EMI lines requires dB/dBm. Uncheck EMI for a linear or signed-W result.")
                 required = self.processing_options._parameters.emi_min_frames
-                if self.average_count.value() < required:
+                if fields["average_count"] < required:
                     raise ValueError(f"EMI lines requires at least {required} complete spectra within this point.")
             fields.update(
                 {
                     "reference_operation": str(
                         self.reference_operation.currentData()
                     ),
-                    "store_raw": self.store_raw.isChecked(),
+                    "store_raw": True,
                     "store_processed": self.store_processed.isChecked(),
                 }
             )
         return fields
 
     def accept(self) -> None:
-        # RAW remains checked and disabled above; processed storage is an
-        # optional derived record selected independently.
         try:
             self.node_fields()
         except ValueError as exc:

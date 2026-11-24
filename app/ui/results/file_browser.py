@@ -33,6 +33,7 @@ from qfluentwidgets import (
 )
 
 from app.storage import Hdf5RunReader, RunSummary, ThatecRunReader
+from app.storage.filesystem_paths import native_path
 from app.ui.dialogs import StationFileDialog as QFileDialog
 from app.ui.results.state_card import ResultsStateCard
 from app.ui.results.workers import ResultReadTask
@@ -645,7 +646,7 @@ class FileBrowserPanel(QWidget):
         if previous is not None:
             if self._find_item_by_path(previous) is not None:
                 self.file_selected.emit(previous)
-            elif not previous.is_file():
+            elif not native_path(previous).is_file():
                 self._selected_path = None
                 self.file_selected.emit(None)
         self.files_loaded.emit(self.has_files())
@@ -1004,7 +1005,7 @@ class FileBrowserPanel(QWidget):
         """Add and select an arbitrary result without modifying it."""
         self._pending_selected_path = None
         target = Path(path).expanduser().absolute()
-        if not target.is_file():
+        if not native_path(target).is_file():
             self._show_error(
                 "Result file not found",
                 f"The selected path is not a readable file:\n{target}",
@@ -1054,7 +1055,7 @@ class FileBrowserPanel(QWidget):
         """Select an already indexed result or catalogue artifact."""
 
         target = Path(path).expanduser().absolute()
-        if not target.is_file():
+        if not native_path(target).is_file():
             return False
         if target.suffix.lower() not in {".h5", ".hdf5", ".csv", ".pdf", ".json", ".jsonl", ".yml"}:
             return False

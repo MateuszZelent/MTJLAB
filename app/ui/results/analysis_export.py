@@ -6,6 +6,8 @@ import json
 import hashlib
 import os
 from pathlib import Path
+import re
+from app.storage.filesystem_paths import native_path
 from app.storage.naming import sanitize_run_file_stem
 
 
@@ -13,9 +15,9 @@ def processing_manifest(state):
     return asdict(state) if is_dataclass(state) else state
 
 
-def heatmap_export_path(metadata):
+def postprocessing_directory(source):
     """Mirror the source sweep folder below its DUT's postprocessing directory."""
-    source = Path(metadata["source_file"]).resolve()
+    source = Path(source).resolve()
     # Re-exported standalone snapshots retain the original measurement source.
     sweep_root = next((p for p in source.parents if p.name.casefold() == "sweeps"), None)
     if sweep_root is not None:
@@ -26,7 +28,32 @@ def heatmap_export_path(metadata):
             base = base.parent
     else:
         base, sweep_name = source.parent, source.stem
-    directory = base / "postprocessing" / "sweeps" / sweep_name
+    return base / "postprocessing" / "sweeps" / sweep_name
+
+
+def analysis_file_stem(title, *, limit=115):
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", title).strip(" .")
+    if not cleaned or len(cleaned) > limit:
+        digest = hashlib.sha256(title.encode()).hexdigest()[:10]
+        prefix = cleaned[:max(0, limit - 13)].rstrip(" .-")
+        cleaned = f"{prefix} - {digest}" if prefix else digest
+    return cleaned
+
+
+def heatmap_export_path(metadata):
+    directory = postprocessing_directory(metadata["source_file"])
+    if metadata.get("title"):
+        limit = 115
+        if os.name == "nt":
+            # Leave space for the native Save dialog and the provenance sidecar.
+            limit = max(17, min(limit, 234 - len(str(directory).encode("utf-16-le")) // 2))
+        stem = analysis_file_stem(metadata["title"], limit=limit)
+        target = directory / f"{stem}.png"
+        ordinal = 2
+        while native_path(target).exists() or native_path(target.with_suffix(".h5")).exists():
+            target = directory / f"{stem} ({ordinal}).png"
+            ordinal += 1
+        return target
     state = metadata.get("spectrum_processing", {})
     operation = state.get("operation", "none")
     label = "raw" if operation == "none" else operation
@@ -58,7 +85,7 @@ def ensure_derived_destination(path, source_file=None):
 
 
 def write_analysis_manifest(path, metadata):
-    target = Path(str(path) + ".analysis.json")
+    target = native_path(str(path) + ".analysis.json")
     target.write_text(json.dumps({"schema": "pylab.result-analysis.v1",
         "exported_at_utc": datetime.now(UTC).isoformat(),
         "source_data_modified": False, **metadata}, ensure_ascii=False, indent=2,

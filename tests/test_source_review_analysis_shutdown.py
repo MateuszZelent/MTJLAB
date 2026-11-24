@@ -50,6 +50,7 @@ def test_page_requests_both_workers_even_when_first_is_busy():
         return SimpleNamespace(close=lambda: calls.append(name) or stopped)
     page = SimpleNamespace(
         _timer=SimpleNamespace(stop=lambda: None),
+        _averaging_deadline_timer=SimpleNamespace(stop=lambda: None),
         _background_config_timer=SimpleNamespace(stop=lambda: None),
         _analysis_controller=worker("spectrum", False),
         _spectrogram_analysis_controller=worker("spectrogram", True),

@@ -26,6 +26,7 @@ from app.devices.keithley_2600.ui.recipe_extension import (
 from app.devices.rigol_dg1000z.ui.recipe_extension import (
     RigolConfigurationSnapshot,
     RigolNodeEditorDialog,
+    RigolOutputNodeEditorDialog,
     RigolPage,
 )
 from app.devices.registry import built_in_device_registry
@@ -45,6 +46,7 @@ __all__ = [
     "KeithleyPage",
     "RigolConfigurationSnapshot",
     "RigolNodeEditorDialog",
+    "RigolOutputNodeEditorDialog",
     "RigolPage",
     "SignalGeneratorSnapshot",
     "_keithley_roi_definition",

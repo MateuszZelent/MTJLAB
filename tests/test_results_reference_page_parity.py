@@ -16,6 +16,7 @@ from app.devices.anritsu_ms2830a import SpectrumTrace
 from app.devices.anritsu_ms2830a.ui.page import AnritsuPage
 from app.settings import SettingsRepository
 from app.storage.hdf5_reader import Hdf5RunReader, StoredPoint, StoredReference, StoredSpectrum
+from app.ui.design_system.paper_plot_style import PAPER_STYLE
 from app.ui.results.read_session import ResultReadSession
 from app.ui.results.spectrum_tab import SpectrumResultsTab
 from tests.shell_test_isolation import shell_qt_application as shell_qt_application  # noqa: PLC0414
@@ -150,6 +151,39 @@ def test_raw_analysis_reference_click_sequence_keeps_analyzer_raw_in_dbm(paired_
                                   (0., 1., -1., 2., -2.))
 
 
+def test_results_abs_changes_only_the_rendered_difference(paired_pages):
+    app, _main, results = paired_pages
+    plot = results.spectrum_plot
+    assert not plot.show_absolute.isEnabled()
+    results.view_controls.boxes["show_reference"].click()
+    wait_for_reads(app, results)
+    label, = plot._traces
+    signed = plot._traces[label][1].copy()
+    assert plot.show_absolute.isVisibleTo(results) and plot.show_absolute.isEnabled()
+    request = results._active_read_request
+    plot.show_absolute.click()
+    np.testing.assert_array_equal(plot._traces[label][1], np.abs(signed))
+    assert plot.analysis_manifest()["absolute_traces"] == [label]
+    assert plot._y_unit == "dB" and results._active_read_request == request
+    plot.show_absolute.click()
+    np.testing.assert_array_equal(plot._traces[label][1], signed)
+
+    results.view_controls.reference_operation.setCurrentIndex(
+        results.view_controls.reference_operation.findData("subtract_reference_signed")
+    )
+    wait_for_reads(app, results)
+    label, = plot._traces
+    signed_w = plot._traces[label][1].copy()
+    assert plot._y_unit == "W" and signed_w.min() < 0
+    assert plot.show_absolute.isEnabled()
+    plot.show_absolute.click()
+    np.testing.assert_array_equal(plot._traces[label][1], np.abs(signed_w))
+    results.view_controls.boxes["show_reference"].click()
+    wait_for_reads(app, results)
+    assert plot._y_unit == "dBm" and not plot.show_absolute.isEnabled()
+    assert plot._traces["Stored spectrum"][1].max() < 0
+
+
 def test_reference_toggle_defaults_to_same_rendered_subtract_db(paired_pages):
     app, main, results = paired_pages
     main.correction_controls.reference.click()
@@ -160,7 +194,8 @@ def test_reference_toggle_defaults_to_same_rendered_subtract_db(paired_pages):
     assert results.view_controls.reference_operation.currentText() == "Subtract [dB]"
     values = assert_rendered_parity(app, main, results, "dB")
     np.testing.assert_array_equal(values, (0., 1., -1., 2., -2.))
-    np.testing.assert_allclose(results.spectrum_plot.plot.viewRange()[1], (-2.2, 2.2),
+    margin = 4 * PAPER_STYLE.number("axes.ymargin")
+    np.testing.assert_allclose(results.spectrum_plot.plot.viewRange()[1], (-2 - margin, 2 + margin),
                                rtol=1e-12, atol=0)
     for key in ("show_raw", "show_background", "show_background_spectrum", "show_reference_spectrum",
                 "show_analysis"):

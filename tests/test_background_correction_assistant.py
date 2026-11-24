@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import h5py
+import numpy as np
 import pytest
 from PySide6.QtCore import QEvent, QTimer
 from PySide6.QtGui import QFont, QFontDatabase
@@ -110,9 +111,10 @@ def test_background_setup_returns_to_main_and_live_starts_only_on_request(setup,
     assert not any(operation in {"single_sweep", "start_live"} for operation in requests[count:])
     assert not any(operation in {"configure", "set_signal_generator_output"} for operation in requests)
     assert "source output states not checked" in page.correction_workspace._profile.reference_state
+    before_live = len(requests)
     page.live.click()
     wait_until(app, lambda: page._timer.isActive())
-    assert requests[-1] == "start_live"
+    assert requests[before_live:].count("start_live") == 1
     assert not page.correction_workspace.running
     page.live.click()
     wait_until(app, lambda: not page._timer.isActive() and not page._live_transition_pending)
@@ -130,6 +132,88 @@ def test_cancelled_background_does_not_start_corrected_live(setup):
     assert page._background_assistant is None
     assert page.correction_workspace._kind == "reference"
     assert not page.correction_workspace.acquire_signal.isEnabled()
+
+
+@pytest.mark.parametrize("target_mode", ["frames", "seconds"])
+def test_instrument_background_saves_one_mean_and_enables_static_filter(setup, target_mode):
+    from app.storage.background_profile_store import BackgroundProfileHdf5Store
+    from app.storage.hdf5_reader import Hdf5RunReader
+    from app.spectrum.streaming_statistics import dbm_to_w
+
+    app, page, requests, errors = setup
+    page.resize(1280, 860)
+    page.show()
+    page.correction_controls.configure_background.click()
+    dialog = page._background_assistant
+    controls = dialog.background_averaging
+    controls.backend.setCurrentIndex(controls.backend.findData("instrument"))
+    controls.target.mode.setCurrentIndex(controls.target.mode.findData(target_mode))
+    controls.target.frames.setValue(6)
+    controls.target.seconds.setValue(1)
+    app.processEvents()
+    assert controls.backend.isVisible()
+    assert controls.target.isVisible() and not dialog.duration.isVisible()
+    editor = controls.target.frames if target_mode == "frames" else controls.target.seconds
+    for widget in (controls.backend, editor, dialog.next):
+        assert widget.isVisible() and widget.height() >= 30
+        assert dialog.rect().contains(widget.mapTo(dialog, widget.rect().bottomRight()))
+
+    destination = dialog.reference_path
+    dialog.next.click()
+    wait_until(app, lambda: page._background_assistant is None or bool(errors), timeout=15)
+    assert not errors, errors
+    assert requests.count("instrument_average") == 1
+    assert "single_sweep" not in requests and "start_live" not in requests
+    assert not page.correction_workspace.running and page.cleanup_filters["background"].isChecked()
+    assert not page._timer.isActive()
+
+    _, profile = BackgroundProfileHdf5Store.load(destination)
+    assert profile.averaging_source == "instrument"
+    assert profile.sweep_count == 6 if target_mode == "frames" else profile.sweep_count >= 2
+    assert profile.nominal_sweep_time_s > 0
+    assert profile.sample_variance_w2 is None and profile.mean_variance_w2 is None
+    assert not profile.signal_free_qualified
+    assert page.correction_workspace._profile.content_hash == profile.content_hash
+    with h5py.File(destination, "r") as archive:
+        assert len(archive["points"]) == 1
+        assert archive["spectra/0"].attrs["trace_name"] == "BACKGROUND_MEAN"
+        assert "acquisition_envelope_json" not in archive["spectra/0"].attrs
+    detail = Hdf5RunReader.detail(destination)
+    assert detail.simulation_metadata["mode"] == "simulation"
+    np.testing.assert_allclose(dbm_to_w(Hdf5RunReader.spectrum(destination, 0).powers_dbm), profile.mean_w)
+
+
+def test_late_instrument_background_is_discarded_after_cancel(setup):
+    app, page, requests, errors = setup
+    original_request = page._controller.call.side_effect
+    held = []
+
+    def delay_average(operation, payload=None):
+        if operation == "instrument_average":
+            held.append((operation, payload))
+        else:
+            original_request(operation, payload)
+
+    page._controller.call.side_effect = delay_average
+    page.correction_controls.configure_background.click()
+    dialog = page._background_assistant
+    backend = dialog.background_averaging.backend
+    backend.setCurrentIndex(backend.findData("instrument"))
+    destination = dialog.reference_path
+    dialog.next.click()
+    wait_until(app, lambda: bool(held) or bool(errors))
+    assert not errors, errors
+    dialog.reject()
+    assert page.correction_workspace.running
+    assert not page.live.isEnabled()
+
+    original_request(*held[0])
+    wait_until(app, lambda: not page.correction_workspace.running or bool(errors), timeout=15)
+    assert not errors, errors
+    assert not destination.exists()
+    assert page.correction_workspace._profile is None
+    assert not page.cleanup_filters["background"].isChecked()
+    assert "start_live" not in requests
 
 
 def test_fault_holds_workflow_until_archive_close_and_does_not_retry_failed_close(setup, monkeypatch):

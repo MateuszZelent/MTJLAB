@@ -67,16 +67,17 @@ def _build_view(session, checkpoint, frequencies, values, unit, points, processi
             raise InterruptedError("Result comparison cancelled.")
     check()
     traces, notes, baselines = [], [], []
-    def add(key, label, result):
+    def add(key, label, result, operation):
         baselines.extend(baseline for baseline in result.baselines if baseline not in baselines)
         notes.extend(note for note in result.notes if note not in notes)
         if key in {"background_difference", "reference_difference"}:
             notes.append(result.method)
         traces.append(SpectrumDisplayTrace(key, label, result.frequencies_hz, result.values,
-                                          result.unit, checkpoint, (result.method,)))
+                                          result.unit, checkpoint, (result.method, operation)))
     if view.show_analysis and not view.quick_comparison:
         processor = ResultSpectrumProcessor(session.path, processing, points, reader=session, cancelled=cancelled)
-        add("analysis", "Analysis" if processing.active else "Raw", processor.process(checkpoint, frequencies, values, unit))
+        add("analysis", "Analysis" if processing.active else "Raw",
+            processor.process(checkpoint, frequencies, values, unit), processing.math_operation)
     if view.show_raw and not view.relative_reference:
         traces.append(SpectrumDisplayTrace("raw", "Raw", tuple(frequencies), tuple(values), unit, checkpoint, ("recorded raw",)))
     for enabled, key, index, sweep, operation, label in (
@@ -91,7 +92,7 @@ def _build_view(session, checkpoint, frequencies, values, unit, points, processi
                  else ResultProcessing(operation, index, reference_sweep=sweep))
         processor = ResultSpectrumProcessor(session.path, state, points,
                                             reader=session, cancelled=cancelled)
-        add(key, label, processor.process(checkpoint, frequencies, values, unit))
+        add(key, label, processor.process(checkpoint, frequencies, values, unit), state.math_operation)
     for purpose, enabled, index, sweep, operation in (
         ("background", view.show_background_spectrum, view.background_index, view.background_sweep, "subtract_power_signed"),
         ("reference", view.show_reference_spectrum, view.reference_index, view.reference_sweep, "subtract_reference_signed"),

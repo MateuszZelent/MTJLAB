@@ -7,12 +7,13 @@ import pytest
 import h5py
 from PySide6.QtWidgets import QApplication
 
-from app.devices.anritsu_ms2830a import SpectrumTrace
+from app.devices.anritsu_ms2830a import ReferenceSpectrum, SpectrumTrace
 from app.devices.anritsu_ms2830a.ui.manual_save import ManualSpectrumSaveOptions
 from app.devices.anritsu_ms2830a.ui.page import AnritsuPage
 from app.domain.errors import ExecutionError
 from app.domain.manual_metadata import ManualMetadataValue
 from app.storage import Hdf5RunReader, ManualSpectrumArchive, ManualSpectrumSaveMode
+from app.ui.results.page import ResultsPage
 from tests.helpers import loaded_settings
 from tests.test_main_window import wait_for_ui
 
@@ -121,6 +122,71 @@ def test_each_capture_records_current_settings_identity_and_operator(page, tmp_p
     assert second["device_idn"]["anritsu"] == "SIM-TWO"
     assert second["operator_context"] == {"name": "second"}
     assert second["simulation"] is True
+
+
+@pytest.mark.parametrize("view", ["overlay", "hidden", "absolute"])
+def test_timestamped_manual_save_restores_view_and_copies_active_reference(page, app, tmp_path, view, monkeypatch):
+    reference_trace = SpectrumTrace((1e6, 2e6, 3e6), (-75., -74., -73.),
+                                    datetime.now(timezone.utc), "TRAC1")
+    page.set_manual_archive_context(simulation=True)
+    page._set_reference(ReferenceSpectrum(reference_trace, "averaged", 32, reference_trace.acquired_at_utc,
+                                          source_file="imported-reference.h5"))
+    page._show_trace(trace())
+    page.show_raw.setChecked(True)
+    page.show_reference.setChecked(view == "overlay")
+    if view == "absolute":
+        monkeypatch.setattr(page, "_validate_display_reference", lambda _frequencies: None)
+        page.quick_curves["reference"].setChecked(True)
+        page.show_absolute.setChecked(True)
+        page._refresh_spectrum_display()
+        assert any("absolute_difference" in curve.provenance for curve in page._display_state.traces)
+    expected_view = page._display_state.traces
+    page._apply_manual_save_options(ManualSpectrumSaveOptions(
+        tmp_path / "manual.h5", ManualSpectrumSaveMode.TIMESTAMPED, "none", (), "raw"))
+    page._save_configured_manual_spectrum()
+    assert wait_for_ui(lambda: page._manual_archive_thread is None, timeout_ms=30_000)
+    path = page._manual_archive_last_path
+    stored = Hdf5RunReader.spectrum(path, 0)
+    assert stored.reference_index == 0
+    reference = Hdf5RunReader.reference(path, stored.reference_index)
+    assert reference.powers_dbm == reference_trace.powers_dbm
+    assert reference.average_count == 32
+    assert [curve.values for curve in stored.saved_display.traces] == [curve.values for curve in expected_view]
+
+    results = ResultsPage(str(tmp_path))
+    results.resize(1300, 900)
+    results.show()
+    try:
+        results._on_file_selected(path)
+        assert wait_for_ui(lambda: results._result_task is None)
+        results.result_tabs.setCurrentIndex(results._spectrum_index)
+        results.spectrum_tab.show_stored_spectrum(0)
+        tab = results.spectrum_tab
+        assert wait_for_ui(lambda: tab.spectrum_variant_combo.currentData() == "saved_view"
+                           and tab.spectrum_view.currentWidget() is tab.spectrum_plot)
+        assert set(tab.spectrum_plot._traces) == {curve.label for curve in expected_view}
+        if view == "hidden":
+            tab.spectrum_variant_combo.setCurrentIndex(tab.spectrum_variant_combo.findData("reference"))
+            assert wait_for_ui(lambda: set(tab.spectrum_plot._traces) == {"Reference spectrum"})
+    finally:
+        results.close()
+        results.deleteLater()
+        app.processEvents()
+
+
+def test_append_links_each_checkpoint_to_its_reference(tmp_path):
+    path = tmp_path / "append.h5"
+    archive = ManualSpectrumArchive()
+    sample = trace()
+    first = ReferenceSpectrum(sample, "averaged", 32, sample.acquired_at_utc)
+    other = SpectrumTrace(sample.frequencies_hz, (-71., -65., -67.), sample.acquired_at_utc, "TRAC1")
+    second = ReferenceSpectrum(other, "imported", 16, other.acquired_at_utc, source_file="other.h5")
+    for reference in (first, first, second, None):
+        archive.save(sample, destination=path, mode="append", reference=reference)
+    archive.close()
+    assert [Hdf5RunReader.spectrum(path, i).reference_index for i in range(4)] == [0, 0, 1, None]
+    assert [item.average_count for item in Hdf5RunReader.references(path)] == [32, 16]
+    assert Hdf5RunReader.reference(path, 1).powers_dbm == other.powers_dbm
 
 
 def test_missing_variant_and_execution_preview_cannot_be_saved_as_raw(page, app, tmp_path):

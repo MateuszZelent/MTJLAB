@@ -43,6 +43,7 @@ def page(application):
     widget = AnritsuPage(controller, loaded_settings(), single_sweep_available=True)
     widget.resize(1360, 900)
     widget.show()
+    application.processEvents()
     yield widget, controller
     if widget._spectrum_window is not None:
         widget._spectrum_window.close()
@@ -89,10 +90,22 @@ def test_failed_live_transition_releases_buttons_without_erasing_spectrum(page, 
     assert widget._latest_trace is not None
 
 
+def test_confirmed_abort_stops_polling_after_trace_mode_is_restored(page):
+    widget, _ = page
+    widget._set_page_state(AnritsuPageState.LIVE)
+    widget._timer.start(10000)
+
+    widget._result("abort_acquisition", True)
+
+    assert not widget._timer.isActive()
+    assert widget._page_state == AnritsuPageState.IDLE
+
+
 @pytest.mark.parametrize("width,theme", [(1280, "light"), (860, "dark")])
 def test_multiple_peak_windows_preserve_history_pause_gate_and_export(page, application, tmp_path, width, theme):
     widget, controller = page
     apply_application_theme(application, theme)
+    widget.auto_peak_detection.setChecked(True)
     widget._show_trace(frame())
     wait_until(application, lambda: len(widget._detected_peaks) >= 2)
     widget._start_peak_tracking(0)
@@ -163,9 +176,13 @@ def test_worker_matches_multiple_tracks_independently(application):
 
 def test_closing_latest_tracker_keeps_older_tracker_updating(page, application):
     widget, _ = page
-    widget._show_trace(frame())
+    trace = frame()
+    widget._show_trace(trace)
+    wait_until(application, lambda: widget._analysis_raw_snapshot is trace)
+    assert not widget._detected_peaks
+    widget.open_peak_table.click()
     wait_until(application, lambda: len(widget._detected_peaks) >= 2)
-    widget._open_peak_table()
+    assert not widget.auto_peak_detection.isChecked()
     table = widget._peak_table_dialog
     original = widget._detected_peaks
     table.table.selectRow(0)
@@ -185,7 +202,10 @@ def test_closing_latest_tracker_keeps_older_tracker_updating(page, application):
 
 def test_tracking_export_keeps_linear_units_and_does_not_bridge_lost_peak(page, application, tmp_path):
     widget, _ = page
-    widget._show_trace(frame())
+    trace = frame()
+    widget._show_trace(trace)
+    wait_until(application, lambda: widget._analysis_raw_snapshot is trace)
+    widget.analyze_peaks.click()
     wait_until(application, lambda: len(widget._detected_peaks) >= 2)
     widget._start_peak_tracking(0)
     tracking = widget._peak_tracking_window

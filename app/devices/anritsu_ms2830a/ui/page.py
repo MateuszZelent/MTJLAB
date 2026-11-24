@@ -6,10 +6,10 @@ from __future__ import annotations
 import hashlib
 import math
 import time
-from copy import deepcopy
 from collections import deque
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -17,8 +17,7 @@ from uuid import uuid4
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, QThread, QTimer, Signal
-from app.devices.anritsu_ms2830a.ui.manual_archive_worker import ManualArchiveWorker
+from PySide6.QtCore import QEvent, QPoint, QRectF, QSignalBlocker, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QComboBox,
@@ -34,8 +33,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QSizePolicy,
     QSpinBox,
-    QStackedWidget,
     QSplitter,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -62,6 +61,7 @@ from qfluentwidgets import (
     ToggleButton,
     TransparentPushButton,
     isDarkTheme,
+    setFont,
 )
 
 from app.devices.anritsu_ms2830a import (
@@ -70,6 +70,8 @@ from app.devices.anritsu_ms2830a import (
     AdvancedSpectrumSnapshot,
     AnritsuConfigurationSnapshot,
     AnritsuFullConfigurationReadback,
+    InstrumentAverageResult,
+    InstrumentAverageTarget,
     ReferenceSpectrum,
     SignalGeneratorConfig,
     SignalGeneratorSnapshot,
@@ -78,8 +80,9 @@ from app.devices.anritsu_ms2830a import (
     frequency_option_for,
 )
 from app.devices.anritsu_ms2830a.acquisition_context import spectrum_configuration_fingerprint
+from app.devices.anritsu_ms2830a.ui.manual_archive_worker import ManualArchiveWorker
 from app.devices.anritsu_ms2830a.ui.readback_dialog import AnritsuReadbackDialog
-from app.domain.errors import ConfigurationError
+from app.domain.errors import ConfigurationError, SafetyViolation
 from app.domain.manual_metadata import ManualMetadataValue
 from app.domain.quantities import (
     DIMENSION_CURRENT,
@@ -88,6 +91,7 @@ from app.domain.quantities import (
     DIMENSION_FREQUENCY,
     DIMENSION_TIME,
     DIMENSION_VOLTAGE,
+    QuantityError,
     format_quantity_auto,
     parse_quantity,
 )
@@ -97,6 +101,7 @@ from app.safety.anritsu import (
     ANRITSU_REFERENCE_LEVEL_MIN_DBM,
     ANRITSU_SWEEP_POINT_COUNTS,
     normalize_anritsu_detector,
+    validate_anritsu_spectrum,
 )
 from app.settings.models import StationSettings
 from app.spectrum import (
@@ -111,12 +116,24 @@ from app.spectrum import (
     frequency_grids_match,
 )
 from app.spectrum.analysis import SPECTRUM_FILTER_LABELS, SPECTRUM_FILTER_ORDER
-from app.spectrum.comparison_view import compare_power, convert_power_view
+from app.spectrum.comparison_view import compare_power, convert_power_view, display_state
+from app.spectrum.streaming_statistics import RollingPowerAverage, dbm_to_w
+from app.spectrum.stripe_correction import (
+    AutomaticStripeSettings,
+    AutomaticStripeTemplate,
+    StripeBands,
+    apply_stripe_reference,
+    build_automatic_stripe_template,
+    build_stripe_offsets,
+    reconstruct_stripe_bands,
+    stripe_band_mask,
+)
 from app.storage import (
     ManualSpectrumArchive,
     ManualSpectrumSaveMode,
     ReferenceHdf5Store,
 )
+from app.storage.saved_spectrum_view import SavedSpectrumView
 from app.ui.common import line_edit as _line
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.dialogs import StationDialog
@@ -139,8 +156,22 @@ from .background_assistant import BackgroundCorrectionAssistant
 from .correction_card import SpectrumCorrectionWorkspace
 from .manual_save import ManualSpectrumSaveDialog, ManualSpectrumSaveOptions
 from .peak_analysis import PeakTableDialog, PeakTrackingWindow
+from .spectrum_controls import (
+    AveragingTargetControls,
+    PlotRangeController,
+    PlotScaleDialog,
+    SpectrumCorrectionControls,
+    StripeCorrectionControls,
+    StripeSwitch,
+)
 from .spectrum_workbench import SpectrumWorkbench
-from .spectrum_controls import PlotRangeController, PlotScaleDialog, SpectrumCorrectionControls
+
+
+@dataclass(frozen=True, slots=True)
+class _BackgroundReadback:
+    generation: int | None
+    fingerprint: str
+    rbw_hz: float
 
 
 class AnritsuPageState(StrEnum):
@@ -179,8 +210,10 @@ def _finish_spectrum_form(form: QFormLayout) -> None:
             widget.setMinimumHeight(widget.sizeHint().height())
 
 
-class AnritsuSpectrumConfigurationPanel(CardWidget):
+class AnritsuSpectrumConfigurationPanel(QWidget):
     """Shared, hardware-neutral spectrum setup for manual and plan hosts."""
+
+    frequency_edit_rejected = Signal(str)
 
     def __init__(
         self,
@@ -199,8 +232,8 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
         layout.setSpacing(6)
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        form.setVerticalSpacing(7)
         self.frequency_representation = ComboBox(self)
+        self.frequency_representation.setAccessibleName("Frequency view")
         self.frequency_representation.addItem("Start / Stop", userData="start_stop")
         self.frequency_representation.addItem("Center / Span", userData="center_span")
         self.start = _line("1 MHz")
@@ -209,7 +242,9 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
         self.points = ComboBox(self)
         self.frequency_label_a = BodyLabel("Start")
         self.frequency_label_b = BodyLabel("Stop")
-        form.addRow("Frequency representation", self.frequency_representation)
+        self.frequency_label_a.setBuddy(self.start)
+        self.frequency_label_b.setBuddy(self.stop)
+        form.addRow("Frequency view", self.frequency_representation)
         form.addRow(
             self.frequency_label_a, self._bounded("frequency", self.start)
         )
@@ -246,14 +281,30 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
         self.vbw_auto.currentIndexChanged.connect(
             lambda: self.vbw.setEnabled(self.vbw_auto.currentData() == "manual")
         )
-        vbw_layout = QHBoxLayout()
+        vbw_layout = QGridLayout()
         vbw_layout.setSpacing(6)
-        vbw_layout.addWidget(self.vbw_auto)
-        vbw_layout.addWidget(self.vbw_mode)
-        vbw_layout.addWidget(self.vbw, 1)
+        vbw_layout.addWidget(self.vbw_auto, 0, 0)
+        vbw_layout.addWidget(self.vbw_mode, 0, 1)
+        vbw_layout.addWidget(self.vbw, 1, 0, 1, 2)
         form.addRow("VBW", vbw_layout)
 
+        for editor, label in (
+            (self.start, "Start frequency"), (self.stop, "Stop frequency"),
+            (self.reference, "Reference level"), (self.rbw, "Resolution bandwidth"),
+            (self.vbw, "Video bandwidth"),
+        ):
+            editor.setAccessibleName(label)
+            editor.setMinimumWidth(180)
+            editor.setFixedHeight(36)
+            setFont(editor, 16)
+        self.points.setAccessibleName("Sweep points")
+        self.rbw_mode.setAccessibleName("RBW mode")
+        self.vbw_auto.setAccessibleName("VBW mode")
+        self.vbw_mode.setAccessibleName("VBW filter type")
         _finish_spectrum_form(form)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        for row in range(form.rowCount()):
+            form.itemAt(row, QFormLayout.ItemRole.LabelRole).widget().setContentsMargins(0, 8, 0, 0)
         layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.addLayout(form)
         if plan_mode:
@@ -280,7 +331,9 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
         return value.min, value.max
 
     def _bounded(self, key: str, editor: QWidget) -> LimitField:
-        field = LimitField(editor, *self._limit_values(key), range_mode=True)
+        field = LimitField(
+            editor, *self._limit_values(key), stack_range=True, clamp_on_editing_finished=False,
+        )
         field.setProperty("limitKey", key)
         if self.plan_mode:
             field.edit_button.setVisible(False)
@@ -305,9 +358,7 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
         """Restore the persisted acquisition snapshot into the visible form."""
 
         defaults = self._settings.anritsu.safety.defaults
-        self.frequency_representation.setCurrentIndex(
-            self.frequency_representation.findData("start_stop")
-        )
+        self._set_frequency_view("start_stop")
         self.start.setText(str(defaults["start_frequency"]))
         self.stop.setText(str(defaults["stop_frequency"]))
         self.reference.setText(str(defaults["reference_level"]))
@@ -363,14 +414,12 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
         self,
         snapshot: AnritsuConfigurationSnapshot | AnritsuFullConfigurationReadback,
     ) -> None:
-        self.frequency_representation.setCurrentIndex(
-            self.frequency_representation.findData("start_stop")
-        )
+        self._set_frequency_view("start_stop")
         self.start.setText(
-            format_quantity_auto(snapshot.start_hz, DIMENSION_FREQUENCY)
+            format_quantity_auto(snapshot.start_hz, DIMENSION_FREQUENCY, precision=12)
         )
         self.stop.setText(
-            format_quantity_auto(snapshot.stop_hz, DIMENSION_FREQUENCY)
+            format_quantity_auto(snapshot.stop_hz, DIMENSION_FREQUENCY, precision=12)
         )
         self.reference.setText(f"{snapshot.reference_level_dbm:.9g} dBm")
         index = self.points.findData(snapshot.points)
@@ -426,30 +475,37 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
             vbw_hz=vbw_hz,
         )
 
+    def _set_frequency_view(self, mode: str) -> None:
+        with QSignalBlocker(self.frequency_representation):
+            self.frequency_representation.setCurrentIndex(self.frequency_representation.findData(mode))
+        center_span = mode == "center_span"
+        self.frequency_label_a.setText("Center" if center_span else "Start")
+        self.frequency_label_b.setText("Span" if center_span else "Stop")
+        self.start.setAccessibleName("Center frequency" if center_span else "Start frequency")
+        self.stop.setAccessibleName("Frequency span" if center_span else "Stop frequency")
+
     def _change_frequency_representation(self) -> None:
+        mode = self.frequency_representation.currentData()
+        center_span = mode == "center_span"
         try:
             first = parse_quantity(self.start.text(), DIMENSION_FREQUENCY).si_value
             second = parse_quantity(self.stop.text(), DIMENSION_FREQUENCY).si_value
-            if self.frequency_representation.currentData() == "center_span":
-                self.frequency_label_a.setText("Center")
-                self.frequency_label_b.setText("Span")
-                self.start.setText(
-                    format_quantity_auto((first + second) / 2, DIMENSION_FREQUENCY)
-                )
-                self.stop.setText(
-                    format_quantity_auto(second - first, DIMENSION_FREQUENCY)
-                )
+            start_hz, stop_hz = (first, second) if center_span else (first - second / 2, first + second / 2)
+            if not 0 < start_hz < stop_hz:
+                raise ConfigurationError("Enter a positive range with start below stop.")
+            if center_span:
+                first, second = first + (second - first) / 2, second - first
             else:
-                self.frequency_label_a.setText("Start")
-                self.frequency_label_b.setText("Stop")
-                self.start.setText(
-                    format_quantity_auto(first - second / 2, DIMENSION_FREQUENCY)
-                )
-                self.stop.setText(
-                    format_quantity_auto(first + second / 2, DIMENSION_FREQUENCY)
-                )
-        except Exception:
+                first, second = start_hz, stop_hz
+            first_text = format_quantity_auto(first, DIMENSION_FREQUENCY, precision=12)
+            second_text = format_quantity_auto(second, DIMENSION_FREQUENCY, precision=12)
+        except (ConfigurationError, QuantityError) as exc:
+            self._set_frequency_view("start_stop" if center_span else "center_span")
+            self.frequency_edit_rejected.emit(f"Cannot change frequency view. {exc}")
             return
+        self._set_frequency_view(mode)
+        self.start.setText(first_text)
+        self.stop.setText(second_text)
 
 
 class AnritsuAdvancedSpectrumPanel(CardWidget):
@@ -960,19 +1016,28 @@ class _AnritsuSpectrumWindow(StationDialog):
         self.setMinimumSize(860, 580)
         surface = self.use_modal_shell_content().surface
         layout = self.modal_content_layout(spacing=8)
-        header = QHBoxLayout()
-        header.addWidget(StrongBodyLabel("Current spectrum", surface))
-        self.start_live = PrimaryPushButton("Start Live", surface)
-        self.stop_live = PushButton("Stop Live", surface)
-        self.peak_table = PushButton("Add / select peaks", surface)
-        header.addWidget(self.start_live)
-        header.addWidget(self.stop_live)
-        header.addWidget(self.peak_table)
-        header.addStretch(1)
-        self.tools_toggle = CheckBox("Analysis tools", surface)
+        header = QWidget(surface)
+        toolbar = FlowLayout(header, needAni=False, isTight=True)
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setHorizontalSpacing(8)
+        toolbar.setVerticalSpacing(4)
+        self.start_live = PrimaryPushButton("Start Live", header)
+        self.stop_live = PushButton("Stop Live", header)
+        self.live_average = PushButton("Live average…", header)
+        self.show_live_frame = CheckBox("Live frame", header)
+        self.show_live_frame.setEnabled(False)
+        self.stripes = StripeSwitch(header)
+        self.peak_table = PushButton("Add / select peaks", header)
+        self.show_absolute = CheckBox("Abs", header)
+        self.show_absolute.setAccessibleName("Show absolute spectrum difference")
+        self.show_absolute.setToolTip("Show the magnitude of the signed spectrum difference.")
+        self.show_absolute.setEnabled(False)
+        self.tools_toggle = CheckBox("Analysis tools", header)
         self.tools_toggle.setChecked(True)
-        header.addWidget(self.tools_toggle)
-        layout.addLayout(header)
+        for control in (self.start_live, self.stop_live, self.live_average, self.show_live_frame, self.stripes,
+                        self.peak_table, self.show_absolute, self.tools_toggle):
+            toolbar.addWidget(control)
+        layout.addWidget(header)
         self.spectrum = SpectrumWorkbench(parent=surface)
         self.spectrum.set_title("Waiting for a completed spectrum")
         self.spectrum.set_labels(
@@ -1197,7 +1262,7 @@ class AnritsuPage(QWidget):
         self._spectrogram_filter_error = None
         self._shared_background_key = None
         self._background_config_pending = None
-        self._background_config_snapshot = None
+        self._background_config_snapshot: _BackgroundReadback | None = None
         self._background_preview_context = None
         self._background_config_error = None
         self._background_filter_enabled = False
@@ -1229,9 +1294,27 @@ class AnritsuPage(QWidget):
         self._averaging_source_trace: SpectrumTrace | None = None
         self._averaging_active = False
         self._averaging_destination: str | None = None
+        self._instrument_reference_target: InstrumentAverageTarget | None = None
         self._averaging_start_monotonic: float | None = None
         self._averaging_target_count = 0
+        self._averaging_target_seconds: int | None = None
+        self._averaging_first_frame_at: float | None = None
+        self._averaging_deadline_timer = QTimer(self)
+        self._averaging_deadline_timer.setSingleShot(True)
+        self._averaging_deadline_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._averaging_deadline_timer.timeout.connect(self._finish_timed_average)
+        self._latest_average_frame: SpectrumTrace | None = None
+        self._rolling_average: RollingPowerAverage | None = None
+        self._instrument_live_target: InstrumentAverageTarget | None = None
+        self._last_instrument_average_count = 0
+        self._rolling_average_trace: SpectrumTrace | None = None
+        self._stripe_enabled = False
+        self._stripe_settings: AutomaticStripeSettings | StripeBands = AutomaticStripeSettings()
+        self._stripe_template = None
+        self._stripe_input_state: SpectrumDisplayState | None = None
         self._resume_live_after_averaging = False
+        self._reference_stream_owned = False
+        self._average_frame_deadline: float | None = None
         self._live_frame_count = 0
         self._fetch_started_monotonic: float | None = None
         self._last_frame_monotonic: float | None = None
@@ -1358,6 +1441,9 @@ class AnritsuPage(QWidget):
         self.configuration_panel = AnritsuSpectrumConfigurationPanel(
             settings, self
         )
+        self.configuration_panel.frequency_edit_rejected.connect(
+            lambda message: self.banner.show_message(message, severity="error")
+        )
         self.start = self.configuration_panel.start
         self.stop = self.configuration_panel.stop
         self.frequency_representation = (
@@ -1404,8 +1490,10 @@ class AnritsuPage(QWidget):
         self._update_anritsu_hardware_limits(())
         controls = QGridLayout()
         controls.setSpacing(6)
-        self.read_configuration = PushButton("Read from instrument")
-        self.read_and_save_configuration = PushButton("Read all & save defaults")
+        self.read_configuration = PushButton("Read instrument")
+        self.read_configuration.setToolTip("Read the current settings from Anritsu.")
+        self.read_and_save_configuration = PushButton("Import defaults…")
+        self.read_and_save_configuration.setToolTip("Read and review the current settings before saving them as defaults.")
         self.configure_button = PrimaryPushButton("Apply configuration")
         self.single = PushButton("Acquire new spectrum")
         self.live = PrimaryPushButton("Start Live")
@@ -1423,6 +1511,8 @@ class AnritsuPage(QWidget):
         controls.addWidget(self.read_configuration, 0, 0)
         controls.addWidget(self.read_and_save_configuration, 0, 1)
         controls.addWidget(self.configure_button, 1, 0, 1, 2)
+        controls.setColumnStretch(0, 1)
+        controls.setColumnStretch(1, 1)
         setup_layout.addLayout(controls)
         # Acquisition remains reachable while the settings drawer is closed.
         self.acquisition_commands = QWidget(self)
@@ -1484,6 +1574,47 @@ class AnritsuPage(QWidget):
         self.acquire_single_reference.setAccessibleName("Acquire reference once")
         self._background_assistant = None
         self.correction_controls = SpectrumCorrectionControls(self)
+        self.show_live_frame = self.correction_controls.show_live_frame
+        self.show_live_frame.toggled.connect(self._refresh_spectrum_display)
+        self.live_average_dialog = self._create_workflow_dialog("Live spectrum average", "liveSpectrumAverageDialog")
+        self.live_average_dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.live_average_dialog.setModal(False)
+        live_surface = self.live_average_dialog.use_modal_shell_content().surface
+        live_average_layout = self.live_average_dialog.modal_content_layout(spacing=10)
+        live_average_layout.addWidget(StrongBodyLabel("Live spectrum average", live_surface))
+        explanation = CaptionLabel(
+            "PyLab updates a rolling power average with each Live frame. Anritsu returns one power average "
+            "per block. Anritsu time targets use its nominal sweep time.", live_surface)
+        explanation.setWordWrap(True)
+        live_average_layout.addWidget(explanation)
+        self.live_average_target = AveragingTargetControls(
+            live_surface, initial_frames=self.average_count.value(), allow_instrument=self._single_sweep_configured,
+        )
+        self.live_average_target.backend.currentIndexChanged.connect(self._apply_page_state)
+        live_average_layout.addWidget(self.live_average_target)
+        self.live_average_status = CaptionLabel("Start Live to collect an average.", live_surface)
+        self.live_average_status.setWordWrap(True)
+        live_average_layout.addWidget(self.live_average_status)
+        live_average_actions = QHBoxLayout()
+        self.start_live_average = PrimaryPushButton("Start average", live_surface)
+        self.cancel_live_average = PushButton("Stop average", live_surface)
+        for button in (self.start_live_average, self.cancel_live_average):
+            live_average_actions.addWidget(button)
+        live_average_layout.addLayout(live_average_actions)
+        self.start_live_average.clicked.connect(self._start_rolling_average)
+        self.cancel_live_average.clicked.connect(lambda: self._stop_rolling_average())
+        self.correction_controls.live_average.clicked.connect(self._open_live_average_setup)
+        self.stripe_dialog = self._create_workflow_dialog("Live stripe correction", "liveStripeCorrectionDialog")
+        self.stripe_dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        stripe_surface = self.stripe_dialog.use_modal_shell_content().surface
+        self.stripe_controls = StripeCorrectionControls(stripe_surface)
+        self.stripe_dialog.modal_content_layout(spacing=10).addWidget(self.stripe_controls)
+        self.stripe_controls.apply.clicked.connect(self._apply_stripe_settings)
+        self.stripe_controls.disable.clicked.connect(self._disable_stripe_correction)
+        self.stripe_controls.view.currentIndexChanged.connect(self._stripe_view_changed)
+        self.stripe_controls.background_setup.clicked.connect(self._open_stripe_background_setup)
+        self.correction_controls.stripes.toggle.checkedChanged.connect(self._set_stripes_enabled)
+        self.correction_controls.stripes.settings.clicked.connect(self._open_stripe_setup)
         self.correction_controls.configure_background.clicked.connect(self._open_background_setup)
         self.reference_operation = self.correction_controls.operation
         self._reference_operation_selection = "difference_db"
@@ -1497,7 +1628,7 @@ class AnritsuPage(QWidget):
         self._changing_correction = False
         self._pending_correction = None
         self.use_current_reference = PushButton("Use current trace")
-        self.capture_reference = PrimaryPushButton("Acquire N× reference")
+        self.capture_reference = PrimaryPushButton("Acquire averaged reference")
         self.clear_reference = PushButton("Clear reference")
         self.load_reference = PushButton("Load reference…")
         self.save_reference = PushButton("Save reference…")
@@ -1522,24 +1653,26 @@ class AnritsuPage(QWidget):
             reference_flow.addWidget(control)
         reference_layout.addWidget(reference_actions)
         reference_average = QHBoxLayout()
-        self.reference_average_count = SpinBox(reference_surface)
-        self.reference_average_count.setRange(1, 9999)
-        self.reference_average_count.setValue(self.average_count.value())
+        self.reference_average_target = AveragingTargetControls(
+            reference_surface, initial_frames=self.average_count.value(), allow_instrument=self._single_sweep_configured,
+        )
+        self.reference_average_target.setToolTip(
+            "PyLab collects new Live frames. Anritsu returns a single averaged trace for the group."
+        )
+        self.reference_average_count = self.reference_average_target.frames
         self.reference_average_count.setAccessibleName("Reference averaging sweep count")
-        reference_average.addWidget(BodyLabel("Complete traces to average", reference_surface))
-        reference_average.addWidget(self.reference_average_count)
+        reference_average.addWidget(self.reference_average_target, 1)
         reference_average.addWidget(self.capture_reference)
         reference_layout.addLayout(reference_average)
         self.reference_average_status = CaptionLabel("No reference averaging in progress.", reference_surface)
         reference_layout.addWidget(self.reference_average_status)
+        self.reference_average_progress = ProgressBar(reference_surface, useAni=False)
+        self.reference_average_progress.hide()
+        reference_layout.addWidget(self.reference_average_progress)
         self.reference_cancel_average = PushButton("Cancel reference averaging", reference_surface)
         self.reference_cancel_average.clicked.connect(self.cancel_averaging)
         reference_layout.addWidget(self.reference_cancel_average)
         reference_layout.addStretch(1)
-        self.average_progress.valueChanged.connect(
-            lambda value: self.reference_average_status.setText(
-                f"{value} / {self._averaging_target_count} complete reference traces"
-                if self._averaging_destination == "reference" else "No reference averaging in progress."))
         reference_close = PushButton("Done", reference_surface)
         reference_close.clicked.connect(self.reference_dialog.accept)
         reference_layout.addWidget(reference_close)
@@ -1651,7 +1784,7 @@ class AnritsuPage(QWidget):
             ("emi_reject", "EMI lines",
              "Reject stationary-line candidates using the displayed source history. Requires several Live frames; a desired carrier can also be stationary."),
             ("denoise", "Denoise",
-             "Smooth noise after the selected rejection filters, preserving signal edges."),
+             "Smooth noise after the selected rejection filters and Stripes. Masked frequencies stay empty."),
         ):
             checkbox = CheckBox(short_title, self.filter_strip)
             checkbox.setObjectName(f"spectrumFilter_{key}")
@@ -1710,7 +1843,6 @@ class AnritsuPage(QWidget):
         self.overlay_analysis_source.setChecked(True)
         self.overlay_analysis_source.setToolTip("Show the input before digital filters alongside the filtered result, in the same units.")
         self.auto_peak_detection = CheckBox("Auto peaks", self.signal_analysis_card)
-        self.auto_peak_detection.setChecked(True)
         self.highlight_peaks = CheckBox("Show peaks", self.analysis_details)
         self.highlight_peaks.setChecked(True)
         self.highlight_replacements = CheckBox("Show replacements", self.analysis_details)
@@ -1867,9 +1999,10 @@ class AnritsuPage(QWidget):
         self.control_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.control_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.control_scroll.setWidget(left_panel)
-        self.control_scroll.setMinimumWidth(320)
+        self.control_scroll.setMinimumWidth(max(360, left_panel.minimumSizeHint().width() + 16))
         self.workspace_splitter.addWidget(self.control_scroll)
         self.workspace_splitter.addWidget(right_panel)
+        self.workspace_splitter.setCollapsible(0, False)
         self.workspace_splitter.setStretchFactor(0, 0)
         self.workspace_splitter.setStretchFactor(1, 1)
         self.workspace_splitter.setSizes([560, 1100])
@@ -1975,11 +2108,11 @@ class AnritsuPage(QWidget):
             self.read_and_save_configuration: "Read the current basic and advanced Spectrum settings using query commands, preview them, then save them as settings.yml defaults. No instrument setting or safety limit is changed.",
             self.single: "Start one fresh, qualified Anritsu sweep, wait for completion, then read TRAC1. It does not change spectrum settings or enable RF output.",
             self.average_count: "Number of complete spectra to average. 200 is common in the Thatec workflow. Averaging is performed in linear mW, not directly in dBm.",
-            self.acquire_average: "Acquire N complete single sweeps using the qualified protocol and average power in linear mW.",
+            self.acquire_average: "Acquire N individual sweeps with instrument averaging off, then average power in linear mW.",
             self.cancel_average: "Stop temporal averaging. Already collected temporary frames are discarded; completed raw/reference data are unchanged.",
             self.acquire_single_reference: "Passively fetch one new TRAC1 frame and store that completed frame as the reference. No analyser setting is changed.",
             self.use_current_reference: "Use the latest already acquired trace as the reference without sending a VISA command.",
-            self.capture_reference: "Passively acquire and average N traces, then store that completed average as the in-memory reference spectrum.",
+            self.capture_reference: "Average N distinct, unaveraged Trace A frames from continuous acquisition.",
             self.clear_reference: "Remove the in-memory reference and all derived display results. It does not delete raw measurements from HDF5.",
             self.clear_all_spectra_button: "Clear all captured in-memory spectra, temporal average, reference spectrum, and display curves to start a fresh acquisition. Saved HDF5 files on disk are not affected.",
             self.clear_spectra_plot_button: "Clear all in-memory traces, reference spectrum, and display plots to start from scratch. Saved HDF5 files on disk are not affected.",
@@ -2029,6 +2162,11 @@ class AnritsuPage(QWidget):
         flow.addWidget(StrongBodyLabel("Plot", card))
         flow.addWidget(self.auto_peak_detection)
         self.highlight_peaks.setText("Markers")
+        self.show_absolute = CheckBox("Abs", card)
+        self.show_absolute.setAccessibleName("Show absolute spectrum difference")
+        self.show_absolute.setToolTip("Show the magnitude of the signed spectrum difference.")
+        self.show_absolute.setEnabled(False)
+        self.show_absolute.toggled.connect(self._absolute_view_changed)
         self._peak_marker_title = BodyLabel("Max. peaks", card)
         self.peak_count = SpinBox(card)
         self.peak_count.setRange(1, 100)
@@ -2044,7 +2182,8 @@ class AnritsuPage(QWidget):
         self.plot_scales.setAccessibleName("Set horizontal and vertical plot limits")
         self.plot_scales.clicked.connect(self._open_plot_scales)
         self.toggle_analysis_details.setText("View options…")
-        for widget in (self.highlight_peaks, self.overlay_analysis_source, self._peak_marker_title, self.peak_count, self.peak_settings,
+        for widget in (self.highlight_peaks, self.show_absolute, self.overlay_analysis_source,
+                       self._peak_marker_title, self.peak_count, self.peak_settings,
                        self.open_peak_table, self.plot_scales, self.toggle_analysis_details):
             flow.addWidget(widget)
         return card
@@ -2063,8 +2202,9 @@ class AnritsuPage(QWidget):
         # (now hidden child) page. Background is built on demand and avoids it.
         if dialog.parentWidget() is not host:
             dialog.setParent(host, dialog.windowFlags())
-        preferred = (720, 540) if dialog is self.reference_dialog else (
-            (1000, 700) if dialog is self.recording_dialog else (620, 340))
+        preferred = {
+            self.reference_dialog: (720, 540), self.recording_dialog: (1000, 700), self.stripe_dialog: (650, 455),
+        }.get(dialog, (620, 340))
         if dialog.isMinimized():
             dialog.showNormal()
         dialog.resize(min(preferred[0], max(420, self.window().width() - 60)),
@@ -2087,6 +2227,75 @@ class AnritsuPage(QWidget):
 
     def _open_recording_setup(self) -> None:
         self._show_workflow_dialog(self.recording_dialog)
+
+    def _open_live_average_setup(self) -> None:
+        self._apply_page_state()
+        self._show_workflow_dialog(self.live_average_dialog)
+
+    def _open_stripe_setup(self) -> None:
+        self._apply_page_state()
+        self._show_workflow_dialog(self.stripe_dialog)
+
+    def _open_stripe_background_setup(self) -> None:
+        self.stripe_dialog.hide()
+        self._open_background_setup(for_stripes=True)
+
+    def _apply_stripe_settings(self) -> None:
+        try:
+            settings = self.stripe_controls.settings()
+        except ValueError as exc:
+            self.stripe_controls.error.setText(str(exc))
+            self.stripe_controls.error.show()
+            return
+        self.stripe_controls.error.hide()
+        self._stripe_settings = settings
+        self._stripe_template = None
+        self._set_stripes_enabled(True)
+
+    def _disable_stripe_correction(self) -> None:
+        self._set_stripes_enabled(False)
+
+    def _set_stripes_enabled(self, enabled: bool) -> None:
+        if enabled and self._execution_controlled:
+            self._sync_stripe_switches()
+            return
+        controls = self.stripe_controls
+        if enabled and not self._stripe_enabled:
+            with QSignalBlocker(controls.view):
+                controls.view.setCurrentIndex(controls.view.findData("corrected"))
+        self._stripe_enabled = enabled
+        controls.disable.setEnabled(enabled)
+        if not enabled:
+            controls.error.hide()
+            controls.status.setText("Stripe correction is off.")
+            controls.set_detected_bands(())
+        self._sync_stripe_switches()
+        self._refresh_stripe_view()
+        if (enabled and controls.background_setup.isEnabled()
+                and (self.correction_workspace._profile is None or self.correction_workspace._context is None)):
+            self._open_stripe_background_setup()
+
+    def _sync_stripe_switches(self) -> None:
+        buttons = [self.correction_controls.stripes]
+        if self._spectrum_window is not None:
+            buttons.append(self._spectrum_window.stripes)
+        for button in buttons:
+            button.toggle.setEnabled(not self._execution_controlled)
+            if button.toggle.isChecked() != self._stripe_enabled:
+                with QSignalBlocker(button.toggle):
+                    button.toggle.setChecked(self._stripe_enabled)
+
+    def _stripe_view_changed(self) -> None:
+        if self._stripe_enabled:
+            self._refresh_stripe_view()
+
+    def _refresh_stripe_view(self) -> None:
+        self._invalidate_analysis_results()
+        self._display_revision += 1
+        self._refresh_spectrum_display(auto_range=True)
+        self._update_correction_summary()
+        if self._latest_trace is not None:
+            self._update_signal_analysis(self._latest_trace)
 
     def _open_reference_setup(self) -> None:
         self.status.emit("Anritsu: opening reference configuration")
@@ -2114,9 +2323,14 @@ class AnritsuPage(QWidget):
 
     def _open_compact_plot_settings(self) -> None:
         self._presentation_popup_view.setFixedWidth(min(680, max(360, self.width() - 40)))
+        popup = self._presentation_popup
+        # The plot strip measures its wrapped rows using visible controls.
+        popup.show()
         self._update_control_card_heights()
-        self._presentation_popup.adjustSize()
-        self._presentation_popup.exec(self.compact_plot_settings, FlyoutAnimationType.NONE)
+        self._presentation_popup_layout.activate()
+        popup.adjustSize()
+        button = self.compact_plot_settings
+        popup.exec(button.mapToGlobal(QPoint(0, button.height())), FlyoutAnimationType.NONE)
 
     def _update_control_card_heights(self) -> None:
         """Reserve actual wrapped-row height instead of FlowLayout's one-row minimum."""
@@ -2194,27 +2408,41 @@ class AnritsuPage(QWidget):
             text = f"Reference · {self.reference_operation.currentText()} · {detail}"
         else:
             text = "No correction · raw spectrum [dBm]"
-        if self._analysis_parameters.temporal_average_frames > 1:
+        if self._analysis_parameters.temporal_average_frames > 1 and not self._live_average_active:
             stats = self._preview_statistics
             count = stats.frame_count if stats is not None else 0
             text = f"Power average {count}/{self._analysis_parameters.temporal_average_frames} frames · {text}"
+        if self._live_average_active:
+            method = "Anritsu average" if self._instrument_live_target is not None else "PyLab Live average"
+            text = f"{method} · {self.live_average_status.text()} · {text}"
         model = self.correction_workspace.interference_mode.currentData()
         if model is not None and self.cleanup_filters["background"].isChecked():
-            text += f" · drift model {model.model_id}"
+            text += " · static background mean" if self._live_average_active else f" · drift model {model.model_id}"
+        stripes_visible = self._stripe_enabled and self.analysis_tabs.currentIndex() == 0
+        if stripes_visible:
+            text = self.stripe_controls.status.text()
+            if self._live_average_active:
+                text += f" · {method} · {self.live_average_status.text()}"
         self.correction_controls.summary.setText(text)
         self.correction_controls.summary.setVisible(bool(self._pending_correction)
             or self.cleanup_filters["background"].isChecked() or self.reference_operation.currentData() != "none"
-            or self._analysis_parameters.temporal_average_frames > 1)
+            or self._analysis_parameters.temporal_average_frames > 1 or self._live_average_active
+            or stripes_visible)
 
     def _toggle_acquisition_panel(self, visible: bool) -> None:
         self.control_scroll.setVisible(visible)
         if visible:
-            self.workspace_splitter.setSizes(
-                [120, max(180, self.workspace_splitter.height() - 120)]
-                if self._workspace_compact else [560, max(440, self.workspace_splitter.width() - 560)]
-            )
+            if self._workspace_compact:
+                height = self.workspace_splitter.height()
+                setup_height = max(180, round(height * 0.55))
+                sizes = [setup_height, max(100, height - setup_height)]
+            else:
+                width = self.workspace_splitter.width()
+                setup_width = min(560, round(width * 0.46))
+                sizes = [setup_width, max(440, width - setup_width)]
+            self.workspace_splitter.setSizes(sizes)
 
-    def _open_background_setup(self, *_args):
+    def _open_background_setup(self, *_args, for_stripes=False):
         if self._background_assistant is not None:
             self._background_assistant.show()
             self._background_assistant.raise_()
@@ -2224,20 +2452,34 @@ class AnritsuPage(QWidget):
         directory = Path(str(self._station_settings.storage.get("output_directory", "./measurements")))
         dialog = BackgroundCorrectionAssistant(
             self.correction_workspace, directory, self, record_available=self._can_collect_background(),
+            for_stripes=for_stripes,
         )
+        if for_stripes:
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         dialog.resize(min(620, max(400, self.window().width() - 40)),
                       min(620, max(380, self.window().height() - 60)))
         self._background_assistant = dialog
         dialog.prepare_requested.connect(self._prepare_guided_background)
-        dialog.filter_ready.connect(self._guided_background_filter_ready)
+        if for_stripes:
+            dialog.rejected.connect(self._stripe_background_cancelled)
+        else:
+            dialog.filter_ready.connect(self._guided_background_filter_ready)
         dialog.finished.connect(self._background_assistant_closed)
         dialog.show()
+        if for_stripes:
+            dialog.raise_()
+            dialog.activateWindow()
         if not self._can_collect_background():
             dialog.background_source.setCurrentIndex(dialog.background_source.findData("load"))
 
     def _can_collect_background(self) -> bool:
         return (self._page_state in {AnritsuPageState.IDLE, AnritsuPageState.ERROR, AnritsuPageState.LIVE}
                 and self._trace_supported and self._single_sweep_configured and not self._live_transition_pending)
+
+    def _stripe_background_cancelled(self) -> None:
+        workspace = self.correction_workspace
+        if self._stripe_enabled and (workspace._profile is None or workspace._context is None):
+            self._disable_stripe_correction()
 
     def _request_correction_device(self, operation, payload=None):
         self._controller.call(operation, payload)
@@ -2246,7 +2488,7 @@ class AnritsuPage(QWidget):
         index = self.analysis_tabs.currentIndex()
         for widget in (self.auto_peak_detection, self.highlight_peaks, self._peak_marker_title,
                        self.peak_count, self.peak_settings, self.open_peak_table, self.open_floating_spectrum,
-                       self.overlay_analysis_source):
+                       self.overlay_analysis_source, self.correction_controls.stripes, self.show_live_frame):
             widget.setVisible(index == 0)
         self._peak_marker_title.setVisible(index == 0 and self.width() >= 1300)
         self.peak_count.setVisible(index == 0 and self.width() >= 1300)
@@ -2254,6 +2496,7 @@ class AnritsuPage(QWidget):
             self._scale_dialog.close()
         if index == 1:
             self._refresh_spectrogram_display()
+            self._update_correction_summary()
         elif index == 0:
             self._invalidate_analysis_results()
             self._refresh_spectrum_display()
@@ -2290,8 +2533,11 @@ class AnritsuPage(QWidget):
         self._spectrogram_filter_error = None
 
     def _filtered_spectrogram_matrix(self, source, window_s, *, raw_unprocessed=False):
+        parameters = self._analysis_parameters
+        if self._instrument_live_target is not None:
+            parameters = replace(parameters, temporal_average_frames=1)
         snapshot = self._spectrogram_buffer.frame_snapshot(window_s, processing=not raw_unprocessed,
-            warmup_frames=0 if raw_unprocessed else max(23, self._analysis_parameters.temporal_average_frames - 1))
+            warmup_frames=0 if raw_unprocessed else max(23, parameters.temporal_average_frames - 1))
         if snapshot is None:
             return None
         frequencies, timestamps, rows = snapshot
@@ -2305,8 +2551,9 @@ class AnritsuPage(QWidget):
             self._validate_display_reference(frequencies)
             reference = self._reference_trace.powers_dbm
             operation = str(self.reference_operation.currentData() or "none")
-        model = self.correction_workspace.interference_mode.currentData() if "background" in modes else None
-        cache_key = (source, modes, self._analysis_parameters, frequencies, window_s, raw_unprocessed,
+        model = (self.correction_workspace.interference_mode.currentData()
+                 if "background" in modes and self._instrument_live_target is None else None)
+        cache_key = (source, modes, parameters, frequencies, window_s, raw_unprocessed,
                      self._spectrogram_buffer.configuration_generation,
                      profile.content_hash if profile is not None else None,
                      id(self._reference_trace) if reference is not None else None, operation,
@@ -2318,7 +2565,7 @@ class AnritsuPage(QWidget):
             self._spectrogram_filter_generation += 1
             self._spectrogram_analysis_controller.submit(SpectrogramAnalysisRequest(
                 self._spectrogram_filter_generation, frequencies, timestamps, rows, unit,
-                modes, self._analysis_parameters, cache_key, profile, context, reference, operation, model,
+                modes, parameters, cache_key, profile, context, reference, operation, model,
                 timestamps[-1] - window_s))
         outcome = self._spectrogram_filter_outcome
         if self._spectrogram_filter_error is not None:
@@ -2326,7 +2573,8 @@ class AnritsuPage(QWidget):
         if outcome is None or outcome.cache_key != cache_key:
             return None
         elapsed = np.asarray(outcome.timestamps_s) - outcome.timestamps_s[-1]
-        return np.asarray(outcome.frequencies_hz), elapsed, outcome.matrix, outcome.unit, outcome.method
+        label = f"Anritsu average · {outcome.method}" if self._instrument_live_target is not None else outcome.method
+        return np.asarray(outcome.frequencies_hz), elapsed, outcome.matrix, outcome.unit, label
 
     def _spectrogram_filters_completed(self, outcome):
         if (not isinstance(outcome, SpectrogramAnalysisOutcome)
@@ -2356,13 +2604,14 @@ class AnritsuPage(QWidget):
         if key == self._shared_background_key:
             return
         self._shared_background_key = key
+        self._stripe_template = None
         self._spectrogram_buffer.reset_processing()
         self._preview_statistics = None
         self._update_correction_summary()
         self._background_config_error = None
         self._background_config_snapshot = None
         self._invalidate_spectrogram_filters()
-        if self.cleanup_filters["background"].isChecked():
+        if self._stripe_enabled or self.cleanup_filters["background"].isChecked():
             self._invalidate_analysis_results()
             self._refresh_spectrum_display()
             if self._latest_trace is not None:
@@ -2379,9 +2628,10 @@ class AnritsuPage(QWidget):
         maximum_age = self._station_settings.anritsu.spectrum_correction.processor_config().maximum_reference_age_s
         if maximum_age is not None and datetime.now(UTC).timestamp() - profile.completed_at_s > maximum_age:
             raise ValueError("Background is stale. Record a new background.")
-        generation = self._latest_trace.configuration_generation if self._latest_trace is not None else None
+        current_trace = self._preview_input_trace
+        generation = current_trace.configuration_generation if current_trace is not None else None
         snapshot = self._background_config_snapshot
-        if snapshot is None or snapshot[0] != generation:
+        if snapshot is None or snapshot.generation != generation:
             if self._execution_controlled:
                 raise ValueError("Background preview verification is paused while the Run Engine owns acquisition.")
             if self._background_config_error is not None:
@@ -2392,7 +2642,7 @@ class AnritsuPage(QWidget):
                 self._background_config_timer.start()
                 self._controller.call(operation)
             raise ValueError("Checking analyzer settings for Background…")
-        if snapshot[1] != context.configuration_fingerprint:
+        if snapshot.fingerprint != context.configuration_fingerprint:
             raise ValueError("Analyzer settings differ from the background. Record or load a matching background.")
         # Archives deliberately retain their original qualification evidence.
         # A matching readback verifies the current *preview* settings; it does
@@ -2421,8 +2671,9 @@ class AnritsuPage(QWidget):
             full, advanced = result
             if not isinstance(full, AnritsuFullConfigurationReadback) or not isinstance(advanced, AdvancedSpectrumSnapshot):
                 raise TypeError("Invalid analyzer configuration readback.")
-            self._background_config_snapshot = (
-                pending[1], spectrum_configuration_fingerprint(full, advanced, self._device_idn))
+            self._background_config_snapshot = _BackgroundReadback(
+                pending[1], spectrum_configuration_fingerprint(full, advanced, self._device_idn), full.rbw_hz,
+            )
             self._background_config_error = None
         except (TypeError, ValueError) as exc:
             self._background_config_error = str(exc)
@@ -2435,11 +2686,12 @@ class AnritsuPage(QWidget):
 
     def _revalidate_background_preview(self):
         if (self._analysis_controller._closed or self.correction_workspace.running
-                or not self.cleanup_filters["background"].isChecked() or self._latest_trace is None):
+                or self._preview_input_trace is None
+                or (not self._stripe_enabled and not self.cleanup_filters["background"].isChecked())):
             return
         self._invalidate_analysis_results()
         self._refresh_spectrum_display()
-        self._update_signal_analysis(self._latest_trace)
+        self._update_signal_analysis(self._preview_input_trace)
         self._refresh_spectrogram_display()
 
     def _prepare_guided_background(self):
@@ -2488,7 +2740,7 @@ class AnritsuPage(QWidget):
             source_label = f"{source.label} [{source.unit}]" if source is not None else "Spectrum"
             if source is not None and source.unit != cleanup.unit:
                 source_label += f" → signed {cleanup.unit}"
-            count = len([mode for mode in self._selected_cleanup_modes() if mode != "background"])
+            count = sum(mode not in {"background", "power_average"} for mode in cleanup.applied_modes)
             summary = f"{source_label} · {count} filter(s) · {len(cleanup.modified_bin_indices)} bins changed"
             if cleanup.notes:
                 summary += " · " + " ".join(cleanup.notes)
@@ -2567,6 +2819,8 @@ class AnritsuPage(QWidget):
             self.workspace_splitter.setOrientation(
                 Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal
             )
+            if not self.control_scroll.isHidden():
+                self._toggle_acquisition_panel(True)
         # Nested splitters receive their final width after the page resize.
         self._control_height_timer.start(0)
 
@@ -3094,7 +3348,20 @@ class AnritsuPage(QWidget):
 
     def _set_page_state(self, state: AnritsuPageState) -> None:
         self._page_state = state
+        if state != AnritsuPageState.LIVE and self._live_average_active:
+            self._stop_rolling_average()
+            return
         self._apply_page_state()
+
+    @property
+    def _live_average_active(self) -> bool:
+        return self._rolling_average is not None or self._instrument_live_target is not None
+
+    @property
+    def _preview_input_trace(self) -> SpectrumTrace | None:
+        if self._instrument_live_target is not None:
+            return self._rolling_average_trace
+        return self._latest_trace
 
     def _apply_page_state(self) -> None:
         idle = self._page_state in {AnritsuPageState.IDLE, AnritsuPageState.ERROR}
@@ -3117,14 +3384,28 @@ class AnritsuPage(QWidget):
         self.live.setEnabled((idle or live) and connected and not self._live_transition_pending)
         self.correction_controls.configure_background.setEnabled(not self.correction_workspace.running
             and not self.correction_workspace._profile_io_busy and not self._live_transition_pending)
+        self.stripe_controls.background_setup.setEnabled(self.correction_controls.configure_background.isEnabled()
+                                                        and not self._execution_controlled)
+        self.stripe_controls.apply.setEnabled(not self._execution_controlled)
         self.abort_button.setEnabled(connected)
         self.advanced_spectrum_button.setEnabled(connected and idle)
         self.average_count.setEnabled(idle and not averaging)
         self.acquire_average.setEnabled(idle and self._trace_supported)
         self.acquire_single_reference.setEnabled(idle and self._trace_supported)
-        self.use_current_reference.setEnabled((idle or live) and self._latest_trace is not None)
-        self.capture_reference.setEnabled((idle or live) and self._trace_supported)
-        self.reference_average_count.setEnabled(idle or live)
+        self.use_current_reference.setEnabled((idle or live) and self._preview_input_trace is not None)
+        self.capture_reference.setEnabled((idle or live) and self._trace_supported and not self._averaging_active)
+        self.reference_average_target.setEnabled((idle or live) and not self._averaging_active)
+        integrating_live = self._live_average_active
+        self.live_average_target.setEnabled(not integrating_live)
+        self.start_live_average.setEnabled(live and not integrating_live
+                                           and not self._averaging_active and not self._execution_controlled
+                                           and not self._discard_cancelled_average_frame)
+        self.cancel_live_average.setEnabled(integrating_live)
+        self.correction_controls.power_average.setEnabled(not integrating_live and not self._execution_controlled)
+        self._sync_emi_filter()
+        if (live and not self._averaging_active and not integrating_live
+                and self.live_average_status.text() == "Start Live to collect an average."):
+            self.live_average_status.setText("Choose the number of frames or seconds, then start averaging.")
         self.reference_cancel_average.setEnabled(self._page_state == AnritsuPageState.AVERAGING_REFERENCE)
         self.reference_cancel_average.setVisible(self._page_state == AnritsuPageState.AVERAGING_REFERENCE)
         self.load_reference.setEnabled(idle or live)
@@ -3201,6 +3482,7 @@ class AnritsuPage(QWidget):
         self._sync_floating_live_controls()
 
     def _sync_floating_live_controls(self):
+        self._sync_stripe_switches()
         if self._spectrum_window is not None:
             live = self._page_state == AnritsuPageState.LIVE
             enabled = self.live.isEnabled() and not self._execution_controlled and not self._live_transition_pending
@@ -3214,7 +3496,7 @@ class AnritsuPage(QWidget):
             self.close_manual_archive.setEnabled(False)
             return
         configured = self._manual_save_options is not None
-        ready = self._latest_trace is not None and configured and not self._latest_trace_is_execution_preview
+        ready = self._preview_input_trace is not None and configured and not self._latest_trace_is_execution_preview
         self.configure_manual_spectrum.setEnabled(True)
         self.save_manual_spectrum.setEnabled(ready)
         self.close_manual_archive.setEnabled(
@@ -3225,7 +3507,7 @@ class AnritsuPage(QWidget):
             self.manual_save_status.setText(
                 "Configure the archive before saving a completed spectrum."
             )
-        elif self._latest_trace is None:
+        elif self._preview_input_trace is None:
             self.manual_save_status.setText(
                 "Archive configured. Acquire a completed spectrum before saving."
             )
@@ -3475,8 +3757,14 @@ class AnritsuPage(QWidget):
             # The Run Engine owns acquisition; its telemetry supplies the view.
             self._timer.stop()
             self._background_config_timer.stop()
+            if self._live_average_active:
+                self._stop_rolling_average()
             if self._averaging_active:
                 self._finish_temporal_averaging(resume_live=False)
+            if self._reference_stream_owned:
+                self._reference_stream_owned = False
+                self._live_transition_pending = False
+            self._resume_live_after_averaging = False
             self.live.setText("Start Live")
         self.execution_badge.setVisible(controlled)
         self._sync_floating_live_controls()
@@ -3560,8 +3848,15 @@ class AnritsuPage(QWidget):
     def _configure_from_form(self, *, then: str | None = None) -> bool:
         try:
             config = self._spectrum_config_from_form()
-        except Exception as exc:
-            self.banner.show_message(f"Invalid spectrum settings: {exc}")
+            validate_anritsu_spectrum(
+                self._station_settings.anritsu.safety,
+                start_hz=config.start_hz,
+                stop_hz=config.stop_hz,
+                reference_level_dbm=config.reference_level_dbm,
+                points=config.points,
+            )
+        except (ConfigurationError, QuantityError, SafetyViolation, TypeError) as exc:
+            self.banner.show_message(f"Invalid spectrum settings: {exc}", severity="error")
             return False
         self._pending_after_spectrum_configuration = then
         self._controller.call("configure", config)
@@ -3795,6 +4090,10 @@ class AnritsuPage(QWidget):
         self._request_trace()
 
     def _request_trace(self, *, fast: bool = True) -> bool:
+        operation = "fetch_current_trace_fast" if fast else "fetch_current_trace"
+        return self._request_spectrum_operation(operation, "TRAC1")
+
+    def _request_spectrum_operation(self, operation: str, payload: object) -> bool:
         if self._execution_controlled:
             return False
         if self._fetch_pending:
@@ -3802,14 +4101,13 @@ class AnritsuPage(QWidget):
             return False
         self._fetch_pending = True
         self._fetch_started_monotonic = time.monotonic()
-        operation = "fetch_current_trace_fast" if fast else "fetch_current_trace"
-        self._controller.call(operation, "TRAC1")
+        self._controller.call(operation, payload)
         return True
 
     def toggle_live(self) -> None:
         if self._execution_controlled:
             return
-        if self._live_transition_pending:
+        if self._live_transition_pending or self._discard_cancelled_average_frame:
             return
         if self._timer.isActive():
             self._timer.stop()
@@ -3822,8 +4120,9 @@ class AnritsuPage(QWidget):
         self._live_transition_pending = True
         self._manual_trace_deadline_monotonic = None
         self.live.setText("Starting…")
-        self._spectrogram_buffer.reset_processing()
-        self._preview_statistics = None
+        if not self._resume_live_after_averaging:
+            self._spectrogram_buffer.reset_processing()
+            self._preview_statistics = None
         self._set_live_indicator("starting")
         self._set_page_state(AnritsuPageState.STARTING_LIVE)
         self._timer.setInterval(self.refresh.value())
@@ -3842,15 +4141,16 @@ class AnritsuPage(QWidget):
         }
         text = labels.get(state, labels["off"])
         if state == "on" and frame is not None:
-            text += f"  •  FRAME {frame}"
+            hardware = self._instrument_live_target is not None
+            text += f"  •  {'BLOCK' if hardware else 'FRAME'} {frame}"
             if self._frame_intervals_s:
                 mean_interval = sum(self._frame_intervals_s[-20:]) / len(
                     self._frame_intervals_s[-20:]
                 )
                 if mean_interval > 0:
-                    text += f"  •  {1.0 / mean_interval:.2f} FPS"
+                    text += f"  •  {1.0 / mean_interval:.2f} {'blocks/s' if hardware else 'FPS'}"
             if self._transfer_durations_s:
-                text += f"  •  {self._transfer_durations_s[-1] * 1e3:.0f} ms VISA"
+                text += f"  •  {self._transfer_durations_s[-1] * 1e3:.0f} ms {'capture' if hardware else 'VISA'}"
         self.live_indicator.setText(text)
         self.live_indicator.setProperty("liveState", state)
         self.live_indicator.style().unpolish(self.live_indicator)
@@ -3861,7 +4161,10 @@ class AnritsuPage(QWidget):
             self._timer.setInterval(value)
 
     def fetch_live(self) -> None:
-        self._request_trace()
+        if self._instrument_live_target is not None:
+            self._request_spectrum_operation("instrument_average_live", self._instrument_live_target)
+        else:
+            self._request_trace()
 
     def start_averaging(self) -> None:
         self._start_temporal_averaging("spectrum")
@@ -3871,11 +4174,110 @@ class AnritsuPage(QWidget):
             return
         self._start_temporal_averaging("reference")
 
-    def _start_temporal_averaging(self, destination: str) -> None:
-        if self._averaging_active:
+    def _selected_device_average(self, controls: AveragingTargetControls) -> InstrumentAverageTarget | None:
+        if controls.backend.currentData() != "instrument":
+            return None
+        frames, seconds = controls.target()
+        if seconds is not None:
+            timeout = parse_quantity(
+                self._station_settings.anritsu.acquisition.operation_complete_timeout, DIMENSION_TIME,
+            ).si_value
+            if seconds >= timeout:
+                raise ValueError(f"Choose a target below the analyzer acquisition timeout of {timeout:g} s.")
+            return InstrumentAverageTarget(duration_s=float(seconds))
+        return InstrumentAverageTarget(frame_count=frames)
+
+    def _start_rolling_average(self) -> None:
+        if (self._live_average_active or self._averaging_active or self._execution_controlled
+                or self._live_transition_pending or self._discard_cancelled_average_frame or not self._timer.isActive()
+                or self._page_state != AnritsuPageState.LIVE):
             return
-        target = self.reference_average_count.value() if destination == "reference" else self.average_count.value()
-        self._resume_live_after_averaging = self._timer.isActive()
+        try:
+            self._instrument_live_target = self._selected_device_average(self.live_average_target)
+        except ValueError as exc:
+            self.live_average_status.setText(str(exc))
+            return
+        if self._instrument_live_target is None:
+            self._rolling_average = RollingPowerAverage(*self.live_average_target.target())
+            self.live_average_status.setText("Waiting for the next Live read…")
+        else:
+            self._reset_live_average_history()
+            self.live_average_status.setText("Acquiring the first Anritsu average…")
+            self._refresh_spectrum_display()
+            self.fetch_live()
+        self._apply_page_state()
+        self._update_correction_summary()
+
+    def _stop_rolling_average(self, message: str = "Average off · showing the current spectrum.") -> None:
+        if self._instrument_live_target is not None:
+            self._instrument_live_target = None
+            self._last_instrument_average_count = 0
+            self._discard_cancelled_average_frame |= self._fetch_pending
+            self._reset_live_average_history()
+        self._rolling_average = None
+        self._rolling_average_trace = None
+        self.live_average_status.setText(message)
+        self._invalidate_analysis_results()
+        self._apply_page_state()
+        self._update_correction_summary()
+        self._display_controls_changed(auto_range=True)
+
+    def _reset_live_average_history(self) -> None:
+        # Each spectrogram row comes from the same type of acquisition.
+        self._spectrogram_buffer.clear()
+        self._invalidate_spectrogram_filters()
+        self._invalidate_analysis_results()
+        self._frame_intervals_s.clear()
+        self._transfer_durations_s.clear()
+        self._last_frame_monotonic = None
+        self._last_live_signature = None
+        self._live_frame_count = 0
+        self._set_live_indicator("on" if self._timer.isActive() else "off")
+        self._refresh_spectrogram_display()
+
+    def _add_rolling_average_frame(self, frame: SpectrumTrace, received_at: float) -> None:
+        average = self._rolling_average
+        previous = self._rolling_average_trace
+        if previous is not None and (
+            previous.configuration_generation != frame.configuration_generation
+            or (previous.frequencies_hz is not frame.frequencies_hz
+                and not frequency_grids_match(previous.frequencies_hz, frame.frequencies_hz))
+        ):
+            average.clear()
+        try:
+            mean_dbm = average.add(frame.powers_dbm, received_at)
+        except ValueError as exc:
+            message = f"Live average stopped · {exc}"
+            self._stop_rolling_average(message)
+            self.status.emit(message)
+            return
+        if previous is None:
+            # A reference-processed single sweep and rolling mean share a
+            # display key. Drop outstanding results from the old input.
+            self._invalidate_analysis_results()
+        window = f"{average.frames} reads" if average.seconds is None else f"{average.seconds:g} s"
+        window_id = f"{average.frames}frames" if average.seconds is None else f"{average.seconds:g}s"
+        self._rolling_average_trace = replace(
+            frame, powers_dbm=tuple(mean_dbm), trace_name=f"{frame.trace_name}_LIVE_AVG{average.count}_rolling_{window_id}",
+        )
+        self.live_average_status.setText(
+            f"Last {window} · {average.count} reads in buffer · {average.span_s:.1f} s of data"
+        )
+        self._update_correction_summary()
+
+    def _start_temporal_averaging(self, destination: str) -> None:
+        if (self._averaging_active or self._live_transition_pending or self._reference_stream_owned
+                or self._execution_controlled or self.correction_workspace.running):
+            return
+        if destination == "reference":
+            try:
+                self._instrument_reference_target = self._selected_device_average(self.reference_average_target)
+            except ValueError as exc:
+                self.reference_average_status.setText(str(exc))
+                return
+        target, seconds = (self.reference_average_target.target() if destination == "reference"
+                           else (self.average_count.value(), None))
+        self._resume_live_after_averaging = self._timer.isActive() or self._resume_live_after_averaging
         if self._resume_live_after_averaging:
             self._timer.stop()
             self._set_live_indicator("paused")
@@ -3885,64 +4287,116 @@ class AnritsuPage(QWidget):
         self._averaging_destination = destination
         self._averaging_start_monotonic = time.monotonic()
         self._averaging_target_count = target
-        self._set_page_state(
-            AnritsuPageState.AVERAGING_REFERENCE
-            if destination == "reference"
-            else AnritsuPageState.AVERAGING_SIGNAL
-        )
-        self.average_progress.setRange(0, target)
-        self.average_progress.setValue(0)
-        self.average_progress.setFormat(f"0 / {target}")
+        self._averaging_target_seconds = seconds
+        self._averaging_first_frame_at = None
+        self._latest_average_frame = None
+        if destination == "reference":
+            self._reset_average_frame_deadline()
+            self.reference_average_progress.show()
+        self._set_page_state(AnritsuPageState.AVERAGING_REFERENCE if destination == "reference"
+                             else AnritsuPageState.AVERAGING_SIGNAL)
+        _progress, status = self._average_widgets()
+        self._set_average_progress(0, f"0 / {target}" if seconds is None else f"0 / {seconds} s",
+                                   maximum=target if seconds is None else seconds)
+        target_text = f"{target} frames" if seconds is None else f"{seconds} s"
         label = "reference" if destination == "reference" else "spectrum"
-        self.average_stats_label.setText(f"Averaging {label}: 0 / {target} spectra…")
-        self.info.setText(f"Averaging {label}: 0 / {target} temporal frames...")
-        self.status.emit(
-            f"Anritsu temporal averaging started: {label}, 0 / {target}"
-        )
-        self._request_next_average_frame()
+        if self._instrument_reference_target is not None:
+            status.setText(f"Anritsu reference average · {target_text} · waiting for the completed block…")
+        else:
+            status.setText(f"Averaging {label}: 0 / {target} spectra…" if seconds is None and destination == "spectrum"
+                           else f"Averaging {label}: {target_text} · waiting for a new Trace A frame…")
+        self.info.setText(status.text())
+        self.status.emit(f"Anritsu temporal averaging started: {label}, {target_text}")
+        if destination == "reference" and not self._resume_live_after_averaging and self._instrument_reference_target is None:
+            self._reference_stream_owned = True
+            self._live_transition_pending = True
+            self._controller.call("start_live", True)
+        else:
+            self._request_next_average_frame()
 
     def cancel_averaging(self) -> None:
         self._finish_temporal_averaging(resume_live=True)
         self.info.setText("Averaging cancelled; completed spectra were not modified.")
         self.status.emit("Anritsu temporal averaging cancelled")
 
-    def _finish_temporal_averaging(self, *, resume_live: bool) -> None:
+    def _average_widgets(self):
+        if self._averaging_destination == "reference":
+            return self.reference_average_progress, self.reference_average_status
+        return self.average_progress, self.average_stats_label
+
+    def _set_average_progress(self, value: int, text: str, *, maximum: int | None = None) -> None:
+        primary, _status = self._average_widgets()
+        bars = (primary, self.average_progress) if self._averaging_destination == "reference" else (primary,)
+        for bar in bars:
+            if maximum is not None:
+                bar.setRange(0, maximum)
+            bar.setValue(value)
+            bar.setFormat(text)
+
+    def _finish_timed_average(self) -> None:
+        if not self._averaging_active or self._averaging_first_frame_at is None or self._averaging_target_seconds is None:
+            return
+        elapsed = time.monotonic() - self._averaging_first_frame_at
+        remaining = self._averaging_target_seconds - elapsed
+        if remaining > 0:
+            self._averaging_deadline_timer.start(math.ceil(remaining * 1_000))
+        else:
+            self._complete_temporal_average(elapsed)
+
+    def _finish_temporal_averaging(self, *, resume_live: bool, completed: bool = False) -> None:
         if self._averaging_active and self._fetch_pending:
             # The worker may still deliver this request after Cancel/Start.
             # Keep the fetch slot occupied until its terminal response arrives.
             self._discard_cancelled_average_frame = True
         was_live = self._resume_live_after_averaging
         should_resume_live = was_live and resume_live
-        if self._averaging_active and self._averaging_start_monotonic is not None:
-            completed = self.average_progress.value()
-            target = self._averaging_target_count
-            if completed < target:
-                elapsed = max(1e-3, time.monotonic() - self._averaging_start_monotonic)
-                self.average_stats_label.setText(
-                    f"Averaging cancelled at {completed} / {target} spectra ({elapsed:.1f} s)"
-                )
+        reference = self._averaging_destination == "reference"
+        if self._averaging_active and not completed:
+            _progress, status = self._average_widgets()
+            count = self._averager.count
+            target = f" / {self._averaging_target_count}" if self._averaging_target_seconds is None else ""
+            status.setText(f"Averaging cancelled at {count}{target} spectra.")
+        self._averaging_deadline_timer.stop()
         self._averaging_active = False
         self._averaging_destination = None
+        self._instrument_reference_target = None
         self._averaging_start_monotonic = None
-        self._resume_live_after_averaging = False
+        self._averaging_target_seconds = None
+        self._averaging_first_frame_at = None
+        self._latest_average_frame = None
+        self._resume_live_after_averaging = should_resume_live
         self._averager.reset()
         self._averaging_source_trace = None
-        if should_resume_live:
-            self._timer.setInterval(self.refresh.value())
-            self._timer.start()
-            self.live.setText("Stop Live")
+        self._average_frame_deadline = None
+        if reference and self._reference_stream_owned and not self._execution_controlled:
+            self._live_transition_pending = True
+            self._set_page_state(AnritsuPageState.STOPPING)
+            self._controller.call("stop_live")
+            return
+        if reference and should_resume_live:
+            self._resume_live_after_averaging = False
+            self._timer.start(self.refresh.value())
             self._set_live_indicator("on", self._live_frame_count)
             self._set_page_state(AnritsuPageState.LIVE)
-        elif was_live:
+            return
+        if was_live:
             self.live.setText("Start Live")
-            self.single.setEnabled(True)
             self._set_live_indicator("off")
-            self._set_page_state(AnritsuPageState.IDLE)
-        else:
-            self._set_page_state(AnritsuPageState.IDLE)
+        self._set_page_state(AnritsuPageState.IDLE)
+        if should_resume_live and not self._fetch_pending:
+            self.toggle_live()
 
     def _request_next_average_frame(self) -> None:
-        if self._execution_controlled or not self._averaging_active or self._fetch_pending:
+        if self._execution_controlled or not self._averaging_active or self._fetch_pending or self._live_transition_pending:
+            return
+        if self._averaging_destination == "reference":
+            if self._instrument_reference_target is not None:
+                self._request_spectrum_operation("instrument_average", self._instrument_reference_target)
+                return
+            if self._average_frame_deadline is not None and time.monotonic() >= self._average_frame_deadline:
+                self._error("fetch_current_trace_fast", "No new distinct reference frame before the acquisition timeout.")
+                return
+            self._request_trace()
             return
         if not self._single_sweep_configured:
             self._finish_temporal_averaging(resume_live=False)
@@ -3954,18 +4408,134 @@ class AnritsuPage(QWidget):
             return
         self._fetch_pending = True
         self._fetch_started_monotonic = time.monotonic()
-        self._controller.call("single_sweep", "TRAC1")
+        self._controller.call("unaveraged_sweep", "TRAC1")
+
+    def _handle_temporal_frame(self, operation: str, frame: SpectrumTrace, now: float) -> None:
+        destination = self._averaging_destination
+        continuous = destination == "reference"
+        expected = "fetch_current_trace_fast" if continuous else "unaveraged_sweep"
+        if operation != expected:
+            self._request_next_average_frame()
+            return
+        seconds = self._averaging_target_seconds
+        first = self._averaging_first_frame_at
+        if seconds is not None and first is not None and now - first >= seconds:
+            self._complete_temporal_average(now - first)
+            return
+        try:
+            anchor = self._averaging_source_trace
+            frequencies = frame.frequencies_hz
+            shared_grid = anchor is not None and frequencies is anchor.frequencies_hz
+            if len(frequencies) != len(frame.powers_dbm) or (not shared_grid and (
+                    not all(math.isfinite(value) for value in frequencies)
+                    or any(right <= left for left, right in zip(frequencies, frequencies[1:])))):
+                raise ValueError("Spectrum frequency grid is invalid.")
+            if anchor is not None and (
+                frame.configuration_generation != anchor.configuration_generation
+                or frame.trace_name != anchor.trace_name
+                or (not shared_grid and not frequency_grids_match(anchor.frequencies_hz, frequencies))
+            ):
+                raise ValueError("Analyser configuration or frequency grid changed during averaging; acquire a new series.")
+            if continuous and (anchor is None or np.array_equal(frame.powers_dbm, anchor.powers_dbm)):
+                # A first buffer read establishes the baseline. Equal data
+                # cannot be proven to be another sweep with this protocol.
+                self._averaging_source_trace = frame
+                if seconds is not None and first is not None:
+                    self._update_averaging_progress(count=self._averager.count, elapsed=now - first)
+                QTimer.singleShot(0, self._request_next_average_frame)
+                return
+            count = self._averager.add(frame.powers_dbm)
+        except ValueError as exc:
+            _progress, status = self._average_widgets()
+            self._finish_temporal_averaging(resume_live=continuous)
+            status.setText(f"Averaging stopped: {exc}")
+            self.info.setText(status.text())
+            self.status.emit(f"Anritsu {status.text()}")
+            return
+
+        if first is None:
+            self._averaging_first_frame_at = now
+            if seconds is not None:
+                self._averaging_deadline_timer.start(seconds * 1_000)
+        if anchor is None or continuous:
+            self._averaging_source_trace = frame
+        self._latest_average_frame = frame
+        if continuous:
+            self._reset_average_frame_deadline()
+        elapsed = now - (self._averaging_first_frame_at if seconds is not None else self._averaging_start_monotonic)
+        if seconds is None and count >= self._averaging_target_count:
+            self._complete_temporal_average(elapsed)
+            return
+
+        self._update_averaging_progress(count=count, elapsed=elapsed)
+        QTimer.singleShot(0, self._request_next_average_frame)
+
+    def _update_averaging_progress(self, *, count: int, elapsed: float) -> None:
+        _progress, status = self._average_widgets()
+        seconds = self._averaging_target_seconds
+        if seconds is None:
+            self._set_average_progress(count, f"{count} / {self._averaging_target_count}")
+            message = f"{count} / {self._averaging_target_count} spectra · {elapsed:.1f} s"
+        else:
+            self._set_average_progress(int(elapsed), f"{elapsed:.1f} / {seconds} s")
+            message = f"{elapsed:.1f} / {seconds} s · {count} spectra"
+        status.setText(f"Progress: {message} ({count / max(1e-3, elapsed):.1f}/s)")
+        self.info.setText(f"Averaging {self._averaging_destination}: {message}…")
+
+    def _integrated_trace(self, frame: SpectrumTrace, count: int) -> SpectrumTrace:
+        destination = self._averaging_destination
+        kind = "LIVE_REFAVG" if destination == "reference" else "AVG"
+        seconds = self._averaging_target_seconds
+        suffix = f"_{seconds}s" if seconds is not None else ""
+        return replace(frame, powers_dbm=self._averager.result(), trace_name=f"{frame.trace_name}_{kind}{count}{suffix}")
+
+    def _complete_temporal_average(self, elapsed: float) -> None:
+        frame = self._latest_average_frame
+        count = self._averager.count
+        if frame is None or not count:
+            return
+        destination = self._averaging_destination
+        trace = self._integrated_trace(frame, count)
+        progress, status = self._average_widgets()
+        self._set_average_progress(progress.maximum(), f"{self._averaging_target_seconds} s"
+                                   if self._averaging_target_seconds is not None else f"{count} / {self._averaging_target_count}")
+        stats = f"{count} spectra taken in {elapsed:.1f} s ({count / max(1e-3, elapsed):.1f}/s)"
+        status.setText(f"Completed: {stats}")
+        self._latest_trace = frame
+        if destination == "reference":
+            self._set_reference(self._build_reference(trace, kind="averaged", count=count))
+        else:
+            self._averaged_trace = trace
+            self._display_revision += 1
+            self._invalidate_analysis_results()
+            self.show_average.setChecked(True)
+        self._finish_temporal_averaging(resume_live=True, completed=True)
+        label = "reference" if destination == "reference" else "spectrum"
+        completion = f"Averaged {label} completed: {stats}"
+        self.info.setText(completion)
+        self.status.emit(f"Anritsu {completion.lower()}")
+        self._refresh_spectrum_display()
+
+    def _reset_average_frame_deadline(self) -> None:
+        timeout_s = parse_quantity(
+            self._station_settings.anritsu.acquisition.operation_complete_timeout, DIMENSION_TIME
+        ).si_value
+        self._average_frame_deadline = time.monotonic() + timeout_s
 
     def capture_current_reference(self) -> None:
         """Use the latest completed frame locally without issuing a VISA query."""
 
-        if self._latest_trace is None:
+        hardware = self._instrument_live_target is not None
+        trace = self._rolling_average_trace if hardware else self._latest_trace
+        if trace is None:
             QMessageBox.information(self, "Reference spectrum", "Acquire a spectrum before capturing a reference.")
             return
-        if not self._confirm_reference_replacement("single"):
+        kind = "averaged" if hardware else "single"
+        if not self._confirm_reference_replacement(kind):
             return
-        self._set_reference(self._build_reference(self._latest_trace, kind="single", count=1))
-        self.status.emit("Anritsu current trace stored as a single reference")
+        self._set_reference(self._build_reference(trace, kind=kind,
+                                                  count=self._last_instrument_average_count if hardware else 1))
+        self.status.emit("Anritsu current trace stored as reference")
 
     def acquire_reference_once(self) -> None:
         """Acquire one new, completed sweep before storing a reference."""
@@ -3988,7 +4558,7 @@ class AnritsuPage(QWidget):
         self.status.emit("Anritsu single-reference acquisition started")
         self._fetch_pending = True
         self._fetch_started_monotonic = time.monotonic()
-        self._controller.call("single_sweep", "TRAC1")
+        self._controller.call("unaveraged_sweep", "TRAC1")
 
     def _confirm_reference_replacement(self, new_kind: str) -> bool:
         current = self._reference_spectrum
@@ -4182,6 +4752,9 @@ class AnritsuPage(QWidget):
 
         self._latest_trace = None
         self._averaged_trace = None
+        self._rolling_average = None
+        self._rolling_average_trace = None
+        self.live_average_status.setText("Start Live to collect an average.")
         self._reference_trace = None
         self._reference_spectrum = None
         self._pending_reference_kind = None
@@ -4362,7 +4935,9 @@ class AnritsuPage(QWidget):
             else:
                 label = f"{trace.label} [{trace.unit}]"
             choices.append((trace.key, label))
-        if not choices:
+        if not choices and self._instrument_live_target is not None:
+            choices.append(("averaged", "Anritsu average [dBm]"))
+        elif not choices:
             choices.append(("raw", "Latest raw trace [dBm]"))
         return tuple(choices)
 
@@ -4371,24 +4946,38 @@ class AnritsuPage(QWidget):
     ) -> tuple[SpectrumTrace, tuple[float, ...] | None, str | None, str]:
         if self._latest_trace_is_execution_preview:
             raise ValueError("Execution previews cannot be saved as full RAW. Use the sweep archive or acquire a full manual spectrum.")
+        if variant in {"raw", "live_frame"} and self._instrument_live_target is not None:
+            raise ValueError("Choose the Anritsu average or switch to PyLab Live to save individual spectra.")
         source = self._display_state.by_key.get(variant)
+        if variant == "averaged" and self._instrument_live_target is not None and self._rolling_average_trace is not None:
+            return self._rolling_average_trace, None, None, "none"
         if source is None and variant != "raw":
             raise ValueError(f"Selected spectrum variant {variant!r} is unavailable; select an available trace.")
-        if source is not None and self._latest_trace is not None:
-            canonical_raw = self._latest_trace
+        if source is not None and self._preview_input_trace is not None:
+            canonical_raw = self._preview_input_trace
+            displayed_average = self._display_average_trace()
             snapshot = self._analysis_source_snapshot
-            if (snapshot is not None and self._analysis_raw_snapshot is not None
-                    and source.key not in {"background_difference", "reference_difference"}
-                    and source.frame_id == snapshot.frame_id):
+            matches_snapshot = (snapshot is not None and self._analysis_raw_snapshot is not None
+                                and source.key in {snapshot.key, f"analysis:{snapshot.key}", f"correction:{snapshot.key}"}
+                                and source.frame_id == snapshot.frame_id)
+            if matches_snapshot:
                 canonical_raw = self._analysis_raw_snapshot
-            if source.key in {"raw", "averaged", "reference"} and source.unit == "dBm":
-                source_trace = {
-                    "raw": canonical_raw,
-                    "averaged": self._averaged_trace,
-                    "reference": self._reference_trace,
-                }.get(source.key)
-                if source_trace is not None:
+            source_trace = {
+                "raw": canonical_raw,
+                "averaged": canonical_raw if matches_snapshot else displayed_average,
+                "reference": self._reference_trace,
+                "live_frame": canonical_raw if source.provenance == ("raw",) else None,
+            }.get(source.key)
+            if source_trace is not None:
+                if source.unit == "dBm":
                     return source_trace, None, None, "none"
+                canonical_raw = source_trace
+            elif "averaged" in source.provenance and not matches_snapshot and displayed_average is not None:
+                canonical_raw = displayed_average
+            if any(math.isnan(value) for value in source.values):
+                # Undefined conversions are gaps in the saved display, while
+                # the public numeric checkpoint retains its all-finite contract.
+                return canonical_raw, None, None, "none"
             # HDF5 keeps the acquired dBm trace as the canonical source and
             # stores any relative/cleaned values as an explicitly unit-tagged
             # derived dataset.  This makes the archive match the exact display
@@ -4510,7 +5099,7 @@ class AnritsuPage(QWidget):
                 "Configure the archive before saving a completed spectrum."
             )
             return
-        if self._latest_trace is None:
+        if self._preview_input_trace is None:
             self.manual_save_status.setText(
                 "Acquire a completed spectrum before saving it."
             )
@@ -4564,6 +5153,11 @@ class AnritsuPage(QWidget):
                 processed_values=processed,
                 processed_unit=processed_unit,
                 processing_operation=operation,
+                reference=self._reference_spectrum,
+                saved_display=(
+                    SavedSpectrumView(self._display_state.traces, self._display_state.primary_key)
+                    if self._display_state.traces else None
+                ),
                 capture_context={
                     "schema_version": 1,
                     "settings_source": settings_source,
@@ -4643,22 +5237,26 @@ class AnritsuPage(QWidget):
         self._manual_archive_job = (operation, context)
         self._manual_archive_result = None
         thread = self._manual_archive_thread = QThread(self)
+        thread.setObjectName("anritsu-manual-archive")
         worker = self._manual_archive_worker = ManualArchiveWorker(self._manual_archive, operation, payload)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.completed.connect(self._manual_archive_completed)
+        worker.completed.connect(self._manual_archive_completed, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._manual_archive_finished)
+        thread.finished.connect(self._manual_archive_finished, Qt.ConnectionType.QueuedConnection)
         self.manual_save_status.setText("Saving spectrum…" if operation == "save" else "Closing append session…")
         self._update_manual_save_controls()
         thread.start()
 
+    @Slot(object, object)
     def _manual_archive_completed(self, result, error):
         self._manual_archive_result = (result, error)
 
+    @Slot()
     def _manual_archive_finished(self):
         thread = self._manual_archive_thread
+        thread.wait()
         self._manual_archive_thread = self._manual_archive_worker = None
         operation, context = self._manual_archive_job
         result, error = self._manual_archive_result
@@ -4709,10 +5307,29 @@ class AnritsuPage(QWidget):
             self._invalidate_spectrogram_filters()
         if self.correction_workspace.handle_result(operation, result):
             return
+        if operation in {"instrument_average", "instrument_average_live"}:
+            if isinstance(result, InstrumentAverageResult):
+                self._instrument_average_returned(operation, result)
+            else:
+                self._error(operation, "The analyzer did not return a confirmed average.")
+            return
         if settings_changed and operation != "disconnect":
             QTimer.singleShot(0, self._revalidate_background_preview)
-        if operation in {"abort", "abort_acquisition", "emergency_off", "disconnect"} and self.correction_workspace.running:
-            self.correction_workspace.stop_acquisition()
+        if operation in {"abort", "abort_acquisition", "emergency_off", "disconnect"}:
+            if self.correction_workspace.running:
+                self.correction_workspace.stop_acquisition()
+            self._timer.stop()
+            self._reference_stream_owned = False
+            if self._averaging_active:
+                self._finish_temporal_averaging(resume_live=False)
+            self._resume_live_after_averaging = False
+            self._live_transition_pending = False
+            self.live.setText("Start Live")
+            self._set_live_indicator("off")
+            if operation == "disconnect":
+                self._set_page_state(AnritsuPageState.DISCONNECTED)
+            elif self._page_state in {AnritsuPageState.LIVE, AnritsuPageState.STARTING_LIVE, AnritsuPageState.STOPPING}:
+                self._set_page_state(AnritsuPageState.IDLE)
         if operation == "connect":
             self._device_idn = str(getattr(result, "idn", "") or "")
             self._spectrogram_buffer.clear()
@@ -4794,49 +5411,71 @@ class AnritsuPage(QWidget):
             self.status.emit("Anritsu configured and verified by SCPI readback")
             self._set_page_state(AnritsuPageState.IDLE)
         elif operation == "start_live" and isinstance(result, AnritsuConfigurationSnapshot):
+            if self._reference_stream_owned:
+                if self._averaging_destination == "reference":
+                    self._live_transition_pending = False
+                    self._request_next_average_frame()
+                return
             self._live_transition_pending = False
+            resumed = self._resume_live_after_averaging
+            self._resume_live_after_averaging = False
             if self._execution_controlled:
                 # An acknowledgement queued before the run cannot restart Live.
                 return
             self._result("read_configuration", result)
-            self._spectrogram_buffer.clear()
-            self._refresh_spectrogram_display()
-            self._live_frame_count = 0
-            self._identical_live_frames = 0
-            self._last_live_signature = None
+            if not resumed:
+                self._spectrogram_buffer.clear()
+                self._refresh_spectrogram_display()
+                self._live_frame_count = 0
+                self._identical_live_frames = 0
+                self._last_live_signature = None
+                self._frame_intervals_s.clear()
+                self._transfer_durations_s.clear()
+                self._stale_frame_count = 0
+                self._coalesced_timer_ticks = 0
             self._last_frame_monotonic = None
-            self._frame_intervals_s.clear()
-            self._transfer_durations_s.clear()
-            self._stale_frame_count = 0
-            self._coalesced_timer_ticks = 0
             self._timer.start()
             self.live.setText("Stop Live")
-            self._set_live_indicator("on", 0)
+            self._set_live_indicator("on", self._live_frame_count)
             self._set_page_state(AnritsuPageState.LIVE)
-            mode = "fast binary current-trace polling from the analyser's continuous measurement"
+            mode = "binary readout of individual Trace A sweeps in continuous mode"
             self.info.setText(f"Live started; {mode}. Waiting for first frame...")
             self.status.emit(f"Anritsu Live started: {mode}")
         elif operation == "stop_live":
+            requested_stop = self._live_transition_pending
             self._live_transition_pending = False
+            reference_stopped = self._reference_stream_owned
+            self._reference_stream_owned = False
             self.live.setText("Start Live")
             self._set_live_indicator("off")
+            if not requested_stop:
+                self._apply_page_state()
+                return
             self._set_page_state(AnritsuPageState.IDLE)
+            if reference_stopped:
+                return
             self.info.setText("Live stopped.")
             self.status.emit("Anritsu Live stopped")
-        elif operation in {"fetch_trace", "fetch_current_trace", "fetch_current_trace_fast", "single_sweep", "acquire_fresh_trace"} and isinstance(result, SpectrumTrace):
+        elif operation in {"fetch_trace", "fetch_current_trace", "fetch_current_trace_fast", "single_sweep", "unaveraged_sweep", "acquire_fresh_trace"} and isinstance(result, SpectrumTrace):
             self._fetch_pending = False
             self._manual_trace_deadline_monotonic = None
             if self._discard_cancelled_average_frame:
                 self._discard_cancelled_average_frame = False
                 self._fetch_started_monotonic = None
-                self._request_next_average_frame()
+                self._apply_page_state()
+                if self._averaging_active:
+                    self._request_next_average_frame()
+                elif self._resume_live_after_averaging:
+                    self.toggle_live()
+                return
+            if self._instrument_live_target is not None and not self._averaging_active:
                 return
             finished = time.monotonic()
             if self._fetch_started_monotonic is not None:
                 self._transfer_durations_s.append(finished - self._fetch_started_monotonic)
                 self._transfer_durations_s = self._transfer_durations_s[-100:]
             self._fetch_started_monotonic = None
-            if self._pending_reference_kind == "single":
+            if self._pending_reference_kind == "single" and operation == "unaveraged_sweep":
                 self._pending_reference_kind = None
                 self._latest_trace = result
                 self._set_reference(self._build_reference(result, kind="single", count=1))
@@ -4848,106 +5487,64 @@ class AnritsuPage(QWidget):
                 self.status.emit("Anritsu single-reference acquisition completed")
                 return
             if self._averaging_active:
-                if operation not in {"single_sweep", "acquire_fresh_trace"}:
-                    # A Live polling request may already have been in flight
-                    # when averaging started. It cannot prove a new sweep.
-                    self._request_next_average_frame()
-                    return
-                try:
-                    anchor = self._averaging_source_trace
-                    frequencies = result.frequencies_hz
-                    if (len(frequencies) != len(result.powers_dbm)
-                            or not all(math.isfinite(value) for value in frequencies)
-                            or any(right <= left for left, right in zip(frequencies, frequencies[1:]))):
-                        raise ValueError("Spectrum frequency grid is invalid.")
-                    if anchor is not None and (
-                        result.configuration_generation != anchor.configuration_generation
-                        or result.trace_name != anchor.trace_name
-                        or not frequency_grids_match(anchor.frequencies_hz, frequencies)
-                    ):
-                        raise ValueError("Analyser configuration or frequency grid changed during averaging; acquire a new series.")
-                    completed = self._averager.add(result.powers_dbm)
-                    if anchor is None:
-                        self._averaging_source_trace = result
-                except ValueError as exc:
-                    self._finish_temporal_averaging(resume_live=False)
-                    self.info.setText(f"Averaging stopped: {exc}")
-                    self.status.emit(f"Anritsu averaging stopped: {exc}")
-                    return
-                target = self._averaging_target_count
-                self.average_progress.setValue(completed)
-                self.average_progress.setFormat(f"{completed} / {target}")
-                label = (
-                    "reference" if self._averaging_destination == "reference" else "spectrum"
-                )
-                now = time.monotonic()
-                start = self._averaging_start_monotonic or now
-                elapsed = max(1e-3, now - start)
-                rate = completed / elapsed
-                if completed >= target:
-                    stats_str = f"{target} spectra taken in {elapsed:.1f} s ({rate:.1f}/s)"
-                    self.average_stats_label.setText(f"Completed: {stats_str}")
-                    averaged = self._averager.result()
-                    averaged_trace = replace(
-                        result,
-                        powers_dbm=averaged,
-                        trace_name=(
-                            f"{result.trace_name}_REFAVG{target}"
-                            if self._averaging_destination == "reference"
-                            else f"{result.trace_name}_AVG{target}"
-                        ),
-                    )
-                    self._latest_trace = result
-                    if self._averaging_destination == "reference":
-                        self._set_reference(
-                            self._build_reference(
-                                averaged_trace,
-                                kind="averaged",
-                                count=target,
-                            )
-                        )
-                        completion = f"Averaged reference completed: {stats_str}"
-                    else:
-                        self._averaged_trace = averaged_trace
-                        self._display_revision += 1
-                        self._invalidate_analysis_results()
-                        self.show_average.setChecked(True)
-                        completion = f"Averaged spectrum completed: {stats_str}"
-                    self._finish_temporal_averaging(resume_live=True)
-                    self.info.setText(completion)
-                    self.status.emit(f"Anritsu {completion.lower()}")
-                    self._refresh_spectrum_display()
-                else:
-                    self.average_stats_label.setText(
-                        f"Progress: {completed} / {target} spectra · {elapsed:.1f} s ({rate:.1f}/s)"
-                    )
-                    self.info.setText(
-                        f"Averaging {label}: {completed} / {target} spectra · {elapsed:.1f} s ({rate:.1f}/s)..."
-                    )
-                    self.status.emit(
-                        f"Anritsu temporal averaging progress: {label} {completed} / {target} ({rate:.1f}/s)"
-                    )
-                    QTimer.singleShot(0, self._request_next_average_frame)
+                self._handle_temporal_frame(operation, result, finished)
             else:
+                if (self._rolling_average is not None and self._timer.isActive()
+                        and operation == "fetch_current_trace_fast"):
+                    self._add_rolling_average_frame(result, finished)
                 if not self._timer.isActive():
                     self._set_page_state(AnritsuPageState.IDLE)
                 self._show_trace(result)
 
+    def _instrument_average_returned(self, operation: str, result: InstrumentAverageResult) -> None:
+        self._fetch_pending = False
+        started, self._fetch_started_monotonic = self._fetch_started_monotonic, None
+        elapsed = time.monotonic() - started if started is not None else 0.0
+        if self._discard_cancelled_average_frame:
+            self._discard_cancelled_average_frame = False
+            self._apply_page_state()
+            self._request_next_average_frame()
+            return
+        if operation == "instrument_average_live":
+            if self._instrument_live_target is None or not self._timer.isActive() or self._execution_controlled:
+                self._request_next_average_frame()
+                return
+            self.live_average_status.setText(f"{result.count} sweeps per block · last block {elapsed:.2f} s")
+            self._transfer_durations_s = (self._transfer_durations_s + [elapsed])[-100:]
+            self._show_trace(result.trace, instrument_average_count=result.count)
+            self._update_correction_summary()
+            return
+        if not self._averaging_active or self._instrument_reference_target is None or self._execution_controlled:
+            return
+        self._set_reference(self._build_reference(result.trace, kind="averaged", count=result.count))
+        self._set_average_progress(result.count, f"{result.count} sweeps", maximum=result.count)
+        message = f"Anritsu reference average · {result.count} sweeps · {elapsed:.2f} s"
+        self.reference_average_status.setText(message)
+        self._finish_temporal_averaging(resume_live=True, completed=True)
+        self.info.setText(message)
+        self.status.emit(message)
+
     def _show_trace(
-        self, trace: SpectrumTrace, *, update_controls: bool = True, execution_preview: bool = False
+        self, trace: SpectrumTrace, *, update_controls: bool = True, execution_preview: bool = False,
+        instrument_average_count: int | None = None,
     ) -> None:
         provenance_changed = self._latest_trace_is_execution_preview != execution_preview
         self._latest_trace_is_execution_preview = execution_preview
         if provenance_changed:
             self._spectrogram_buffer.clear()
-        if self._latest_trace is not None and (
+        previous = self._rolling_average_trace if instrument_average_count is not None else self._latest_trace
+        if previous is not None and (
             provenance_changed
-            or self._latest_trace.configuration_generation != trace.configuration_generation
-            or not frequency_grids_match(self._latest_trace.frequencies_hz, trace.frequencies_hz)
+            or previous.configuration_generation != trace.configuration_generation
+            or not frequency_grids_match(previous.frequencies_hz, trace.frequencies_hz)
         ):
             self._invalidate_analysis_results()
             self._invalidate_spectrogram_filters()
-        self._latest_trace = trace
+        if instrument_average_count is None:
+            self._latest_trace = trace
+        else:
+            self._rolling_average_trace = trace
+            self._last_instrument_average_count = instrument_average_count
         if provenance_changed and not update_controls:
             self._update_manual_save_controls()
         self._display_revision += 1
@@ -4962,7 +5559,7 @@ class AnritsuPage(QWidget):
         # deliberately asynchronous and may coalesce frames; making repaint
         # wait for that worker can leave the visible trace frozen indefinitely
         # while newer analysis requests keep superseding older generations.
-        first_trace = self._received_trace_count <= 1
+        first_trace = self._received_trace_count <= 1 or (instrument_average_count is not None and previous is None)
         self._refresh_spectrum_display(auto_range=first_trace)
         if update_controls:
             self._apply_page_state()
@@ -4976,6 +5573,10 @@ class AnritsuPage(QWidget):
                 self._frame_intervals_s = self._frame_intervals_s[-100:]
             self._last_frame_monotonic = now
             self._live_frame_count += 1
+            if instrument_average_count is not None:
+                self._set_live_indicator("on", self._live_frame_count)
+                self.info.setText(f"Anritsu Lin Average · {instrument_average_count} sweeps · {len(trace.powers_dbm)} points")
+                return
             n_pts = len(trace.powers_dbm)
             mid = n_pts // 2
             signature = (
@@ -5075,24 +5676,28 @@ class AnritsuPage(QWidget):
         if (
             self.show_analysis.isChecked()
             and self._cleanup_result is None
-            and self._latest_trace is not None
+            and self._preview_input_trace is not None
             and (self._selected_cleanup_modes() or self._analysis_parameters.temporal_average_frames > 1)
         ):
-            self._update_signal_analysis(self._latest_trace)
+            self._update_signal_analysis(self._preview_input_trace)
+
+    def _absolute_view_changed(self) -> None:
+        self._refresh_spectrum_display(auto_range=True)
+        self._sync_peak_markers()
 
     def _analysis_source_changed(self, *_args: object) -> None:
         selected = self.analysis_source.currentData()
         self._analysis_source_selection = str(selected or "auto")
         self._invalidate_analysis_results()
         self._refresh_spectrum_display()
-        if self._latest_trace is not None:
-            self._update_signal_analysis(self._latest_trace)
+        if self._preview_input_trace is not None:
+            self._update_signal_analysis(self._preview_input_trace)
 
     def _cleanup_history(self, source_key: str = "raw") -> tuple[tuple[float, ...] | np.ndarray, ...]:
         # Use every received frame, as in the spectrogram worker. Heatmap
         # decimation must not change the evidence for stationary-line removal.
         _times, rows = self._spectrogram_buffer.processing_tail(24)
-        if source_key == "raw":
+        if source_key == "raw" or (source_key == "averaged" and self._rolling_average_trace is not None):
             return rows
         source = self._candidate_traces.get(source_key)
         if source is None:
@@ -5101,16 +5706,33 @@ class AnritsuPage(QWidget):
             return ()
         if source.unit not in {"dBm", "dB"}:
             return ()
-        operation = str(self.reference_operation.currentData() or "none")
-        return tuple(
-            apply_reference_operation(row, self._reference_trace.powers_dbm, operation)[0]
-            for row in rows
-        )
+        return rows
 
     def _selected_cleanup_modes(self) -> tuple[str, ...]:
         background = self.cleanup_filters["background"].isChecked()
         return tuple(key for key in SPECTRUM_FILTER_ORDER if self.cleanup_filters[key].isChecked()
-                     and not (background and key == "emi_reject"))
+                     and not (key == "emi_reject" and (background or self._instrument_live_target is not None)))
+
+    def _stripe_cleanup_modes(self, source_key: str) -> tuple[str, ...]:
+        if source_key not in {"stripe_corrected", "stripe_masked", "stripe_reconstructed"}:
+            return ()
+        # Local filters operate on the stripe result. The background and EMI
+        # stages require separate calibration or uncorrected frame history.
+        return tuple(key for key in ("narrow_reject", "denoise") if self.cleanup_filters[key].isChecked())
+
+    def _sync_emi_filter(self) -> None:
+        source = self._candidate_traces.get(self._analysis_source_key)
+        logarithmic = (not self.cleanup_filters["background"].isChecked()
+                       and getattr(source, "unit", "dBm") in {"dBm", "dB"})
+        hardware = self._instrument_live_target is not None
+        control = self.cleanup_filters["emi_reject"]
+        control.setEnabled(logarithmic and not hardware and not self._execution_controlled)
+        if hardware:
+            control.setToolTip("EMI lines needs individual frames from PyLab Live.")
+        elif not logarithmic:
+            control.setToolTip("EMI uses dB thresholds. Use Narrow peaks for a signed W residual.")
+        else:
+            control.setToolTip("Reject stationary-line candidates using recent Live frames.")
 
     def _signal_analysis_controls_changed(self, *_args: object) -> None:
         if self._changing_correction:
@@ -5135,13 +5757,7 @@ class AnritsuPage(QWidget):
         if enabled and not self._background_filter_enabled:
             self._background_config_snapshot = None
         self._background_filter_enabled = enabled
-        unit = "W" if enabled else getattr(self._candidate_traces.get(self._analysis_source_key), "unit", "dBm")
-        logarithmic = unit in {"dBm", "dB"}
-        self.cleanup_filters["emi_reject"].setEnabled(logarithmic)
-        self.cleanup_filters["emi_reject"].setToolTip(
-            "EMI uses dB thresholds and is unavailable for the signed W background residual. Use Narrow peaks."
-            if not logarithmic else
-            "Reject stationary-line candidates using recent Live frames. A desired carrier can also be stationary.")
+        self._sync_emi_filter()
         self._invalidate_spectrogram_filters()
         self._update_correction_summary()
         self._refresh_spectrogram_display()
@@ -5149,7 +5765,7 @@ class AnritsuPage(QWidget):
             "Compare the corrected input with the filtered result in the same units.")
         if self._selected_cleanup_modes() and not self.show_analysis.isChecked():
             self.show_analysis.setChecked(True)
-        if self._latest_trace is None:
+        if self._preview_input_trace is None:
             self._invalidate_analysis_results()
             self._cleanup_result = None
             self._detected_peaks = ()
@@ -5157,7 +5773,7 @@ class AnritsuPage(QWidget):
             return
         self._invalidate_analysis_results()
         self._refresh_spectrum_display()
-        self._update_signal_analysis(self._latest_trace)
+        self._update_signal_analysis(self._preview_input_trace)
 
     def _update_signal_analysis(
         self, trace: SpectrumTrace, *, detect_peaks: bool | None = None
@@ -5172,7 +5788,9 @@ class AnritsuPage(QWidget):
                 "Show a spectrum trace before starting analysis."
             )
             return
-        mode = self._selected_cleanup_modes()
+        moving_average = self._rolling_average_trace is not None
+        mode = (self._stripe_cleanup_modes(source.key) if source.key.startswith("stripe_")
+                else self._selected_cleanup_modes())
         context, profile = None, None
         if "background" in mode:
             try:
@@ -5190,21 +5808,28 @@ class AnritsuPage(QWidget):
         self._analysis_wait_reason = None
         self._analysis_generation += 1
         parameters = self._analysis_parameters
-        times, rows = self._spectrogram_buffer.processing_tail(parameters.temporal_average_frames)
+        if moving_average or source.key not in {"raw", "processed"}:
+            parameters = replace(parameters, temporal_average_frames=1)
+        times, rows = (self._spectrogram_buffer.processing_tail(parameters.temporal_average_frames)
+                       if parameters.temporal_average_frames > 1 else ((), ()))
         reference_values, reference_operation = None, "none"
         values = source.values
         if parameters.temporal_average_frames > 1 and source.key == "processed" and self._latest_trace is not None:
             values = self._latest_trace.powers_dbm
             reference_values = self._reference_trace.powers_dbm if self._reference_trace is not None else None
             reference_operation = str(self.reference_operation.currentData() or "none")
-        if source.key not in {"raw", "processed"}:
-            parameters = replace(parameters, temporal_average_frames=1)
+        history = self._cleanup_history(source.key) if "emi_reject" in mode else ()
+        history_reference = ((self._reference_trace.powers_dbm, str(self.reference_operation.currentData()))
+                             if history and source.key == "processed" and self._reference_trace is not None else None)
+        raw_snapshot = self._latest_trace
+        if moving_average and (source.key == "processed" or "averaged" in source.provenance):
+            raw_snapshot = self._rolling_average_trace
         request = SpectrumAnalysisRequest(
             generation=self._analysis_generation,
             frequencies_hz=source.frequencies_hz,
             powers_dbm=values,
             mode=mode,
-            history_dbm=(self._cleanup_history(source.key) if "emi_reject" in mode else ()),
+            history_dbm=history,
             detect_peaks=self.auto_peak_detection.isChecked() if detect_peaks is None else detect_peaks,
             source_key=source.key,
             frame_id=self._display_revision,
@@ -5214,15 +5839,17 @@ class AnritsuPage(QWidget):
             background_context=context,
             background_profile=profile,
             source_snapshot=source,
-            allow_gaps=source.key == "processed",
-            raw_snapshot=self._latest_trace,
+            allow_gaps=(source.key in {"processed", "stripe_masked"}
+                        or (source.key.startswith("stripe_") and "reference" in source.provenance)),
+            raw_snapshot=raw_snapshot,
             power_rows=rows, timestamps_s=times,
             reference_values_dbm=reference_values, reference_operation=reference_operation,
             interference_calibration=(self.correction_workspace.interference_mode.currentData()
-                                      if "background" in mode else None),
+                                      if "background" in mode and not moving_average else None),
             tracking_context=self._tracking_context(),
             additional_tracking_contexts=tuple(state["context"] for window, state in self._additional_peak_trackers.items()
                                               if not window.paused.isChecked()),
+            history_reference=history_reference,
         )
         if self._cleanup_result is None and self._analysis_error is None:
             self._set_analysis_status(
@@ -5258,7 +5885,11 @@ class AnritsuPage(QWidget):
         else:
             # A one-off analysis with Auto peaks off belongs to its own frame.
             self._detected_peaks = ()
-        self._refresh_spectrum_display()
+        if not self._stripe_enabled:
+            self._refresh_spectrum_display()
+        elif (self._stripe_input_state is not None and self._stripe_cleanup_modes(result.source_key)
+              and self.show_analysis.isChecked() and self._ordinary_preview_active()):
+            self._render_stripe_display(self._stripe_input_state, auto_range=False)
         self._sync_peak_markers()
         self._update_analysis_status()
         self._update_correction_summary()
@@ -5338,25 +5969,30 @@ class AnritsuPage(QWidget):
         plots = [self.spectrum_plot]
         if self._spectrum_window is not None and not self._spectrum_window.spectrum.frozen:
             plots.append(self._spectrum_window.spectrum)
+        cleanup = self._cleanup_result
+        replacement_source = self._candidate_traces.get(self._analysis_source_key)
+        show_replacements = self.highlight_replacements.isChecked() and self.cleanup_filters["narrow_reject"].isChecked()
         for plot in plots:
             plot.clear_replacement_markers()
-        if (self.highlight_replacements.isChecked() and self.cleanup_filters["narrow_reject"].isChecked()
-                and self._cleanup_result is not None):
-            source = self._candidate_traces.get(self._analysis_source_key)
-            if source is not None:
-                indices = self._cleanup_result.removed_peak_indices
-                for plot in plots:
-                    plot.set_replacement_markers([source.frequencies_hz[i] for i in indices],
-                                                [self._cleanup_result.values[i] for i in indices])
-        if not self.highlight_peaks.isChecked() or not self._detected_peaks:
-            for plot in plots:
+            absolute = bool(plot.property("absoluteDifference"))
+            if absolute and (cleanup is None or cleanup.unit != self._active_spectrum_unit):
                 plot.clear_peak_markers()
-            return
-        for plot in plots:
-            plot.set_peak_markers(
-                [peak.frequency_hz for peak in self._detected_peaks],
-                [peak.amplitude_dbm for peak in self._detected_peaks],
-            )
+                continue
+            if show_replacements and cleanup is not None and replacement_source is not None:
+                indices = cleanup.removed_peak_indices
+                amplitudes = [cleanup.values[i] for i in indices]
+                plot.set_replacement_markers(
+                    [replacement_source.frequencies_hz[i] for i in indices],
+                    [abs(value) for value in amplitudes] if absolute else amplitudes,
+                )
+            if self.highlight_peaks.isChecked() and self._detected_peaks:
+                amplitudes = [peak.amplitude_dbm for peak in self._detected_peaks]
+                plot.set_peak_markers(
+                    [peak.frequency_hz for peak in self._detected_peaks],
+                    [abs(value) for value in amplitudes] if absolute else amplitudes,
+                )
+            else:
+                plot.clear_peak_markers()
 
     def _open_analysis_settings(self, *, focus_peaks: bool = False) -> None:
         section = "peaks" if focus_peaks else "filters"
@@ -5697,7 +6333,12 @@ class AnritsuPage(QWidget):
             floating.closed.connect(self._spectrum_window_closed)
             floating.start_live.clicked.connect(lambda: self.toggle_live() if not self._timer.isActive() else None)
             floating.stop_live.clicked.connect(lambda: self.toggle_live() if self._timer.isActive() else None)
+            floating.live_average.clicked.connect(self._open_live_average_setup)
+            floating.show_live_frame.toggled.connect(self.show_live_frame.setChecked)
+            floating.stripes.toggle.checkedChanged.connect(self._set_stripes_enabled)
+            floating.stripes.settings.clicked.connect(self._open_stripe_setup)
             floating.peak_table.clicked.connect(self._open_peak_table)
+            floating.show_absolute.toggled.connect(self.show_absolute.setChecked)
             floating.spectrum.status_changed.connect(self.status.emit)
             floating.spectrum.display_resumed.connect(self._refresh_spectrum_display)
             floating.spectrum.display_resumed.connect(self._sync_peak_markers)
@@ -5836,7 +6477,8 @@ class AnritsuPage(QWidget):
         self, candidates: SpectrumDisplayState, visible: Mapping[str, bool]
     ) -> None:
         choices = tuple(trace for trace in candidates.traces if visible.get(trace.key, False))
-        if self.cleanup_filters["background"].isChecked():
+        if (not self._stripe_enabled and self._rolling_average_trace is None
+                and self.cleanup_filters["background"].isChecked()):
             raw = candidates.by_key.get("raw")
             choices = (raw,) if raw is not None else ()
             self._analysis_source_selection = "raw"
@@ -5849,7 +6491,7 @@ class AnritsuPage(QWidget):
         selection = self._analysis_source_selection
         if selection not in keys:
             selection = "auto"
-        automatic_key = next(
+        automatic_key = candidates.primary_key if self._stripe_enabled else next(
             (key for key in ("processed", "averaged", "reference", "raw") if key in keys), None
         )
         source_key = automatic_key if selection == "auto" else selection
@@ -5883,15 +6525,292 @@ class AnritsuPage(QWidget):
                 self.analysis_source.setCurrentIndex(idx)
                 self.analysis_source.blockSignals(blocked)
 
+    def _display_average_trace(self) -> SpectrumTrace | None:
+        return self._rolling_average_trace or self._averaged_trace
+
+    def _stripe_template_for(self, context, profile, *, fit_manual_offsets: bool = True):
+        if getattr(profile, "averaging_source", "pc") == "instrument":
+            raise ValueError("Stripes needs individual background frames. Record a PyLab Live background.")
+        settings = self._stripe_settings
+        manual_bands_only = isinstance(settings, StripeBands) and not fit_manual_offsets
+        key = (profile, context.context_id, settings, manual_bands_only)
+        if self._stripe_template is None or self._stripe_template[0] != key:
+            problem = None
+            try:
+                if isinstance(settings, AutomaticStripeSettings):
+                    template = build_automatic_stripe_template(
+                        context.frequencies_hz, profile.mean_w, profile.sample_variance_w2,
+                        rbw_hz=self._background_config_snapshot.rbw_hz, protected_hz=settings.protected_hz,
+                    )
+                    method = ("live_automatic_stripe_subtraction_v1", f"detected stripe bands Hz {template.bands_hz}")
+                elif manual_bands_only:
+                    template = None
+                    method = (f"stripe bands Hz {settings.bands_hz}",)
+                else:
+                    template = build_stripe_offsets(context.frequencies_hz, profile.mean_w, settings)
+                    method = ("live_stripe_subtraction_v1", f"stripe bands Hz {settings.bands_hz}",
+                              f"shoulder Hz {settings.shoulder_hz}")
+                evidence = (
+                    *method, f"background profile {profile.profile_id}",
+                    f"background hash {profile.content_hash}", f"background context {context.context_id}",
+                    f"protected bands Hz {settings.protected_hz}", "signed power subtraction",
+                )
+            except ValueError as exc:
+                template, evidence, problem = None, (), str(exc)
+            self._stripe_template = (key, template, evidence, problem)
+        _, template, evidence, problem = self._stripe_template
+        if problem:
+            raise ValueError(problem)
+        return template, evidence
+
+    def _live_stripe_display(
+        self, trace: SpectrumTrace | None, *, averaged: bool, reference_operation: str, report_status: bool = True,
+    ) -> SpectrumDisplayState:
+        revision = self._display_revision
+        controls = self.stripe_controls
+        if trace is None:
+            if report_status:
+                controls.status.setText("Stripes · waiting for a spectrum.")
+                controls.set_detected_bands(())
+            return display_state((), revision)
+
+        try:
+            input_power_w = dbm_to_w(trace.powers_dbm)
+        except ValueError as exc:
+            if report_status:
+                controls.status.setText(f"Stripes · spectrum unavailable · {exc}")
+                controls.set_detected_bands(())
+            return display_state((), revision)
+        view = str(controls.view.currentData() or "corrected")
+        provenance = ("averaged", "stripe_input") if averaged else ("raw", "stripe_input")
+        values, unit = input_power_w, "W"
+        reference_dbm, reference_problem = None, None
+        if view != "removed" and reference_operation != "none":
+            try:
+                self._validate_display_reference(trace.frequencies_hz)
+                if trace is self._reference_trace:
+                    raise ValueError("Acquire a new spectrum after capturing the reference.")
+                reference_dbm = self._reference_trace.powers_dbm
+            except ValueError as exc:
+                reference_problem = str(exc)
+
+        bands_hz = ()
+        masked = None
+        reconstruction_bands_hz = None
+        estimated_bands_hz = ()
+        paired = False
+        try:
+            if self._latest_trace_is_execution_preview or self._execution_controlled:
+                raise ValueError("Wait until the Run Engine releases acquisition.")
+            if self.correction_workspace.running:
+                raise ValueError("Wait until the new background has been collected.")
+            context, profile = self._background_for_filter(trace.frequencies_hz)
+            template, evidence = self._stripe_template_for(context, profile, fit_manual_offsets=view != "reconstructed")
+            offsets = template
+            detail = f"Stripes · Manual · {controls.view.currentText()}"
+            if isinstance(template, AutomaticStripeTemplate):
+                bands_hz = template.reconstruction_bands_hz if view == "reconstructed" else template.bands_hz
+                if not bands_hz:
+                    view = "input"
+                    detail = template.notes[0] if template.notes else "No stable narrow lines found in the background."
+                    detail = f"Stripes · {detail}"
+                elif view == "input":
+                    detail = f"Stripes · Input · {len(bands_hz)} automatic bands detected"
+                elif view == "corrected" and reference_dbm is not None and reference_operation == "difference_db":
+                    pair = template.balance_reference(input_power_w, dbm_to_w(reference_dbm))
+                    values, unit, _ = apply_stripe_reference(pair.signal_w, pair.reference_w, reference_operation)
+                    paired = True
+                    unresolved = pair.unresolved_bands_hz
+                    detail = f"Stripes · {len(bands_hz) - len(unresolved)}/{len(bands_hz)} bands matched to reference"
+                    evidence += ("reference_band_balance_v1",)
+                    if unresolved:
+                        detail += f" · {len(unresolved)} unresolved bands"
+                        evidence += (f"unresolved stripe bands Hz {unresolved}",)
+                elif view not in {"masked", "reconstructed"}:
+                    offsets, skipped = template.offsets_for(input_power_w)
+                    detail = f"Stripes · {len(bands_hz) - len(skipped)}/{len(bands_hz)} bands applied to signal"
+                    if skipped:
+                        evidence += (f"skipped stripe bands Hz {skipped}",)
+                        detail += " · current spectrum differs from background in skipped bands"
+            if view in {"masked", "reconstructed"}:
+                ranges = bands_hz if isinstance(template, AutomaticStripeTemplate) else self._stripe_settings.bands_hz
+                if view == "masked":
+                    provenance += tuple(tag for tag in evidence if tag != "signed power subtraction")
+                    masked = stripe_band_mask(trace.frequencies_hz, ranges, self._stripe_settings.protected_hz)
+                    detail = f"Stripes · Masked {np.count_nonzero(masked)} bins in {len(ranges)} bands"
+                    provenance += (f"masked stripe bands Hz {ranges}",)
+                else:
+                    provenance += tuple(tag for tag in evidence
+                                        if tag not in {"signed power subtraction", "live_automatic_stripe_subtraction_v1"}
+                                        and not tag.startswith("detected stripe bands Hz "))
+                    reconstruction_bands_hz = ranges
+                    provenance += (f"background bands for reconstruction Hz {ranges}",)
+                    detail = f"Stripes · Reconstructing {len(ranges)} bands"
+            elif view != "input":
+                if not paired:
+                    values = offsets if view == "removed" else input_power_w - offsets
+                provenance += (*evidence, f"stripe {view}")
+            detail += f" · {profile.profile_id} ({profile.sweep_count} reads)"
+            if not profile.signal_free_qualified:
+                detail += " · preview from operator-selected background"
+        except ValueError as exc:
+            view = "input"
+            detail = f"Stripes · showing input · {exc}"
+
+        if paired:
+            provenance += ("reference", reference_operation)
+            detail += f" · Reference [{unit}]"
+        elif view != "removed" and reference_dbm is not None:
+            try:
+                if view == "corrected":
+                    # Apply the same template to both operands so a line in
+                    # the reference alone does not appear as a dip in dB.
+                    reference_w = dbm_to_w(reference_dbm)
+                    if isinstance(template, AutomaticStripeTemplate):
+                        reference_offsets, skipped = template.offsets_for(reference_w)
+                    else:
+                        reference_offsets, skipped = offsets, ()
+                    values, unit, missing = apply_stripe_reference(values, reference_w - reference_offsets, reference_operation)
+                    if bands_hz:
+                        detail += f" · {len(bands_hz) - len(skipped)}/{len(bands_hz)} applied to reference"
+                    if skipped:
+                        provenance += (f"skipped reference stripe bands Hz {skipped}",)
+                    if missing:
+                        detail += f" · {missing} gaps from nonpositive corrected power"
+                else:
+                    values, unit = apply_reference_operation(trace.powers_dbm, reference_dbm, reference_operation)
+                provenance += ("reference", reference_operation)
+                detail += f" · Reference [{unit}]"
+            except ValueError as exc:
+                reference_problem = str(exc)
+
+        if reference_problem:
+            detail += f" · Reference unavailable · {reference_problem}"
+        if masked is not None:
+            values = np.where(masked, np.nan, values)
+        if reconstruction_bands_hz is not None:
+            try:
+                reconstructed = reconstruct_stripe_bands(
+                    trace.frequencies_hz, values, reconstruction_bands_hz, self._stripe_settings.protected_hz,
+                )
+            except ValueError as exc:
+                view = "input"
+                detail += f" · Reconstruction unavailable · {exc}"
+            else:
+                values = reconstructed.values
+                estimated_bands_hz = reconstructed.estimated_bands_hz
+                detail += f" · Shaded estimate · {reconstructed.estimated_count} bins"
+                provenance += ("linear interpolation in stripe bands", f"estimated stripe bands Hz {estimated_bands_hz}")
+                if reconstructed.skipped_count:
+                    detail += f" · {reconstructed.skipped_count} bins without usable neighbours"
+
+        if view == "corrected" and "reference" not in provenance:
+            below_zero = np.count_nonzero(values < 0)
+            if below_zero:
+                detail += f" · {below_zero} bins below zero after subtraction"
+        if report_status:
+            if controls.status.text() != detail:
+                controls.status.setText(detail)
+            controls.set_detected_bands(bands_hz)
+        label = {"input": "Stripe input", "corrected": "Stripe corrected", "removed": "Removed stripes",
+                 "masked": "Stripe bands masked", "reconstructed": "Stripe band estimates"}[view]
+        if paired:
+            label = "Stripe balanced"
+        if "reference" in provenance:
+            label += " · Reference"
+        if averaged and view != "removed":
+            method = "Anritsu average" if self._instrument_live_target is not None else "Live average"
+            label = f"{method} · {label}"
+        return display_state((SpectrumDisplayTrace(
+            f"stripe_{view}", label, trace.frequencies_hz, tuple(values), unit, revision, provenance, estimated_bands_hz,
+        ),), revision)
+
+    def _render_stripe_display(self, state: SpectrumDisplayState, *, auto_range: bool) -> None:
+        source = state.selected
+        has_filters = source is not None and bool(self._stripe_cleanup_modes(source.key))
+        self.show_analysis.setEnabled(has_filters)
+        self.overlay_analysis_source.setEnabled(has_filters)
+        if not has_filters or not self.show_analysis.isChecked():
+            self._render_spectrum_state(state, auto_range=auto_range)
+            return
+
+        cleanup = self._cleanup_result
+        snapshot = self._analysis_source_snapshot
+        if (cleanup is None or snapshot is None or snapshot.key != source.key or snapshot.unit != source.unit
+                or (snapshot.frequencies_hz is not source.frequencies_hz
+                    and not frequency_grids_match(snapshot.frequencies_hz, source.frequencies_hz))):
+            self._render_spectrum_state(display_state((), state.frame_id), auto_range=auto_range, processing_pending=True)
+            return
+        if cleanup.applied_modes:
+            filtered = replace(snapshot, key=f"analysis:{snapshot.key}", label=f"Filtered · {snapshot.label}",
+                               values=cleanup.values, provenance=(*snapshot.provenance, "analysis", cleanup.method))
+            comparison = (snapshot,) if self.overlay_analysis_source.isChecked() else ()
+            live = tuple(trace for trace in state.traces if trace.key == "live_frame")
+            state = display_state((*comparison, *live, filtered), state.frame_id)
+        self._render_spectrum_state(state, auto_range=auto_range, analysis_source_key=source.key)
+
+    def _sync_live_frame_controls(self, available: bool, *, stripes_removed: bool) -> None:
+        tooltip = "Show the latest sweep beside Live average, with the same correction."
+        if stripes_removed:
+            tooltip = "Select a spectrum view in Stripes to compare with the latest sweep."
+        elif not available:
+            tooltip = "Start Live average to compare with the latest sweep."
+        self.show_live_frame.setEnabled(available)
+        self.show_live_frame.setToolTip(tooltip)
+        if self._spectrum_window is not None:
+            control = self._spectrum_window.show_live_frame
+            control.setEnabled(available)
+            control.setToolTip(tooltip)
+            if control.isChecked() != self.show_live_frame.isChecked():
+                with QSignalBlocker(control):
+                    control.setChecked(self.show_live_frame.isChecked())
+
     def _refresh_spectrum_display(self, *_args: object, auto_range: bool = False) -> None:
         if not self._ordinary_preview_active():
             return
         operation = str(self.reference_operation.currentData() or "none")
         effective_operation = operation
-        if operation != "none" and self._latest_trace is not None:
+        averaged = self._display_average_trace()
+        show_live_average = self._rolling_average_trace is not None
+        hardware = self._instrument_live_target is not None
+        latest = None if hardware else self._latest_trace
+        average_label = "Anritsu average" if hardware else "Live average"
+        reference_input = averaged if show_live_average else latest
+        stripes_removed = self._stripe_enabled and self.stripe_controls.view.currentData() == "removed"
+        can_show_live_frame = (show_live_average and latest is not None and not stripes_removed
+                               and not self._execution_controlled and not self._latest_trace_is_execution_preview)
+        self._sync_live_frame_controls(can_show_live_frame, stripes_removed=stripes_removed)
+        show_live_frame = can_show_live_frame and self.show_live_frame.isChecked()
+        if self._stripe_enabled:
+            state = self._live_stripe_display(
+                reference_input, averaged=show_live_average, reference_operation=operation,
+            )
+            self._candidate_traces = state.by_key
+            self._sync_analysis_source_combo(state, dict.fromkeys(state.by_key, True))
+            if (show_live_frame and averaged.configuration_generation == latest.configuration_generation
+                    and (averaged.frequencies_hz is latest.frequencies_hz
+                         or frequency_grids_match(averaged.frequencies_hz, latest.frequencies_hz))):
+                overlay = self._live_stripe_display(
+                    latest, averaged=False, reference_operation=operation, report_status=False,
+                ).selected
+                primary = state.selected
+                if (overlay is not None and primary is not None
+                        and (overlay.key, overlay.unit) == (primary.key, primary.unit)):
+                    label = "Live frame"
+                    if overlay.key in {"stripe_corrected", "stripe_reconstructed"}:
+                        label += " · Stripes"
+                    if "reference" in overlay.provenance:
+                        label += " · Reference"
+                    state = state.with_overlay(replace(overlay, key="live_frame", label=label))
+            self._stripe_input_state = state
+            self._update_correction_summary()
+            self._render_stripe_display(state, auto_range=auto_range)
+            return
+        self._stripe_input_state = None
+        if operation != "none" and reference_input is not None:
             try:
-                self._validate_display_reference(self._latest_trace.frequencies_hz)
-                if self._latest_trace is self._reference_trace:
+                self._validate_display_reference(reference_input.frequencies_hz)
+                if reference_input is self._reference_trace:
                     raise ValueError("Reference captured: acquire the next spectrum to display the corrected result.")
             except ValueError as exc:
                 message = f"Reference processing unavailable: {exc}"
@@ -5903,9 +6822,11 @@ class AnritsuPage(QWidget):
         # Build candidate state containing all available traces regardless of visibility
         all_candidates_state = build_display_state(
             raw=self._latest_trace,
-            averaged=self._averaged_trace,
+            averaged=averaged,
             reference=self._reference_trace,
             reference_operation=effective_operation,
+            use_average_for_reference=show_live_average,
+            live_average_label=average_label,
             visible={"raw": True, "averaged": True, "reference": True, "processed": True},
             frame_id=self._display_revision,
             preferred_key=self._analysis_source_key,
@@ -5919,9 +6840,11 @@ class AnritsuPage(QWidget):
             "processed": self.show_processed.isChecked(),
         }
         background_enabled = self.cleanup_filters["background"].isChecked()
-        if background_enabled:
-            visible = {"raw": True, "averaged": False, "reference": False, "processed": False}
         processed = all_candidates_state.by_key.get("processed")
+        if show_live_average:
+            visible = {"raw": False, "averaged": processed is None, "reference": False, "processed": processed is not None}
+        if background_enabled:
+            visible = {"raw": not show_live_average, "averaged": show_live_average, "reference": False, "processed": False}
         if processed is not None and processed.unit != "dBm" and self.show_processed.isChecked():
             # Do not put incompatible dBm overlays on a relative/linear axis.
             visible.update({"raw": False, "averaged": False, "reference": False})
@@ -5939,10 +6862,11 @@ class AnritsuPage(QWidget):
                 f"Show the reference operation result ({self.reference_operation.currentText()})."
             )
 
-        has_analysis = bool(self._selected_cleanup_modes()) or self._analysis_parameters.temporal_average_frames > 1
+        modes = self._selected_cleanup_modes()
+        frame_average = not self._live_average_active and self._analysis_parameters.temporal_average_frames > 1
+        has_analysis = bool(modes) or frame_average
         self.show_analysis.setEnabled(has_analysis and not background_enabled)
-        self.overlay_analysis_source.setEnabled(any(mode != "background" for mode in self._selected_cleanup_modes())
-                                               or self._analysis_parameters.temporal_average_frames > 1)
+        self.overlay_analysis_source.setEnabled(any(mode != "background" for mode in modes) or frame_average)
         if not has_analysis:
             self.show_analysis.setToolTip(
                 "Select one or more filters to show the cleaned trace. With all filters off, the source curve is unchanged."
@@ -5963,7 +6887,7 @@ class AnritsuPage(QWidget):
             if source_key in all_candidates_state.by_key:
                 source_trace = all_candidates_state.by_key[source_key]
                 if len(cleanup.values) == len(source_trace.frequencies_hz):
-                    base_is_relative = self.show_processed.isChecked() and processed is not None and processed.unit != "dBm"
+                    base_is_relative = visible.get("processed", False) and processed is not None and processed.unit != "dBm"
                     analysis_is_relative = cleanup.unit != "dBm"
                     has_base_visible = any(visible.values())
                     if background_enabled or not has_base_visible or (base_is_relative == analysis_is_relative):
@@ -5978,18 +6902,22 @@ class AnritsuPage(QWidget):
                         if display_analysis and not self.overlay_analysis_source.isChecked():
                             visible[source_key] = False
         processing_pending = (has_analysis and (background_enabled or self.show_analysis.isChecked())
-                              and analysis_values is None and self._latest_trace is not None)
+                              and analysis_values is None and self._preview_input_trace is not None)
         if processing_pending:
             # Never substitute an uncorrected trace for a selected processing
             # result. Keep raw available for explicit raw exports and analysis.
             visible = {key: False for key in visible}
         state = build_display_state(
-            raw=self._analysis_raw_snapshot if analysis_values is not None and self._analysis_raw_snapshot is not None else self._latest_trace,
-            averaged=self._averaged_trace,
+            raw=(self._analysis_raw_snapshot if not show_live_average and analysis_values is not None
+                 and self._analysis_raw_snapshot is not None else latest),
+            averaged=averaged,
             reference=self._reference_trace,
             reference_operation=effective_operation,
+            use_average_for_reference=show_live_average,
+            live_average_label=average_label,
+            show_live_frame=show_live_frame and not processing_pending,
             visible=visible,
-            frame_id=(self._analysis_source_snapshot.frame_id if analysis_values is not None
+            frame_id=(self._analysis_source_snapshot.frame_id if not show_live_average and analysis_values is not None
                       and self._analysis_source_snapshot is not None else self._display_revision),
             preferred_key=self._analysis_source_key,
             analysis_values=analysis_values,
@@ -6002,7 +6930,7 @@ class AnritsuPage(QWidget):
             analysis_modes=cleanup.applied_modes if cleanup is not None else (),
         )
         view_notes = []
-        if any(checkbox.isChecked() for checkbox in self.quick_curves.values()):
+        if not self._live_average_active and any(checkbox.isChecked() for checkbox in self.quick_curves.values()):
             background_w, reference, background_provenance = None, None, ()
             if self._latest_trace is not None:
                 if self.quick_curves["background"].isChecked():
@@ -6026,6 +6954,27 @@ class AnritsuPage(QWidget):
         state, unit_note = convert_power_view(state, str(self.quick_power_unit.currentData() or "auto"))
         if unit_note:
             view_notes.append(unit_note)
+        self._render_spectrum_state(
+            state, auto_range=auto_range, view_notes=tuple(view_notes), processing_pending=processing_pending,
+            analysis_source_key=analysis_source_key if analysis_values is not None else None,
+        )
+
+    def _render_spectrum_state(
+        self, state: SpectrumDisplayState, *, auto_range: bool, view_notes: tuple[str, ...] = (),
+        processing_pending: bool = False, analysis_source_key: str | None = None,
+    ) -> None:
+        absolute_available = any(trace.is_signed_difference for trace in state.traces)
+        absolute = absolute_available and self.show_absolute.isChecked()
+        self.show_absolute.setEnabled(absolute_available)
+        if self._spectrum_window is not None:
+            control = self._spectrum_window.show_absolute
+            if control.isChecked() != self.show_absolute.isChecked():
+                blocked = control.blockSignals(True)
+                control.setChecked(self.show_absolute.isChecked())
+                control.blockSignals(blocked)
+            control.setEnabled(absolute_available)
+        if absolute:
+            state = state.absolute_differences()
         previous_note = getattr(self, "_comparison_view_note", "")
         self._comparison_view_note = " ".join(view_notes)
         if view_notes or (previous_note and self.info.text() == previous_note):
@@ -6039,16 +6988,27 @@ class AnritsuPage(QWidget):
             floating = None
         if floating is not None:
             plots.append(floating.spectrum)
-        active_names = {
-            ("Analysis" if trace.key.startswith("analysis:") else "Corrected" if trace.key.startswith("correction:")
-             else ("Processed" if trace.key == "processed" else trace.key.capitalize()))
+        names = {
+            trace.key: ("Analysis" if trace.key.startswith("analysis:") else
+                        "Corrected" if trace.key.startswith("correction:") else
+                        "Reconstructed" if trace.key == "stripe_reconstructed" else
+                        "Live frame" if trace.key == "live_frame" else trace.key.capitalize())
             for trace in traces
         }
+        active_names = set(names.values())
+        select_primary = (floating is not None and "live_frame" in names
+                          and floating.spectrum.trace_selector.currentText() not in active_names)
         previous_names = self._last_displayed_trace_names
         traces_changed = active_names != previous_names
         self._last_displayed_trace_names = active_names
+        primary = state.by_key.get(state.primary_key)
         for plot in plots:
-            for name in previous_names | {"Raw", "Analysis", "Averaged", "Reference", "Processed", "Corrected"}:
+            plot.set_estimated_bands(primary.estimated_bands_hz if primary is not None else ())
+            if bool(plot.property("absoluteDifference")) != absolute:
+                plot.setProperty("absoluteDifference", absolute)
+                plot.clear_holds()
+                plot.delta_marker.hide()
+            for name in previous_names | {"Raw", "Analysis", "Averaged", "Reference", "Processed", "Corrected", "Live frame"}:
                 if name not in active_names:
                     plot.clear_trace(name)
         if not traces:
@@ -6062,6 +7022,8 @@ class AnritsuPage(QWidget):
                 detail = "Acquire once or Start Live. Then choose a correction and configure the filters above."
             if view_notes:
                 title, detail = "Comparison unavailable", " ".join(view_notes)
+            if self._stripe_enabled and not processing_pending:
+                title, detail = "Stripe correction", self.stripe_controls.status.text()
             self.spectrum_empty_heading.setText(title)
             self.spectrum_empty_text.setText(detail)
             for plot in plots:
@@ -6075,11 +7037,13 @@ class AnritsuPage(QWidget):
         legend_order = []
         tokens = tokens_for("dark" if isDarkTheme() else "light")
         palette = plot_theme(tokens)
+        input_color = palette.axes if "live_frame" in names else palette.reference
         colors = {
             "raw": palette.measurement,
-            "averaged": tokens.success,
+            "averaged": palette.measurement if self._rolling_average_trace is not None else tokens.success,
             "reference": palette.reference,
-            "processed": tokens.accent,
+            "processed": palette.measurement if self._rolling_average_trace is not None else tokens.accent,
+            "live_frame": palette.reference,
             "background_difference": tokens.success,
             "reference_difference": palette.reference,
         }
@@ -6091,15 +7055,13 @@ class AnritsuPage(QWidget):
             for plot in plots:
                 plot.plot.setLogMode(x=False, y=False)
         for trace in traces:
-            name = ("Analysis" if trace.key.startswith("analysis:") else "Corrected" if trace.key.startswith("correction:")
-                    else trace.key.capitalize())
-            if trace.key == "processed":
-                name = "Processed"
+            name = names[trace.key]
+            instant = trace.key == "live_frame"
             legend_order.append(name)
             values = trace.values
             color = (palette.measurement if trace.key.startswith("analysis:") else
-                     palette.reference if trace.key.startswith("correction:") or
-                     (analysis_values is not None and trace.key == analysis_source_key) else
+                     input_color if trace.key.startswith("correction:") or
+                     trace.key == analysis_source_key else
                      colors.get(trace.key, palette.measurement))
             for plot in plots:
                 if isinstance(plot, SpectrumWorkbench):
@@ -6111,11 +7073,15 @@ class AnritsuPage(QWidget):
                     color=color,
                     legend_label=f"{trace.label} [{trace.unit}]",
                     primary=trace.key == state.primary_key,
+                    opacity=0.55 if instant else None,
+                    z_value=-1.0 if instant else None,
                 )
             displayed += sum(
                 math.isfinite(frequency) and math.isfinite(value)
                 for frequency, value in zip(trace.frequencies_hz, values, strict=True)
             )
+        if select_primary and state.primary_key is not None:
+            floating.spectrum.trace_selector.setCurrentText(names[state.primary_key])
         if displayed == 0:
             self.spectrum_empty_heading.setText("No finite spectrum points")
             self.spectrum_empty_text.setText("No finite spectrum points. A non-positive linear power difference is undefined in dBm.")
@@ -6127,32 +7093,58 @@ class AnritsuPage(QWidget):
                 floating.status.setText("No finite spectrum points are available.")
             return
         active_unit = traces[-1].unit
-        primary = state.by_key.get(state.primary_key)
         title = primary.label if primary is not None else "Current spectrum"
         if view_notes:
             title += " · " + " ".join(view_notes)
         unit_changed = active_unit != self._active_spectrum_unit
         self.spectrum_ranges.set_unit(active_unit)
+        if absolute:
+            if active_unit == "W" and "raw" in state.by_key:
+                y_label, csv_column = "Power / absolute residual", "power_w"
+            elif active_unit == "W":
+                y_label, csv_column = "Absolute residual", "absolute_residual_w"
+            else:
+                y_label, csv_column = "Absolute difference", "absolute_difference_db"
+        elif active_unit == "W" and (analysis_source_key or state.primary_key) in {
+            "stripe_input", "stripe_corrected", "stripe_masked", "stripe_reconstructed",
+        }:
+            y_label, csv_column = "Power", "power_w"
+        elif active_unit == "W":
+            y_label = "Power / residual" if "raw" in state.by_key else "Signed residual"
+            csv_column = "signed_power_w"
+        else:
+            y_label = "Relative power" if active_unit in {"dB", "linear ratio"} else "Amplitude"
+            csv_column = "value"
         for plot in plots:
             plot.set_legend_order(legend_order)
             plot.set_title(title)
             plot.set_labels(
                 x="Frequency",
                 x_unit="Hz",
-                y=("Power / residual" if "raw" in state.by_key else "Signed residual") if active_unit == "W" else "Relative power" if active_unit in {"dB", "linear ratio"} else "Amplitude",
+                y=y_label,
                 y_unit=active_unit,
             )
-            plot._csv_value_column = "signed_power_w" if active_unit == "W" else "value"
+            plot._csv_value_column = csv_column
             if unit_changed or auto_range or traces_changed:
                 plot.auto_range()
         self._active_spectrum_unit = active_unit
         if floating is not None:
-            floating.status.setText(
-                f"Mirroring {displayed:,} finite value(s) from the completed trace."
-            )
+            if self._stripe_enabled:
+                detail = self.stripe_controls.status.text()
+                if self._live_average_active:
+                    detail += f" · {self.live_average_status.text()}"
+            elif self._live_average_active:
+                detail = self.live_average_status.text()
+            else:
+                detail = f"Mirroring {displayed:,} finite value(s) from the completed trace."
+            floating.status.setText(detail)
 
     def _error(self, operation: str, error: str) -> None:
-        if operation in {"fetch_trace", "fetch_current_trace", "fetch_current_trace_fast", "single_sweep", "acquire_fresh_trace"}:
+        trace_operation = operation in {
+            "fetch_trace", "fetch_current_trace", "fetch_current_trace_fast",
+            "single_sweep", "unaveraged_sweep", "acquire_fresh_trace", "instrument_average", "instrument_average_live",
+        }
+        if trace_operation:
             self._discard_cancelled_average_frame = False
         if operation.startswith("read_background_filter_configuration:"):
             pending = self._background_config_pending
@@ -6190,6 +7182,9 @@ class AnritsuPage(QWidget):
                     "Live will retry on the next interval."
                 )
                 self.status.emit("Anritsu Live skipped an unmeasured -999 trace")
+                return
+            if operation == "fetch_current_trace_fast" and self._averaging_destination == "reference":
+                QTimer.singleShot(self.refresh.value(), self._request_next_average_frame)
                 return
             deadline = self._manual_trace_deadline_monotonic
             if deadline is not None and time.monotonic() < deadline:
@@ -6246,17 +7241,24 @@ class AnritsuPage(QWidget):
             )
             self.status.emit(f"Anritsu {operation} failed: {error}")
             return
-        if operation in {"fetch_trace", "fetch_current_trace", "fetch_current_trace_fast", "single_sweep", "acquire_fresh_trace"}:
+        if trace_operation or (operation == "start_live" and self._reference_stream_owned):
+            release_live = self._timer.isActive() or self._resume_live_after_averaging
             self._fetch_pending = False
             self._manual_trace_deadline_monotonic = None
             if self._averaging_active:
                 self._finish_temporal_averaging(resume_live=False)
                 self.info.setText(f"Averaging stopped: {error}")
-        if operation in {
-            "read_configuration", "configure", "start_live", "stop_live", "fetch_trace", "fetch_current_trace",
-            "fetch_current_trace_fast", "acquire_fresh_trace", "single_sweep", "emergency_off",
+            self._resume_live_after_averaging = False
+            if release_live and not self._execution_controlled:
+                self._controller.call("stop_live")
+        if operation == "stop_live":
+            self._reference_stream_owned = False
+        if trace_operation or operation in {
+            "read_configuration", "configure", "start_live", "stop_live", "abort_acquisition",
+            "emergency_off", "disconnect",
         }:
             self._live_transition_pending = False
+            self._resume_live_after_averaging = False
             self._timer.stop()
             self.live.setText("Start Live")
             self._set_live_indicator("off")
@@ -6273,6 +7275,7 @@ class AnritsuPage(QWidget):
     def shutdown_analysis(self) -> bool:
         """Keep ownership until both analysis threads have actually stopped."""
         self._timer.stop()
+        self._averaging_deadline_timer.stop()
         self._background_config_timer.stop()
         stopped = (
             self._analysis_controller.close(),
@@ -6296,7 +7299,10 @@ class AnritsuPage(QWidget):
         self._background_config_timer.stop()
         self._background_config_pending = None
         self._timer.stop()
+        self._averaging_deadline_timer.stop()
         self.reference_dialog.close()
+        self.live_average_dialog.close()
+        self.stripe_dialog.close()
         self.recording_dialog.close()
         if self._processing_quality_dialog is not None:
             self._processing_quality_dialog.close()

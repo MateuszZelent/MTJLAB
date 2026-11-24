@@ -259,6 +259,7 @@ def _invalid_value(value: object, dimension: str | None, key: str = "") -> str:
         key
         in {
             "store_raw",
+            "store_source_spectra",
             "store_processed",
             "checkpoint",
             "sync_enabled",
@@ -644,6 +645,8 @@ class _Overview:
                 "inter_sweep_delay": "0 s",
             }
             default_details = {}
+            if not data.get("source_file"):
+                defaults["store_source_spectra"] = True
             if node.type == "acquire_reference":
                 defaults["minimum_duration"] = "0 s"
                 if data.get("source_file"):

@@ -10,10 +10,11 @@ from pathlib import Path
 
 import numpy as np
 
-from PySide6.QtCore import QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
     QGridLayout,
     QHeaderView,
     QHBoxLayout,
@@ -27,25 +28,29 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    MessageBoxBase,
     PlainTextEdit,
     PrimaryPushButton,
     ProgressBar,
     PushButton,
     StrongBodyLabel,
+    SubtitleLabel,
     TreeWidget,
     isDarkTheme,
 )
 
 from app.ui.common import human_duration as _human_duration
-from app.ui.dialogs import StationDialog
-from app.ui.design_system import tokens_for
-from app.ui.widgets import SpectrumPlotWidget
+from app.ui.dialogs import StationCardWidget, StationDialog
+from app.ui.design_system import SPACING, tokens_for
+from app.ui.widgets import FluentTabView, SpectrumPlotWidget
 from app.recipes.parameter_registry import PARAMETERS_BY_TARGET
 from app.recipes.semantic_tree import AxisPointContext, SemanticMeasurementTree, SemanticNodeKind
 from app.domain.quantities import DIMENSION_TIME, format_quantity_auto
 from app.domain.execution_state import SemanticOperationState
+from app.spectrum.processing import peak_preserving_indices
 from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeView, TreeInteractionMode
 from app.ui.execution.plan_timeline import ExecutionPlanTimeline
+from app.ui.execution.spectrogram import ExecutionSpectrogram
 
 
 @dataclass(slots=True)
@@ -179,6 +184,49 @@ class ManualStageDialog(StationDialog):
             return
         self._abort()
         event.ignore()  # type: ignore[union-attr]
+
+
+class SweepCompletionDialog(MessageBoxBase):
+    """Show the completion acknowledgement inside the Execute viewport."""
+
+    def __init__(self, parent: QWidget, count: int, *, holding: bool) -> None:
+        super().__init__(parent)
+        self.setObjectName("sweepCompletionDialog")
+        self.setWindowFlags(Qt.WindowType.Widget)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.surface = StationCardWidget(self.widget)
+        self.surface.setProperty("stationSurface", "dialog")
+        self.surface.lower()
+        self.title = SubtitleLabel("Sweep finished", self.widget)
+        self.setAccessibleName(self.title.text())
+        points = "measurement point" if count == 1 else "measurement points"
+        summary = f"{count} {points} saved to HDF5."
+        if holding:
+            summary += "\nThe requested final outputs remain active."
+        self.summary = BodyLabel(summary, self.widget)
+        self.summary.setWordWrap(True)
+        self.viewLayout.addWidget(self.title)
+        self.viewLayout.addWidget(self.summary)
+        self.yesButton.setText("Done")
+        self.cancelButton.setText("Open result folder")
+        parent.installEventFilter(self)
+        self._fit_parent()
+
+    def _fit_parent(self) -> None:
+        parent = self.parentWidget()
+        self.setGeometry(parent.rect())
+        self.widget.setFixedWidth(min(440, max(300, parent.width() - 2 * SPACING["lg"])))
+
+    def eventFilter(self, obj, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Resize:
+            if obj is self.parentWidget():
+                self._fit_parent()
+            elif obj is self.widget:
+                self.surface.setGeometry(self.widget.rect())
+        return super().eventFilter(obj, event)
+
+    def showEvent(self, event) -> None:
+        QDialog.showEvent(self, event)
 
 
 class RunMonitorPage(QWidget):
@@ -393,6 +441,13 @@ class RunMonitorPage(QWidget):
         self.spectrum_preview = SpectrumPlotWidget(
             legend=False, compact_toolbar=True
         )
+        self._follow_spectrum_axes = True
+        fit_axes = self.spectrum_preview.toolbar_buttons[0]
+        fit_axes.setText("Auto fit")
+        fit_axes.setAccessibleName("Auto fit spectrum axes")
+        fit_axes.setToolTip("Fit frequency and amplitude to the current spectrum and resume automatic fitting.")
+        fit_axes.clicked.connect(self._resume_spectrum_axis_fit)
+        self.spectrum_preview.plot.getViewBox().sigRangeChangedManually.connect(self._pause_spectrum_axis_fit)
         from app.ui.widgets.plot_ownership import coalesce_plot_refresh
         coalesce_plot_refresh(self.spectrum_preview.plot)
         self.spectrum_preview.setMinimumWidth(0)
@@ -406,7 +461,15 @@ class RunMonitorPage(QWidget):
             y="Amplitude",
             y_unit="dBm",
         )
-        self.spectrum_preview.set_title("Latest stored spectrum checkpoint")
+        self.spectrum_preview.set_title("Current spectrum")
+        self.spectrogram_preview = ExecutionSpectrogram()
+        self.preview_tabs = FluentTabView()
+        self.preview_tabs.addTab(self.spectrum_preview, "Spectrum")
+        self.preview_tabs.addTab(self.spectrogram_preview, "Spectrogram")
+        self.preview_tabs.setTabToolTip(1, "Raw spectra by acquisition number")
+        self.preview_tabs.currentChanged.connect(
+            lambda index: self.spectrogram_preview.set_active(index == 1)
+        )
         self.monitor_splitter = QSplitter(Qt.Orientation.Vertical)
         self.monitor_splitter.setObjectName("executionMonitorSplitter")
         self.monitor_splitter.setChildrenCollapsible(False)
@@ -419,7 +482,7 @@ class RunMonitorPage(QWidget):
         self.activity_splitter.setStretchFactor(1, 1)
         self.activity_splitter.setSizes((230, 90))
         self.monitor_splitter.addWidget(self.activity_splitter)
-        self.monitor_splitter.addWidget(self.spectrum_preview)
+        self.monitor_splitter.addWidget(self.preview_tabs)
         self.monitor_splitter.setMinimumHeight(300)
         self.monitor_splitter.setStretchFactor(0, 6)
         self.monitor_splitter.setStretchFactor(1, 5)
@@ -477,6 +540,7 @@ class RunMonitorPage(QWidget):
         self.open_result_folder_button.clicked.connect(self._open_result_folder)
         completion_layout.addWidget(self.open_result_folder_button)
         self.completion_card.hide()
+        self._completion_dialog: SweepCompletionDialog | None = None
         layout.addWidget(self.hero_card)
         layout.addWidget(self.completion_card)
         layout.addWidget(self.current_operation_card)
@@ -596,9 +660,9 @@ class RunMonitorPage(QWidget):
                 + self.activity_splitter.handleWidth()
             )
             workspace_minimum = (
-                max(activity_minimum, self.spectrum_preview.minimumHeight())
+                max(activity_minimum, self.preview_tabs.minimumSizeHint().height())
                 if orientation == Qt.Orientation.Horizontal else
-                activity_minimum + self.spectrum_preview.minimumHeight()
+                activity_minimum + self.preview_tabs.minimumSizeHint().height()
                 + self.monitor_splitter.handleWidth()
             )
             self.activity_splitter.setMinimumHeight(activity_minimum)
@@ -928,8 +992,10 @@ class RunMonitorPage(QWidget):
         semantic_tree: SemanticMeasurementTree | None = None,
         safe_shutdown_actions: tuple[str, ...] = (),
         timeline_action_offset: int = 0,
+        rigol_level_modes: dict[int, str] | None = None,
     ) -> None:
-        self.plan_timeline.set_plan(plan_actions, shutdown_actions=safe_shutdown_actions, execution_mode=execution_mode)
+        self.plan_timeline.set_plan(plan_actions, shutdown_actions=safe_shutdown_actions,
+                                    execution_mode=execution_mode, rigol_level_modes=rigol_level_modes)
         self._timeline_action_offset = timeline_action_offset
         self._preview_timer.stop()
         self._pending_spectrum_preview = None
@@ -958,6 +1024,10 @@ class RunMonitorPage(QWidget):
         self.tree_model.set_read_only(True)
         self._run_active = True
         self.completion_card.hide()
+        if self._completion_dialog is not None:
+            self._completion_dialog.hide()
+            self._completion_dialog.deleteLater()
+            self._completion_dialog = None
         self.completion_summary.clear()
         self.completion_path.clear()
         self.open_result_folder_button.setEnabled(False)
@@ -1003,6 +1073,12 @@ class RunMonitorPage(QWidget):
         self.warnings.clear()
         self.warnings.hide()
         self.spectrum_preview.clear()
+        self._spectrum_preview_identity = None
+        self._resume_spectrum_axis_fit()
+        self.spectrum_preview.set_labels(x="Frequency", x_unit="Hz", y="Power", y_unit="dBm")
+        self.spectrum_preview.set_title("Current spectrum")
+        self.preview_tabs.setCurrentIndex(0)
+        self.spectrogram_preview.set_archive(None)
         self.current_operation_phase.setText("WAITING FOR FIRST ACTION")
         self.current_operation_device.setText("Waiting for first action")
         self.current_operation_parameter.setText("No parameter selected")
@@ -1844,11 +1920,24 @@ class RunMonitorPage(QWidget):
         if self._should_append_event_log(name, data):
             self.events.appendPlainText(self._event_summary(name, data))
 
+    def _resume_spectrum_axis_fit(self) -> None:
+        self._follow_spectrum_axes = True
+
+    def _pause_spectrum_axis_fit(self, _axes: object) -> None:
+        self._follow_spectrum_axes = False
+
     def update_spectrum_preview(self, data: dict[str, object]) -> None:
         frequencies = data.get("frequency_hz")
-        processed = isinstance(data.get("processed_values"), (tuple, list))
-        powers = data.get("processed_values") if processed else data.get("power_dbm")
-        unit = str(data.get("processed_unit") or "dBm") if processed else "dBm"
+        preview_kind = str(data.get("preview_kind", "measurement"))
+        difference = data.get("raw_minus_reference_db")
+        corrected = (
+            preview_kind == "measurement"
+            and isinstance(difference, (tuple, list))
+            and isinstance(frequencies, (tuple, list))
+            and len(difference) == len(frequencies)
+        )
+        powers = difference if corrected else data.get("power_dbm")
+        unit = "dB" if corrected else "dBm"
         if not isinstance(frequencies, (tuple, list)) or not isinstance(powers, (tuple, list)):
             return
         preview_started = time.perf_counter()
@@ -1856,28 +1945,24 @@ class RunMonitorPage(QWidget):
         if len(frequencies) != source_point_count:
             return
         display_limit = max(512, self.spectrum_preview.width() * 2)
+        frequency_values = np.asarray(frequencies, dtype=float)
+        power_values = np.asarray(powers, dtype=float)
         if source_point_count > display_limit:
-            indexes = np.linspace(
-                0,
-                source_point_count - 1,
-                num=display_limit,
-                dtype=np.intp,
-            )
-            frequency_values = np.asarray(frequencies, dtype=float)[indexes]
-            power_values = np.asarray(powers, dtype=float)[indexes]
-        else:
-            frequency_values = frequencies
-            power_values = powers
-        preview_kind = str(data.get("preview_kind", "measurement"))
+            if np.isfinite(frequency_values).all() and np.isfinite(power_values).all():
+                indexes = np.asarray(peak_preserving_indices(power_values, display_limit), dtype=np.intp)
+            else:
+                indexes = np.linspace(0, source_point_count - 1, num=display_limit, dtype=np.intp)
+            frequency_values = frequency_values[indexes]
+            power_values = power_values[indexes]
         trace_label = (
             "Stored reference" if preview_kind == "reference" else "Stored spectrum"
         )
-        if processed:
-            trace_label = "Processed spectrum"
+        if corrected:
+            trace_label = "Raw − Reference"
         identity = (trace_label, unit)
         if getattr(self, "_spectrum_preview_identity", None) != identity:
             self.spectrum_preview.clear()
-            self.spectrum_preview.set_labels(x="Frequency", x_unit="Hz", y="Processed amplitude" if processed else "Amplitude", y_unit=unit)
+            self.spectrum_preview.set_labels(x="Frequency", x_unit="Hz", y="Relative power" if corrected else "Power", y_unit=unit)
             self._spectrum_preview_identity = identity
         self.spectrum_preview.set_trace(
             trace_label,
@@ -1885,10 +1970,12 @@ class RunMonitorPage(QWidget):
             power_values,
             primary=True,
         )
+        if self._follow_spectrum_axes:
+            self.spectrum_preview.auto_range()
         title = (
             "Stored reference"
             if preview_kind == "reference"
-            else f"Stored point {data.get('point_index', '—')}"
+            else f"{trace_label if corrected else 'Current spectrum'} · Point {data.get('point_index', '—')}"
         )
         self.spectrum_preview.set_title(
             title + f" • {data.get('source_points', source_point_count)} source values"
@@ -1924,7 +2011,7 @@ class RunMonitorPage(QWidget):
             )
         return " • ".join(rendered)
 
-    def complete(self, result: object) -> None:
+    def complete(self, result: object, *, dialog_parent: QWidget | None = None) -> None:
         self._run_active = False
         self._preview_timer.stop()
         self._flush_spectrum_preview()
@@ -1940,6 +2027,7 @@ class RunMonitorPage(QWidget):
         self.resume_button.setEnabled(False)
         run_result = result["result"]
         self._stored_points = int(getattr(run_result, "stored_points", self._stored_points))
+        self.spectrogram_preview.set_stored_points(self._stored_points)
         state = run_result.state.value.upper()
         if run_result.error and state == "SAFE":
             state = "STOPPED SAFELY"
@@ -1970,6 +2058,14 @@ class RunMonitorPage(QWidget):
         self.state.setText(f"{state} • {run_result.stored_points} points")
         self._set_current_operation_state("COMPLETE" if completed else state)
         self.events.appendPlainText(f"File: {result['path']}")
+        if completed and not safe_state_unconfirmed and self._completion_dialog is None:
+            dialog = SweepCompletionDialog(dialog_parent or self, self._stored_points, holding=holding)
+            dialog.cancelButton.setEnabled(self.open_result_folder_button.isEnabled())
+            dialog.cancelButton.clicked.connect(self._open_result_folder)
+            self._completion_dialog = dialog
+            dialog.show()
+            dialog.raise_()
+            dialog.yesButton.setFocus()
 
     def failed(self, error: str) -> None:
         self._run_active = False

@@ -81,6 +81,57 @@ def quantize_rigol_frequency(frequency_hz: float) -> float:
     )
 
 
+def quantize_rigol_level_pair(high_level_v: float, low_level_v: float, *, waveform: str) -> tuple[float, float]:
+    """Represent the canonical DC level or Vpp/offset controls on the wire.
+
+    HighL/LowL are derived views for AC. Rounding them independently changes
+    odd Vpp steps and can merge two otherwise distinct sweep points.
+    """
+    if waveform.upper() == "DC":
+        level_v = quantize_rigol_voltage(high_level_v)
+        return level_v, level_v
+    amplitude_vpp_v = quantize_rigol_voltage(high_level_v - low_level_v)
+    offset_v = quantize_rigol_voltage((high_level_v + low_level_v) / 2)
+    return offset_v + amplitude_vpp_v / 2, offset_v - amplitude_vpp_v / 2
+
+
+def rigol_level_update_control(before_high: float, before_low: float, high: float, low: float, *, waveform: str) -> str:
+    """Identify the single SCPI control, or a two-control OFF-only transaction."""
+    if waveform.upper() == 'DC':
+        return 'offset'
+    same = lambda a, b: abs(a - b) <= max(abs(b) * 1e-8, 1e-12)
+    high_changed, low_changed = not same(high, before_high), not same(low, before_low)
+    if high_changed and not low_changed:
+        return 'high_level'
+    if low_changed and not high_changed:
+        return 'low_level'
+    if not high_changed and not low_changed:
+        return 'unchanged'
+    if same((high + low) / 2, (before_high + before_low) / 2):
+        return 'amplitude'
+    if same(high - low, before_high - before_low):
+        return 'offset'
+    return 'both'
+
+
+def quantize_rigol_level_update(before_high: float, before_low: float, high: float, low: float, *, waveform: str) -> tuple[float, float]:
+    """Predict a validated update, rounding only the control actually written."""
+    control = rigol_level_update_control(before_high, before_low, high, low, waveform=waveform)
+    if waveform.upper() == 'DC' or control == 'both':
+        return quantize_rigol_level_pair(high, low, waveform=waveform)
+    if control == 'high_level':
+        return quantize_rigol_voltage(high), before_low
+    if control == 'low_level':
+        return before_high, quantize_rigol_voltage(low)
+    if control == 'amplitude':
+        amplitude, offset = quantize_rigol_voltage(high - low), (before_high + before_low) / 2
+        return offset + amplitude / 2, offset - amplitude / 2
+    if control == 'offset':
+        amplitude, offset = before_high - before_low, quantize_rigol_voltage((high + low) / 2)
+        return offset + amplitude / 2, offset - amplitude / 2
+    return before_high, before_low
+
+
 def rigol_hardware_frequency_max_hz(waveform: str | None = None) -> float:
     """Return the immutable DG1032Z ceiling used by UI and safety layers."""
 

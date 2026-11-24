@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, TextIO
 if TYPE_CHECKING:
     from numpy.typing import ArrayLike
 
+    from .saved_spectrum_view import SavedSpectrumView
+
 from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
 from app.domain.errors import ExecutionError
 from app.domain.models import MeasurementPoint
@@ -543,6 +545,11 @@ class Hdf5RunWriter:
             raise ExecutionError("Reference requires every selected raw recipe source to be committed.")
         source_block_identity = None
         acquisition_metadata = dict(acquisition_metadata or {})
+        source_spectra_stored = acquisition_metadata.get("source_spectra_stored")
+        if "source_spectra_stored" in acquisition_metadata and (
+            type(source_spectra_stored) is not bool or source_spectra_stored != bool(source_sweep_indices)
+        ):
+            raise ExecutionError("Reference source retention metadata does not match the committed links.")
         purpose = acquisition_metadata.get("purpose", "reference")
         duration = acquisition_metadata.get("minimum_duration_s", 0.0)
         if not isinstance(purpose, str) or purpose not in {"reference", "background"} or type(duration) not in (int, float) or not 0 <= duration <= 3600:
@@ -552,7 +559,7 @@ class Hdf5RunWriter:
             minimum_sweeps = acquisition_metadata.get("requested_minimum_sweeps")
             if (type(elapsed) not in (int, float) or not duration <= elapsed < float("inf")
                     or type(minimum_sweeps) is not int or not 1 <= minimum_sweeps <= average_count
-                    or not source_sweep_indices):
+                    or not source_sweep_indices and source_spectra_stored is not False):
                 raise ExecutionError("Timed reference lacks evidence of its duration or minimum sweep count.")
         encoded_acquisition = json.dumps(acquisition_metadata, allow_nan=False, sort_keys=True)
         if len(encoded_acquisition.encode("utf-8")) > 65536:
@@ -788,6 +795,7 @@ class Hdf5RunWriter:
         device_states: dict[str, object] | None = None,
         acquisition_envelope: SpectrumFrameEnvelope | None = None,
         corrected_frame: CorrectedSpectrumFrame | None = None,
+        saved_display: SavedSpectrumView | None = None,
     ) -> int:
         self._require_writable()
         index = self._point_count
@@ -805,9 +813,13 @@ class Hdf5RunWriter:
 
         # Other processes can consume the volume after preflight. Check before
         # the pending transaction, allowing space for public and private data.
-        require_storage_capacity(self.path, (len(trace.frequencies_hz) * 64 if trace is not None else 0) + 256 * 1024)
+        display_bytes = sum(len(curve.frequencies_hz) * 16 for curve in saved_display.traces) if saved_display else 0
+        require_storage_capacity(self.path, (len(trace.frequencies_hz) * 64 if trace is not None else 0)
+                                 + 256 * 1024 + display_bytes)
         if acquisition_envelope is not None and trace is None:
             raise ExecutionError("An acquisition envelope requires a raw spectrum.")
+        if saved_display is not None and trace is None:
+            raise ExecutionError("A saved spectrum view requires a stored spectrum.")
         if corrected_frame is not None:
             if trace is None or acquisition_envelope is None:
                 raise ExecutionError("A correction result requires raw and its acquisition envelope.")
@@ -882,6 +894,11 @@ class Hdf5RunWriter:
                     from .spectrum_correction_codec import write_corrected
 
                     write_corrected(spectrum.create_group("correction_v1"), corrected_frame)
+                if saved_display is not None:
+                    from .saved_spectrum_view import write_saved_spectrum_view
+
+                    write_saved_spectrum_view(
+                        spectrum.create_group("saved_display_v1"), saved_display, _spectrum_compression)
                 reference_index = point.metadata.get("reference_index")
                 if reference_index is not None:
                     reference_index = int(reference_index)

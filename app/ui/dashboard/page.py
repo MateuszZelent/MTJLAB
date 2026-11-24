@@ -19,7 +19,9 @@ from app.contracts import DeviceModuleRegistry
 from app.devices.discovery import (
     DiscoveredInstrument,
     DiscoveredTcpEndpoint,
+    MOKE_DEFAULT_TCP_PORT,
     detect_local_ipv4_address,
+    parse_moke_ipv4_endpoint,
     suggested_scan_cidr,
 )
 from app.devices.moke_box.protocol import readback_vout
@@ -258,8 +260,8 @@ class StationDashboardController(QObject):
         # remain opaque text.
         self.tcp_network.setProperty("precisionArrowStepping", False)
         self.tcp_network.setText(self._moke_network_default(settings))
-        self.tcp_network.setPlaceholderText("192.168.1.0/24 or start IP")
-        self.tcp_network.setAccessibleName("Network CIDR or first IP for TCP port scan")
+        self.tcp_network.setPlaceholderText("CIDR, IP or IP:port")
+        self.tcp_network.setAccessibleName("Network, IP address or MOKE Box endpoint")
         self.tcp_network.setMaximumWidth(170)
         self.tcp_range_end = LineEdit(self.tcp_discovery_page)
         self.tcp_range_end.setProperty("precisionArrowStepping", False)
@@ -268,7 +270,7 @@ class StationDashboardController(QObject):
         self.tcp_range_end.setMaximumWidth(135)
         self.tcp_port = SpinBox(self.tcp_discovery_page)
         self.tcp_port.setRange(1, 65_535)
-        self.tcp_port.setValue(10_001)
+        self.tcp_port.setValue(MOKE_DEFAULT_TCP_PORT)
         self.tcp_port.setAccessibleName("TCP port for MOKE Box discovery")
         self.tcp_timeout_ms = SpinBox(self.tcp_discovery_page)
         self.tcp_timeout_ms.setRange(50, 2_000)
@@ -285,9 +287,9 @@ class StationDashboardController(QObject):
         self.tcp_identify_button.setToolTip(
             "Test only the selected open endpoint and show the raw MOKE TX/RX exchange."
         )
-        self.tcp_test_entered_button = PushButton("Test entered IP")
+        self.tcp_test_entered_button = PushButton("Test address")
         self.tcp_test_entered_button.setToolTip(
-            "Test the single IPv4 address entered in CIDR / IP / from without scanning a subnet."
+            "Test a single IPv4 address or paste an IPv4:port endpoint. An IP alone uses the Port field."
         )
         self.tcp_assign_moke_button = PrimaryPushButton("Assign MOKE Box")
         self.tcp_assign_moke_button.setEnabled(False)
@@ -305,7 +307,7 @@ class StationDashboardController(QObject):
         self.tcp_controls = QGridLayout()
         self.tcp_controls.setHorizontalSpacing(8)
         self.tcp_controls.setVerticalSpacing(8)
-        self.tcp_network_label = BodyLabel("CIDR / IP / from", self.tcp_discovery_page)
+        self.tcp_network_label = BodyLabel("CIDR / IP / endpoint", self.tcp_discovery_page)
         self.tcp_range_label = BodyLabel("To", self.tcp_discovery_page)
         self.tcp_port_label = BodyLabel("Port", self.tcp_discovery_page)
         self.tcp_timeout_label = BodyLabel("Timeout", self.tcp_discovery_page)
@@ -315,7 +317,7 @@ class StationDashboardController(QObject):
         # minimum page width before the Fluent host receives its geometry.
         self._layout_tcp_controls(compact=True)
         self.tcp_discovery_info = CaptionLabel(
-            "No TCP/IP scan performed. The reconstructed MOKE Box protocol uses TCP port 10001.",
+            "If you know the MOKE Box address, paste IP:port and select Test address.",
             self.tcp_discovery_page,
         )
         self.tcp_discovery_info.setWordWrap(True)
@@ -363,6 +365,7 @@ class StationDashboardController(QObject):
         self.tcp_stop_button.clicked.connect(self._stop_tcp_scan)
         self.tcp_identify_button.clicked.connect(self._identify_selected_moke)
         self.tcp_test_entered_button.clicked.connect(self._test_entered_moke_ip)
+        self.tcp_network.returnPressed.connect(self.tcp_test_entered_button.click)
         self.tcp_assign_moke_button.clicked.connect(self._assign_selected_moke)
         self.save_assignments.clicked.connect(self._emit_assignments)
         if not discovery_enabled:
@@ -828,6 +831,8 @@ class StationDashboardController(QObject):
         self._identifying_port = port
         self.tcp_identify_button.setEnabled(False)
         self.tcp_test_entered_button.setEnabled(False)
+        self.tcp_scan_button.setEnabled(False)
+        self.tcp_assign_moke_button.setEnabled(False)
         self.tcp_results.upsert_endpoint(
             host=host,
             endpoint=endpoint,
@@ -844,24 +849,18 @@ class StationDashboardController(QObject):
 
     def _moke_identification_finished(self) -> None:
         self.tcp_test_entered_button.setEnabled(self._discovery_enabled)
+        self.tcp_scan_button.setEnabled(self._discovery_enabled)
         self._update_tcp_identify_enabled()
 
     def _test_entered_moke_ip(self) -> None:
-        value = self.tcp_network.text().strip()
         try:
-            if "/" in value:
-                network = ipaddress.ip_network(value, strict=False)
-                if network.prefixlen != 32:
-                    raise ValueError("enter one IP address or a /32 network")
-                host = str(network.network_address)
-            else:
-                host = str(ipaddress.IPv4Address(value))
+            host, port = parse_moke_ipv4_endpoint(self.tcp_network.text(), self.tcp_port.value())
         except ValueError as exc:
-            self.tcp_discovery_info.setText(f"Cannot test entered MOKE IP: {exc}.")
+            self.tcp_discovery_info.setText(f"Cannot test MOKE address. {exc}")
             return
         self.tcp_results.upsert_endpoint(
             host=host,
-            endpoint=f"{host}:{self.tcp_port.value()}",
+            endpoint=f"{host}:{port}",
             state="entered",
             verification="Pending test",
         )
@@ -871,10 +870,11 @@ class StationDashboardController(QObject):
     def _moke_identification_completed(self, payload: object) -> None:
         if not isinstance(payload, DiscoveredTcpEndpoint):
             return
-        self._tcp_host_activity(
-            payload.host,
-            "open",
-            "MOKE Box verified" if payload.moke_verified else payload.verification_detail or "Not MOKE",
+        self.tcp_results.upsert_endpoint(
+            host=payload.host,
+            endpoint=payload.endpoint,
+            state="open",
+            verification="MOKE Box verified" if payload.moke_verified else payload.verification_detail or "Not MOKE",
         )
         self.status.emit(f"MOKE identification completed: {payload.endpoint}")
         self._update_tcp_identify_enabled()
@@ -887,15 +887,15 @@ class StationDashboardController(QObject):
         )
 
     def _moke_identification_failed(self, error: str) -> None:
-        if self._identifying_host is not None:
-            self._tcp_host_activity(self._identifying_host, "closed", f"Test failed: {error}")
+        endpoint = "unknown endpoint"
+        if self._identifying_host is not None and self._identifying_port is not None:
+            endpoint = f"{self._identifying_host}:{self._identifying_port}"
+            self.tcp_results.upsert_endpoint(
+                host=self._identifying_host, endpoint=endpoint, state="closed",
+                verification=f"Test failed: {error}",
+            )
         self.status.emit(f"MOKE identification failed: {error}")
         self._update_tcp_identify_enabled()
-        endpoint = (
-            f"{self._identifying_host}:{self._identifying_port}"
-            if self._identifying_host is not None and self._identifying_port is not None
-            else "unknown endpoint"
-        )
         self._show_moke_test_trace(endpoint, False, error, readback_vout(), b"")
 
     @staticmethod

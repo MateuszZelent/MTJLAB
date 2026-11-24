@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import math
-from pathlib import Path
 import shutil
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
 
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_FREQUENCY, DIMENSION_TIME, parse_quantity
@@ -104,7 +105,7 @@ class PlanEstimator:
         policy = ExecutionPolicy.from_settings(self._settings)
         operation_deadline_budget = 0.0
         retry_deadline_budget = 0.0
-        warnings: list[str] = []
+        warnings: Counter[str] = Counter()
         for action in plan.actions:
             # Full MOKE trajectories are recorded once. Subsequent device
             # snapshots contain only the bounded current voltage/profile.
@@ -146,31 +147,61 @@ class PlanEstimator:
                     # and a JSON sidecar; raw frames remain in the main archive.
                     baseline_companion_bytes += 4 * latest_spectrum_points * 8 + 1024 * 1024
                 if not spectrum_points_known and not unknown_points_reported:
-                    warnings.append(
+                    warnings[
                         f"Analyzer point count is not established by the plan; "
                         f"storage and transfer estimates reserve {latest_spectrum_points} points per spectrum."
-                    )
+                    ] += 1
                     unknown_points_reported = True
+                block_id = action.source_node_id or action.node_id
                 if action.payload.get("source_file"):
                     spectrum_extra_bytes += 8 * latest_spectrum_points * 8 + 16384
-                    warnings.append(f"{action.node_id}: loads a verified file; no reference sweeps are acquired.")
+                    warnings[f"{block_id}: loads a verified file; no reference sweeps are acquired."] += 1
                     continue
                 average_count = int(action.payload.get("average_count", 1))
-                nominal += average_count * sum(
+                instrument_count = action.payload.get("instrument_average_count")
+                instrument_duration = action.payload.get("instrument_average_duration_s")
+                instrument_average = instrument_count is not None or instrument_duration is not None
+                safety_samples = 2 if instrument_average else average_count
+                nominal += safety_samples * sum(
                     self._command_overhead_s + 2 * nplc_by_channel.get(channel, 1) / self._line_frequency_hz
                     for channel in active_smu_channels
                 )
                 delay_budget = max(0, average_count - 1) * float(action.payload.get("inter_sweep_delay_s", 0.0))
                 nominal += delay_budget
+                if instrument_count is not None:
+                    configured_duration = action.payload.get("instrument_average_nominal_duration_s")
+                    timing_note = (
+                        f"about {configured_duration:g} s at the configured sweep time"
+                        if configured_duration is not None else "actual duration depends on analyzer sweep time"
+                    )
+                    nominal += (
+                        configured_duration if configured_duration is not None else instrument_count * self._spectrum_base_s
+                    )
+                    warnings[
+                        f"{block_id} averages {instrument_count} sweeps on the analyzer and reads one mean spectrum "
+                        f"({timing_note})."
+                    ] += 1
+                elif instrument_duration is not None:
+                    nominal += instrument_duration
+                    warnings[f"{block_id}: targets {instrument_duration:g} s in the analyzer and reads one mean spectrum."] += 1
+                else:
+                    nominal += average_count * self._spectrum_base_s
                 minimum_duration = float(action.payload.get("minimum_duration_s", 0.0))
                 sources_per_attempt = 9999 if minimum_duration else average_count
                 # A failed final identity readback can leave every raw frame
                 # committed. Retrying starts a new block without removing it.
                 attempts = 1 + policy.retry_count
-                storage_count = sources_per_attempt * attempts
+                store_sources = action.payload.get("store_source_spectra", True)
+                storage_count = sources_per_attempt * attempts if store_sources else 0
                 if minimum_duration:
                     nominal += minimum_duration
-                    warnings.append(f"{action.node_id}: collects for at least {minimum_duration:g} s and {average_count} sweeps; storage reserves up to {storage_count} raw sweeps across {attempts} attempts.")
+                    storage_note = (
+                        f"storage reserves up to {storage_count} raw sweeps across {attempts} attempts"
+                        if store_sources else "stores the mean"
+                    )
+                    warnings[
+                        f"{block_id}: collects for at least {minimum_duration:g} s and {average_count} sweeps; {storage_note}."
+                    ] += 1
                 # Each individual raw source is durable in addition to the
                 # public averaged spectrum/reference representation.
                 spectrum_values += storage_count * latest_spectrum_points
@@ -179,10 +210,7 @@ class PlanEstimator:
                 spectrum_extra_bytes += storage_count * (
                     latest_spectrum_points * 8 + MAX_RECIPE_SWEEP_JSON_BYTES + 8192
                 )
-                nominal += average_count * (
-                    self._spectrum_base_s
-                    + latest_spectrum_points / self._transfer_rate
-                )
+                nominal += average_count * latest_spectrum_points / self._transfer_rate
                 if action.kind == "acquire_spectrum":
                     public_spectrum_values += latest_spectrum_points
                     spectrum_values += latest_spectrum_points
@@ -194,11 +222,9 @@ class PlanEstimator:
                         spectrum_extra_bytes += latest_spectrum_points * 8
                 else:
                     # A reference mean retains its own Hz and dBm arrays.
-                    spectrum_extra_bytes += 2 * latest_spectrum_points * 8 + sources_per_attempt * 8
+                    spectrum_extra_bytes += 2 * latest_spectrum_points * 8 + (sources_per_attempt * 8 if store_sources else 0)
                 if average_count > 1:
-                    warnings.append(
-                        f"{action.node_id}: averages {average_count} complete spectra."
-                    )
+                    warnings[f"{block_id}: averages {average_count} complete spectra."] += 1
             elif action.kind == "ramp_keithley_to_zero":
                 nominal += min(float(action.payload["deadline_s"]), 1.0)
             elif action.kind in {"update_moke_voltage", "stop_moke_voltage"}:
@@ -237,13 +263,13 @@ class PlanEstimator:
             hdf5_bytes += latest_spectrum_points * 8
         csv_bytes = plan.total_points * (8192 + 1024 * largest_setpoints) if self._settings.storage.get("write_csv_summary") else 0
         if energized:
-            warnings.append("The plan contains OUTPUT ON or MOKE DAC update actions and requires explicit DUT and cabling review.")
+            warnings["The plan contains OUTPUT ON or MOKE DAC update actions and requires explicit DUT and cabling review."] += 1
         if plan.total_points == 0:
-            warnings.append("The plan stores no checkpoints.")
+            warnings["The plan stores no checkpoints."] += 1
         if plan.total_points >= 2_000:
-            warnings.append("Large run: qualify duration and available disk space before OUTPUT ON.")
+            warnings["Large run: qualify duration and available disk space before OUTPUT ON."] += 1
         if plan.total_spectra and spectrum_values == 0:
-            warnings.append("Spectrum size could not be estimated from the configuration sequence.")
+            warnings["Spectrum size could not be estimated from the configuration sequence."] += 1
         from app.storage.resource_budget import IMPORT_BASE_BYTES, IMPORT_WORKING_COPY_FACTOR
         public_import_upper = IMPORT_BASE_BYTES + IMPORT_WORKING_COPY_FACTOR * (
             public_spectrum_values * 8 + plan.total_points * (64 + 8 * largest_setpoints) * 16
@@ -256,7 +282,10 @@ class PlanEstimator:
             checkpoints=plan.total_points,
             spectra=plan.total_spectra,
             spectrum_values=spectrum_values,
-            warnings=tuple(warnings),
+            warnings=tuple(
+                message if count == 1 else f"{message} ({count:,} plan actions)"
+                for message, count in warnings.items()
+            ),
             public_import_upper_bytes=public_import_upper,
             companion_bytes=(baseline_companion_bytes
                 + (len(plan.actions) * events_per_action + 32) * (snapshot_budget + 4096)

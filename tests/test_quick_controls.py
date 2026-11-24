@@ -407,6 +407,28 @@ class QuickControlTests(unittest.TestCase):
             0.201,
         )
 
+    def test_old_rigol_snapshot_cannot_overwrite_coupled_fields_during_next_edit(self) -> None:
+        parent = QWidget()
+        rigol = _FakeController()
+        coordinator = QuickControlCoordinator(
+            {"rigol": rigol, "keithley": _FakeController()}, parent
+        )
+        seen = []
+        coordinator.value_read.connect(lambda target, _value: seen.append(target))
+        coordinator.submit("rigol.1.offset", "2 mV")
+        rigol.result.emit("quick_setpoint", .002)
+        seen.clear()
+        coordinator.submit("rigol.1.offset", "3 mV")
+        rigol.result.emit("quick_readback", {
+            "rigol.1.offset": .002, "rigol.1.high_level": .003,
+            "rigol.1.low_level": .001, "rigol.1.amplitude": .002,
+            "rigol.2.offset": .004,
+        })
+        self.assertEqual(seen, ["rigol.2.offset"])
+        rigol.result.emit("quick_setpoint", .003)
+        rigol.result.emit("quick_readback", {"rigol.1.high_level": .004})
+        self.assertIn("rigol.1.high_level", seen)
+
     def test_estop_cancels_pending_value_without_dispatching_it(self) -> None:
         parent = QWidget()
         rigol = _FakeController()

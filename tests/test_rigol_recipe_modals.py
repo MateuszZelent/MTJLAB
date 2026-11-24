@@ -7,10 +7,12 @@ import pytest
 from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication, QDialog
 
+from app.devices.registry import built_in_device_registry
 from app.devices.rigol_dg1000z.ui.page import RigolConfigurationSnapshot
 from app.devices.rigol_dg1000z.ui.recipe_dialog import RigolNodeEditorDialog
 from app.domain.quantities import parse_quantity
 from app.recipes import RecipeNode, parse_recipe_text
+from app.recipes.semantic_tree import normalize_recipe_tree
 from app.settings import SettingsRepository
 from app.ui.design_system import apply_application_theme
 from app.ui.recipes.page import RecipePage
@@ -26,6 +28,13 @@ def app():
 
 def contains_widget(host, widget):
     return host.rect().contains(widget.rect().translated(widget.mapTo(host, QPoint())))
+
+
+def test_waveform_and_output_steps_have_distinct_tree_labels():
+    recipe = parse_recipe_text(RECIPE.read_text(encoding="utf-8"))
+    tree = normalize_recipe_tree(recipe, built_in_device_registry().sweep_providers())
+    assert "waveform" in tree.by_id["rigol-dc-initial"].label.lower()
+    assert "output and sync" in tree.by_id["rigol-output-path-initial"].label.lower()
 
 
 @pytest.mark.parametrize("theme,width,height", [("light", 1040, 820), ("dark", 1040, 820), ("light", 760, 740), ("dark", 760, 740)])
@@ -91,6 +100,11 @@ def test_output_editor_renders_both_sections_and_preserves_recipe(app, tmp_path,
             assert contains_widget(dialog.controls_scroll.viewport(), widget)
             assert widget.width() >= 100
         ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        dialog.controls_scroll.ensureWidgetVisible(dialog.review.table)
+        app.processEvents()
+        assert dialog.review.table.height() >= 120
+        assert contains_widget(dialog.controls_scroll.viewport(), dialog.review.table)
+        assert dialog.grab().save(str(ARTIFACTS / f"output-review-{theme}-{width}.png"))
         for key in ("sync_delay", "output_load"):
             dialog.controls_scroll.ensureWidgetVisible(dialog._editors[key][0])
             app.processEvents()
@@ -131,6 +145,64 @@ def test_partial_output_editor_keeps_omitted_fields_and_validates_units(app):
         dialog.accept()
         assert dialog.result() == QDialog.DialogCode.Accepted
         assert dialog.node_fields() == {"channel": 1, "sync_delay": "1 ms"}
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize("key,value", [
+    ("channel", 3), ("mode", "unknown"), ("sync_enabled", "yes"),
+    ("sync_delay", "-1 ms"), ("sync_delay", "11 s"),
+    ("output_load", "0"), ("output_load", "nan"),
+])
+def test_output_editor_preserves_invalid_value_for_correction(app, key, value):
+    from app.devices.rigol_dg1000z.ui.output_recipe_dialog import RigolOutputNodeEditorDialog
+
+    node = RecipeNode("invalid-output", "configure_rigol_output", {"channel": 1, key: value})
+    dialog = RigolOutputNodeEditorDialog(node)
+    try:
+        assert dialog.node_fields() == node.data
+        dialog.accept()
+        assert dialog.result() != QDialog.DialogCode.Accepted
+        assert dialog.validation_message.text()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize("channel", [True, 1.0])
+def test_output_channel_correction_keeps_integer_identity(app, channel):
+    from app.devices.rigol_dg1000z.ui.output_recipe_dialog import RigolOutputNodeEditorDialog
+
+    node = RecipeNode("channel", "configure_rigol_output", {"channel": channel})
+    dialog = RigolOutputNodeEditorDialog(node)
+    try:
+        dialog._editors["channel"][0].setCurrentIndex(0)
+        fields = dialog.node_fields()
+        assert type(fields["channel"]) is int and fields["channel"] == 1
+        dialog.accept()
+        assert dialog.result() == QDialog.DialogCode.Accepted
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        app.processEvents()
+
+
+def test_invalid_sync_value_can_be_corrected_with_boolean_choice(app):
+    from app.devices.rigol_dg1000z.ui.output_recipe_dialog import RigolOutputNodeEditorDialog
+
+    node = RecipeNode("bad-sync", "configure_rigol_output", {"channel": 1, "sync_enabled": "yes"})
+    dialog = RigolOutputNodeEditorDialog(node)
+    try:
+        editor, kind = dialog._editors["sync_enabled"]
+        assert kind == "choice"
+        assert dialog.node_fields()["sync_enabled"] == "yes"
+        editor.setCurrentIndex(editor.findData(False))
+        dialog.accept()
+        assert dialog.result() == QDialog.DialogCode.Accepted
+        assert dialog.node_fields()["sync_enabled"] is False
     finally:
         dialog.close()
         dialog.deleteLater()

@@ -66,6 +66,8 @@ def _validate(values, x, y, checkpoints, metadata):
 
 def write_heatmap_analysis(path, values, x_values, y_values, checkpoints, metadata, *, x_edges=None, y_edges=None):
     """Exclusive, compressed snapshot with units, original checkpoint IDs and gaps."""
+    from .filesystem_paths import native_path
+
     path = Path(path)
     values, x, y = (np.asarray(item, dtype=float) for item in (values, x_values, y_values))
     checkpoints = np.asarray(checkpoints)
@@ -75,6 +77,7 @@ def write_heatmap_analysis(path, values, x_values, y_values, checkpoints, metada
     source = metadata.get("source_file")
     if source and path.resolve() == Path(source).resolve():
         raise ValueError("The source measurement archive is read-only.")
+    path = native_path(path)
     encoded = json.dumps(metadata, ensure_ascii=False, allow_nan=False, sort_keys=True)
     created = False
     try:
@@ -103,7 +106,9 @@ def write_heatmap_analysis(path, values, x_values, y_values, checkpoints, metada
 
 def read_heatmap_analysis(path):
     """Return None for measurement archives; reject incomplete derived snapshots."""
-    with h5py.File(path, "r") as file:
+    from .filesystem_paths import native_path
+
+    with h5py.File(native_path(path), "r") as file:
         if file.attrs.get("schema") != SCHEMA:
             return None
         if file.attrs.get("status") != "completed":

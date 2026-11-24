@@ -512,6 +512,10 @@ class SweepTreePanel(QWidget):
                 )
             spectrum_items: list[QTreeWidgetItem] = []
             if point.has_spectrum:
+                if point.metadata.get("saved_display_v1"):
+                    saved_item = QTreeWidgetItem(["As saved on Anritsu", "Saved spectrum view"])
+                    saved_item.setData(0, Qt.ItemDataRole.UserRole, (point, "saved_view"))
+                    spectrum_items.append(saved_item)
                 raw_item = QTreeWidgetItem(["Raw spectrum", "private /spectra"])
                 raw_item.setData(
                     0,

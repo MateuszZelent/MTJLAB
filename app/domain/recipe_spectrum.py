@@ -38,8 +38,16 @@ class RecipeSpectrumSweep:
     # Timed blocks have no final count until collection finishes. Each raw
     # source is committed immediately, retaining an explicit unknown count.
     minimum_duration_s: float = 0.0
+    acquisition_mode: str = "single_sweep"
 
     def __post_init__(self):
+        if self.acquisition_mode not in {"single_sweep", "continuous_live"}:
+            raise ValueError("Unsupported recipe spectrum acquisition mode.")
+        if self.acquisition_mode == "continuous_live" and (
+            self.role not in (SpectrumFrameRole.SIGNAL, SpectrumFrameRole.REFERENCE)
+            or self.evidence != SweepEvidence.UNKNOWN or self.sweep_id is not None
+        ):
+            raise ValueError("Live recipe frames require a signal or reference role and passive readout provenance.")
         if type(self.inter_sweep_delay_s) not in (float, int) or not math.isfinite(self.inter_sweep_delay_s) or not 0 <= self.inter_sweep_delay_s <= 3600:
             raise ValueError("Recipe sweep delay must be finite and in 0..3600 s.")
         frequencies = immutable_vector(self.frequencies_hz, name="recipe frequencies_hz", nonnegative=True)

@@ -13,10 +13,15 @@ from qfluentwidgets import (
     CheckBox,
     ComboBox,
     FlowLayout,
+    FluentIcon,
     LineEdit,
+    PlainTextEdit,
     PrimaryPushButton,
     PushButton,
+    SpinBox,
     StrongBodyLabel,
+    SwitchButton,
+    TransparentToolButton,
 )
 
 from app.domain.quantities import (
@@ -29,7 +34,182 @@ from app.domain.quantities import (
     parse_quantity,
 )
 from app.spectrum.processing import REFERENCE_OPERATIONS
+from app.spectrum.stripe_correction import (
+    AutomaticStripeSettings,
+    FrequencyBand,
+    StripeBands,
+    parse_frequency_bands,
+)
 from app.ui.dialogs import StationDialog
+
+
+class AveragingTargetControls(QWidget):
+    """Choose an averaging length by count or by seconds."""
+
+    def __init__(self, parent=None, *, initial_frames=200, allow_instrument=False):
+        super().__init__(parent)
+        layout = QGridLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.backend = ComboBox(self)
+        self.backend.setAccessibleName("Averaging source")
+        self.backend.addItem("PyLab Live", userData="application")
+        if allow_instrument:
+            self.backend.addItem("Anritsu · Lin Average", userData="instrument")
+            layout.addWidget(self.backend, 0, 0, 1, 2)
+        else:
+            self.backend.hide()
+        self.mode = ComboBox(self)
+        self.mode.setAccessibleName("Averaging target mode")
+        self.mode.addItem("Frames", userData="frames")
+        self.mode.addItem("Seconds", userData="seconds")
+        self.frames = SpinBox(self)
+        self.frames.setAccessibleName("Averaging frame count")
+        self.frames.setRange(1, 2_147_483_647)
+        self.frames.setValue(initial_frames)
+        self.seconds = SpinBox(self)
+        self.seconds.setAccessibleName("Averaging duration in seconds")
+        self.seconds.setRange(1, 2_147_483)  # QTimer takes signed 32-bit milliseconds.
+        self.seconds.setValue(60)
+        self.seconds.setSuffix(" s")
+        layout.addWidget(self.mode, 1, 0)
+        layout.addWidget(self.frames, 1, 1)
+        layout.addWidget(self.seconds, 1, 1)
+        layout.setColumnStretch(1, 1)
+        self.mode.currentIndexChanged.connect(self._sync_mode)
+        self.backend.currentIndexChanged.connect(self._sync_mode)
+        self._sync_mode()
+
+    def _sync_mode(self):
+        timed = self.mode.currentData() == "seconds"
+        instrument = self.backend.currentData() == "instrument"
+        self.frames.setRange(2, 9999) if instrument else self.frames.setRange(1, 2_147_483_647)
+        self.frames.setToolTip("Complete sweeps per block" if instrument else "Live frames per average")
+        self.seconds.setToolTip("Target based on the analyzer's nominal sweep time" if instrument else "Time window in seconds")
+        self.frames.setVisible(not timed)
+        self.seconds.setVisible(timed)
+
+    def target(self) -> tuple[int, int | None]:
+        if self.mode.currentData() == "seconds":
+            return 0, self.seconds.value()
+        return self.frames.value(), None
+
+
+class StripeSwitch(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        self.toggle = SwitchButton(self)
+        self.toggle.setOffText("Stripes")
+        self.toggle.setOnText("Stripes")
+        self.toggle.setAccessibleName("Enable Live stripe correction")
+        self.toggle.indicator.setAccessibleName("Enable Live stripe correction")
+        self.toggle.setToolTip("Detect and reduce narrow lines from a matching recorded background.")
+        row.addWidget(self.toggle)
+        self.settings = TransparentToolButton(FluentIcon.SETTING, self)
+        self.settings.setAccessibleName("Open Stripes settings")
+        self.settings.setToolTip("Stripes settings")
+        row.addWidget(self.settings)
+
+
+class StripeCorrectionControls(QWidget):
+    """Inspect automatic Stripes and configure optional manual bands."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        description = CaptionLabel(
+            "Automatic Stripes uses a matching background recorded with the signal of interest absent. "
+            "With Subtract [dB], Corrected matches stripe levels to the reference. "
+            "Reconstruct bands estimates the trace in stripe bands from neighbouring frequencies, including fluctuating lines. "
+            "Mask bands shows gaps at stripe frequencies and respects protected bands.", self)
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        grid = QGridLayout()
+        self.mode = ComboBox(self)
+        self.mode.addItem("Automatic from background", userData="automatic")
+        self.mode.addItem("Manual bands", userData="manual")
+        self.bands = PlainTextEdit(self)
+        self.bands.setPlaceholderText("799.7 MHz .. 823.3 MHz")
+        self.bands.setFixedHeight(74)
+        self.protected = PlainTextEdit(self)
+        self.protected.setPlaceholderText("Optional")
+        self.protected.setFixedHeight(57)
+        self.shoulder = LineEdit(self)
+        self.shoulder.setText("5 MHz")
+        self.view = ComboBox(self)
+        for label, value in (("Corrected", "corrected"), ("Reconstruct bands", "reconstructed"), ("Mask bands", "masked"),
+                             ("Input", "input"), ("Removed", "removed")):
+            self.view.addItem(label, userData=value)
+        self._manual_fields = []
+        for row, (title, control) in enumerate((
+            ("Mode", self.mode), ("Spectrum view", self.view),
+            ("Stripe bands", self.bands), ("Shoulder on each side", self.shoulder),
+            ("Protected bands", self.protected),
+        )):
+            control.setAccessibleName(title)
+            label = BodyLabel(title, self)
+            grid.addWidget(label, row, 0)
+            grid.addWidget(control, row, 1)
+            if control in (self.bands, self.shoulder):
+                self._manual_fields.extend((label, control))
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+        self.bands.setToolTip("Paste frequency pairs separated by semicolons or line breaks.")
+        self.protected.setToolTip("Exclude these frequency bands from subtraction and from the baseline fit.")
+        self.status = CaptionLabel("Stripe correction is off.", self)
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.detected_bands = PlainTextEdit(self)
+        self.detected_bands.setAccessibleName("Automatically detected stripe bands")
+        self.detected_bands.setReadOnly(True)
+        self.detected_bands.setFixedHeight(74)
+        self.detected_bands.hide()
+        self._detected: tuple[FrequencyBand, ...] = ()
+        layout.addWidget(self.detected_bands)
+        self.error = CaptionLabel(self)
+        self.error.setWordWrap(True)
+        self.error.hide()
+        layout.addWidget(self.error)
+        actions = QHBoxLayout()
+        self.background_setup = PushButton("Configure background…", self)
+        self.disable = PushButton("Turn off", self)
+        self.disable.setEnabled(False)
+        self.apply = PrimaryPushButton("Apply", self)
+        for action in (self.background_setup, self.disable, self.apply):
+            actions.addWidget(action)
+        layout.addLayout(actions)
+        self.mode.currentIndexChanged.connect(self._sync_mode)
+        self._sync_mode()
+
+    def _sync_mode(self):
+        manual = self.mode.currentData() == "manual"
+        for widget in self._manual_fields:
+            widget.setVisible(manual)
+        self.detected_bands.setVisible(not manual and bool(self._detected))
+
+    def set_detected_bands(self, bands: tuple[FrequencyBand, ...]) -> None:
+        if self._detected == bands:
+            return
+        self._detected = bands
+        self.detected_bands.setPlainText("\n".join(
+            f"{format_quantity_auto(low, DIMENSION_FREQUENCY)} – {format_quantity_auto(high, DIMENSION_FREQUENCY)}"
+            for low, high in bands
+        ))
+        self._sync_mode()
+
+    def settings(self) -> AutomaticStripeSettings | StripeBands:
+        protected = parse_frequency_bands(self.protected.toPlainText())
+        if self.mode.currentData() == "automatic":
+            return AutomaticStripeSettings(protected)
+        return StripeBands(
+            parse_frequency_bands(self.bands.toPlainText()),
+            protected,
+            parse_quantity(self.shoulder.text(), DIMENSION_FREQUENCY).si_value,
+        )
 
 
 class SpectrumCorrectionControls(CardWidget):
@@ -56,6 +236,14 @@ class SpectrumCorrectionControls(CardWidget):
             self.power_average.addItem("Avg: Off" if count == 1 else f"Avg: {count}", userData=count)
         self.power_average.setToolTip("Average received powers in W before Background or Reference. Use Filter settings for a custom count and reset gap.")
         row.addWidget(self.power_average)
+        self.live_average = PushButton("Live average…", strip)
+        self.live_average.setToolTip("Continuously average the most recent Live frames over a count or duration.")
+        row.addWidget(self.live_average)
+        self.show_live_frame = CheckBox("Live frame", strip)
+        self.show_live_frame.setEnabled(False)
+        row.addWidget(self.show_live_frame)
+        self.stripes = StripeSwitch(strip)
+        row.addWidget(self.stripes)
         self.background = CheckBox("Background", strip)
         self.background.setObjectName("spectrumFilter_background")
         self.background.setToolTip("Subtract a recorded background in linear W; retain positive and negative residuals.")

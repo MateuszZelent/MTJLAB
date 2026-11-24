@@ -49,7 +49,9 @@ from app.safety.anritsu import (
 )
 from app.safety.rigol_current import (
     quantize_rigol_frequency,
-    quantize_rigol_voltage,
+    quantize_rigol_level_pair,
+    quantize_rigol_level_update,
+    rigol_level_update_control,
     validate_rigol_waveform,
 )
 from app.settings.models import StationSettings
@@ -229,13 +231,31 @@ class RecipeCompiler:
                     self._planned_keithley_requests[channel] = replace(previous, **{field: action.payload[field]})
             if action.kind == "configure_rigol":
                 config = action.payload["config"]
-                self._planned_rigol_configs[config.channel] = config
+                previous = self._planned_rigol_configs.get(config.channel)
+                if previous is not None and config.changed_fields is not None:
+                    config = replace(previous, **{field: getattr(config, field) for field in config.changed_fields})
+                self._planned_rigol_configs[config.channel] = self._quantize_rigol_config(config)
             elif action.kind in {"update_rigol_frequency", "update_rigol_levels"}:
                 channel = action.payload["channel"]
                 previous = self._planned_rigol_configs.get(channel)
                 if previous is not None:
-                    fields = ("frequency_hz",) if action.kind == "update_rigol_frequency" else ("high_level_v", "low_level_v")
-                    self._planned_rigol_configs[channel] = replace(previous, **{field: action.payload[field] for field in fields})
+                    if action.kind == "update_rigol_frequency":
+                        self._planned_rigol_configs[channel] = replace(previous, frequency_hz=quantize_rigol_frequency(action.payload['frequency_hz']))
+                    else:
+                        self._planned_rigol_configs[channel] = self._applied_rigol_level_update(previous, action.payload)
+            elif action.kind == 'configure_rigol_output':
+                config = action.payload['config']
+                previous = self._planned_rigol_configs.get(config.channel)
+                if previous is not None and (config.changed_fields is None or 'output_load' in config.changed_fields):
+                    self._planned_rigol_configs[config.channel] = replace(previous, output_load=config.output_load)
+            if action.kind in {'configure_rigol', 'configure_rigol_output', 'update_rigol_levels', 'update_rigol_frequency'}:
+                channel = action.payload['config'].channel if 'config' in action.payload else action.payload['channel']
+                applied = self._planned_rigol_configs.get(channel)
+                if applied is not None:
+                    prefix = f'rigol.{channel}'
+                    self._planned_context[f'{prefix}.high_level'] = Quantity(applied.high_level_v, DIMENSION_VOLTAGE)
+                    self._planned_context[f'{prefix}.low_level'] = Quantity(applied.low_level_v, DIMENSION_VOLTAGE)
+                    self._planned_context[f'{prefix}.frequency'] = Quantity(applied.frequency_hz, DIMENSION_FREQUENCY)
         self._planned_action_cursor = len(actions)
 
     @staticmethod
@@ -351,6 +371,8 @@ class RecipeCompiler:
             raise SafetyViolation(f"{node_id}: Rigol CH{channel} is disabled.")
         value.require_dimension(binding.dimension)
         parameter = binding.target.rsplit(".", 1)[-1]
+        if baseline.waveform.upper() == "DC" and parameter != "offset":
+            raise ConfigurationError(f"{node_id}: DC supports only an Offset / DC level axis.")
         high, low = baseline.high_level_v, baseline.low_level_v
         frequency_hz = baseline.frequency_hz
         if parameter == "frequency":
@@ -373,7 +395,7 @@ class RecipeCompiler:
             "high_level": Quantity(high, DIMENSION_VOLTAGE),
             "low_level": Quantity(low, DIMENSION_VOLTAGE),
             "output_load": baseline.output_load,
-        })
+        }, update_baseline=baseline)
 
     def _semantic_axis_action(
         self,
@@ -641,27 +663,34 @@ class RecipeCompiler:
     def _validate_reference_flow(actions: list[PlanAction]) -> None:
         from app.recipes.spectrum_processing import REFERENCE_UNITS
 
-        reference_available = False
+        def acquisition_mode(action: PlanAction) -> str:
+            if "instrument_average_count" in action.payload or "instrument_average_duration_s" in action.payload:
+                return "instrument_average"
+            return action.payload.get("acquisition_mode", "single_sweep")
+
+        reference_mode: str | None = None
         configurations = {}
         processed_unit = None
         for action in actions:
             if action.kind in {"configure_anritsu", "configure_anritsu_advanced"}:
                 config = action.payload["config"]
                 if configurations.get(action.kind) != config:
-                    reference_available = False
+                    reference_mode = None
                 configurations[action.kind] = config
             if action.kind == "acquire_reference":
-                reference_available = True
+                reference_mode = acquisition_mode(action)
                 continue
             if (
                 action.kind == "acquire_spectrum"
                 and action.payload.get("reference_operation", "none") != "none"
-                and not reference_available
             ):
-                raise ConfigurationError(
-                    f"{action.node_id}: reference processing requires an earlier "
-                    "acquire_reference action after the last analyzer settings change."
-                )
+                if reference_mode is None:
+                    raise ConfigurationError(
+                        f"{action.node_id}: reference processing requires an earlier "
+                        "acquire_reference action after the last analyzer settings change."
+                    )
+                if acquisition_mode(action) != reference_mode:
+                    raise ConfigurationError(f"{action.node_id}: reference processing requires matching acquisition modes.")
             if action.kind == "acquire_spectrum" and action.payload.get("store_processed"):
                 operation = action.payload.get("reference_operation", "none")
                 unit = REFERENCE_UNITS[operation]
@@ -672,13 +701,17 @@ class RecipeCompiler:
                     )
                 processed_unit = unit
 
-    @staticmethod
-    def _validate_device_state_flow(actions: list[PlanAction]) -> None:
+    def _validate_device_state_flow(self, actions: list[PlanAction]) -> None:
         """Reject update/energisation sequences that cannot be valid at runtime."""
 
         configured: set[tuple[str, str]] = set()
         output_enabled: dict[tuple[str, str], bool] = {}
+        rigol_carriers: dict[str, RigolChannelConfig] = {}
         anritsu_mode: str | None = None
+        manual_sweep_time_s: float | None = None
+        acquisition_timeout_s = parse_quantity(
+            self._settings.anritsu.acquisition.operation_complete_timeout, DIMENSION_TIME
+        ).si_value
         for action in actions:
             if action.fault_only:
                 continue
@@ -689,15 +722,35 @@ class RecipeCompiler:
                     raise ConfigurationError(f"{action.node_id}: turn SG RF OFF explicitly before selecting Spectrum Analyzer mode.")
                 anritsu_mode = "spectrum"
                 configured.discard(("anritsu_sg", "RF"))
+            elif kind == "configure_anritsu_advanced":
+                config = payload["config"]
+                if config.sweep_time_auto is not None:
+                    manual_sweep_time_s = config.sweep_time_s
             elif kind == "configure_anritsu_sg":
                 anritsu_mode = "sg"
-            elif kind in {"acquire_reference", "acquire_spectrum"} and not payload.get("source_file") and anritsu_mode == "sg":
-                raise ConfigurationError(f"{action.node_id}: acquisition requires an explicit Spectrum Analyzer configuration after SG mode; it cannot silently switch SG OFF.")
+                manual_sweep_time_s = None
+            elif kind in {"acquire_reference", "acquire_spectrum"} and not payload.get("source_file"):
+                if anritsu_mode == "sg":
+                    raise ConfigurationError(f"{action.node_id}: acquisition requires an explicit Spectrum Analyzer configuration after SG mode; it cannot silently switch SG OFF.")
+                count = payload.get("instrument_average_count")
+                if count is not None and manual_sweep_time_s is not None:
+                    nominal_duration_s = count * manual_sweep_time_s
+                    if nominal_duration_s >= acquisition_timeout_s:
+                        raise ConfigurationError(
+                            f"{action.node_id}: {count} instrument sweeps at {manual_sweep_time_s:g} s each "
+                            f"must fit within the {acquisition_timeout_s:g} s acquisition timeout."
+                        )
+                    payload["instrument_average_nominal_duration_s"] = nominal_duration_s
             key: tuple[str, str] | None = None
             if kind == "configure_keithley":
                 key = ("keithley", str(payload["request"].channel))
             elif kind == "configure_rigol":
                 key = ("rigol", str(payload["config"].channel))
+                config = payload["config"]
+                baseline = rigol_carriers.get(key[1])
+                if baseline is not None and config.changed_fields is not None:
+                    config = replace(baseline, **{name: getattr(config, name) for name in config.changed_fields})
+                rigol_carriers[key[1]] = RecipeCompiler._quantize_rigol_config(config)
             elif kind == "configure_rigol_output":
                 output_key = ("rigol", str(payload["config"].channel))
                 if output_key not in configured:
@@ -758,6 +811,17 @@ class RecipeCompiler:
                         f"{action.node_id}: {kind} requires an earlier configuration "
                         f"for {update_device} channel {update_channel}."
                     )
+                if kind == "update_rigol_levels":
+                    before = rigol_carriers[update_channel]
+                    high, low = payload["high_level_v"], payload["low_level_v"]
+                    single_control = rigol_level_update_control(before.high_level_v, before.low_level_v,
+                                                                high, low, waveform=before.waveform) != 'both'
+                    if before.waveform.upper() != "DC" and output_enabled.get(update_key, False) and not single_control:
+                        raise ConfigurationError(
+                            f"{action.node_id}: changing amplitude and offset together while OUTPUT is ON is not atomic. "
+                            "Use separate single-control steps or turn OUTPUT OFF before changing both."
+                        )
+                    rigol_carriers[update_channel] = RecipeCompiler._applied_rigol_level_update(before, payload)
                 continue
 
             output_device: str | None = None
@@ -981,24 +1045,34 @@ class RecipeCompiler:
         )
 
     @staticmethod
+    def _applied_rigol_level_update(previous: RigolChannelConfig, payload: dict) -> RigolChannelConfig:
+        high, low = quantize_rigol_level_update(previous.high_level_v, previous.low_level_v,
+                                               payload['high_level_v'], payload['low_level_v'], waveform=previous.waveform)
+        return replace(previous, high_level_v=high, low_level_v=low)
+
+    @staticmethod
     def _quantize_rigol_config(config: RigolChannelConfig) -> RigolChannelConfig:
         """Return the exact frequency/voltage representation sent by the adapter."""
 
+        high_v, low_v = quantize_rigol_level_pair(
+            config.high_level_v, config.low_level_v, waveform=config.waveform,
+        )
         return replace(
             config,
             frequency_hz=quantize_rigol_frequency(config.frequency_hz),
-            high_level_v=quantize_rigol_voltage(config.high_level_v),
-            low_level_v=quantize_rigol_voltage(config.low_level_v),
+            high_level_v=high_v,
+            low_level_v=low_v,
         )
 
     def _rigol_sweep_signature(
-        self, config: RigolChannelConfig, parameter: str | None
+        self, config: RigolChannelConfig, parameter: str | None, *, baseline: RigolChannelConfig | None = None
     ) -> float | tuple[float, float] | None:
         if parameter == "carrier.frequency":
             return quantize_rigol_frequency(config.frequency_hz)
         if parameter is None:
             return None
-        applied = self._quantize_rigol_config(config)
+        applied = (self._applied_rigol_level_update(baseline, {'high_level_v': config.high_level_v, 'low_level_v': config.low_level_v})
+                   if baseline is not None else self._quantize_rigol_config(config))
         return applied.high_level_v, applied.low_level_v
 
     def _keithley_sweep_request(
@@ -1858,6 +1932,16 @@ class RecipeCompiler:
                     f"{node.id}: unsupported Rigol parameter action "
                     f"{parameter_id!r}/{action_mode!r}."
                 )
+        selected_parameters = [str(action['parameter_id']) for action in parameter_actions]
+        if len(selected_parameters) != len(set(selected_parameters)):
+            raise ConfigurationError(f"{node.id}: each Rigol control may be selected only once.")
+        selected_set = set(selected_parameters)
+        if selected_set & {'carrier.high_level', 'carrier.low_level'} and selected_set & {'carrier.amplitude', 'carrier.offset'}:
+            raise ConfigurationError(f"{node.id}: use either HighL/LowL or Amplitude/Offset in one Rigol node.")
+        if waveform == 'DC' and selected_set - {'carrier.offset'}:
+            raise ConfigurationError(f"{node.id}: DC supports only Offset / DC level parameter actions.")
+        if waveform == 'NOIS' and 'carrier.frequency' in selected_set:
+            raise ConfigurationError(f"{node.id}: NOIS has no carrier-frequency control.")
         self._apply_rigol_set_actions(config_data, parameter_actions, context, node.id)
         sweep_actions = [
             action for action in parameter_actions if action.get("mode") == "sweep"
@@ -1922,10 +2006,16 @@ class RecipeCompiler:
             ),
             configure_context,
             is_finally=False,
+            rigol_update_baseline=baseline,
         )
         legacy_binding = self._semantic_axes_by_source.get(node.id)
+        if output_policy == "off":
+            actions.append(self._compile_action(
+                RecipeNode(f"{node.id}.output-off", "set_rigol_output", {"channel": channel, "enabled": False}),
+                context, is_finally=False,
+            ))
         if output_policy == "continue":
-            applied_config = self._quantize_rigol_config(baseline)
+            applied_config = baseline
             self._append_output_continuity_assertion(
                 actions,
                 node_id=node.id,
@@ -1982,21 +2072,9 @@ class RecipeCompiler:
                     is_finally=False,
                 )
             )
-        elif output_policy == "off":
-            actions.append(
-                self._compile_action(
-                    RecipeNode(
-                        f"{node.id}.output-off",
-                        "set_rigol_output",
-                        {"channel": channel, "enabled": False},
-                    ),
-                    context,
-                    is_finally=False,
-                )
-            )
 
         previous_rigol_signature = self._rigol_sweep_signature(
-            configure_action.payload["config"], sweep_parameter
+            configure_action.payload["config"], sweep_parameter, baseline=baseline
         )
         for point_index, value in enumerate(sweep_values or (None,)):
             self._check_cancelled()
@@ -2083,7 +2161,7 @@ class RecipeCompiler:
                         low_level_v=update_action.payload["low_level_v"],
                     )
                     applied_signature = self._rigol_sweep_signature(
-                        candidate_config, sweep_parameter
+                        candidate_config, sweep_parameter, baseline=current_config
                     )
                 if point_index > 0 and applied_signature != previous_rigol_signature:
                     actions.append(update_action)
@@ -2772,7 +2850,8 @@ class RecipeCompiler:
         )
 
     def _compile_action(
-        self, node: RecipeNode, context: dict[str, Quantity], *, is_finally: bool
+        self, node: RecipeNode, context: dict[str, Quantity], *, is_finally: bool,
+        rigol_update_baseline: RigolChannelConfig | None = None,
     ) -> PlanAction:
         validate_action_fields(node.type, node.data, node.id)
         data = {
@@ -2782,7 +2861,7 @@ class RecipeCompiler:
         setpoints = self._context_as_si(context)
         action_kind = node.type
         if node.type == "configure_rigol":
-            payload = self._compile_rigol(data)
+            payload = self._compile_rigol(data, update_baseline=rigol_update_baseline)
             names = {"waveform": "waveform", "frequency": "frequency_hz", "high_level": "high_level_v", "low_level": "low_level_v",
                      "output_load": "output_load", "phase_deg": "phase_deg", "square_duty_percent": "square_duty_percent",
                      "ramp_symmetry_percent": "ramp_symmetry_percent", "pulse_width": "pulse_width_s",
@@ -2939,7 +3018,7 @@ class RecipeCompiler:
             validate_rigol_waveform(channel=self._settings.rigol.safety.channels[str(channel)], safety=self._settings.rigol.safety,
                 waveform=config.waveform, frequency=config.frequency_hz, high_level=config.high_level_v,
                 low_level=config.low_level_v, output_load=config.output_load)
-            applied = self._quantize_rigol_config(config)
+            applied = self._applied_rigol_level_update(baseline, {'high_level_v': config.high_level_v, 'low_level_v': config.low_level_v})
             validate_rigol_waveform(channel=self._settings.rigol.safety.channels[str(channel)], safety=self._settings.rigol.safety,
                 waveform=applied.waveform, frequency=applied.frequency_hz, high_level=applied.high_level_v,
                 low_level=applied.low_level_v, output_load=applied.output_load)
@@ -2984,6 +3063,15 @@ class RecipeCompiler:
             payload = {
                 "trace": validate_anritsu_trace_name(str(data.get("trace", "TRAC1"))),
             }
+            acquisition_mode = data.get("acquisition_mode", "single_sweep")
+            if acquisition_mode not in ("single_sweep", "continuous_live"):
+                raise ConfigurationError(f"{node.id}: unsupported spectrum acquisition_mode {acquisition_mode!r}.")
+            if acquisition_mode == "continuous_live":
+                if payload["trace"] != "TRAC1":
+                    raise ConfigurationError(f"{node.id}: continuous acquisition uses Trace A (TRAC1).")
+                if data.get("source_file"):
+                    raise ConfigurationError(f"{node.id}: continuous acquisition cannot be used with an imported file.")
+                payload["acquisition_mode"] = acquisition_mode
             average_count = data.get("average_count", 1)
             if type(average_count) is not int:
                 raise ConfigurationError(
@@ -2994,6 +3082,8 @@ class RecipeCompiler:
                     f"{node.id}: average_count must be in the range 1..9999."
                 )
             payload["average_count"] = average_count
+            if not self._optional_boolean(data, "store_source_spectra", True, node.id) and not data.get("source_file"):
+                payload["store_source_spectra"] = False
             if node.type == "acquire_reference":
                 duration = self._resolve_quantity(data.get("minimum_duration", "0 s"), DIMENSION_TIME, {}).si_value
                 if not 0 <= duration <= 3600:
@@ -3011,6 +3101,36 @@ class RecipeCompiler:
             if not 0 <= delay <= 3600:
                 raise SafetyViolation(f"{node.id}: inter_sweep_delay must be in 0..3600 s.")
             payload["inter_sweep_delay_s"] = delay
+            instrument_count_requested = "instrument_average_count" in data
+            instrument_duration_requested = "instrument_average_duration" in data
+            instrument_average = instrument_count_requested or instrument_duration_requested
+            if instrument_count_requested and instrument_duration_requested:
+                raise ConfigurationError(
+                    f"{node.id}: choose either instrument_average_count or instrument_average_duration."
+                )
+            if instrument_average:
+                if (acquisition_mode != "single_sweep" or payload["trace"] != "TRAC1" or average_count != 1
+                        or delay or payload.get("minimum_duration_s") or data.get("source_file")
+                        or data.get("store_source_spectra") is True):
+                    raise ConfigurationError(f"{node.id}: instrument averaging requires one triggered Trace A result and mean-only storage.")
+                if instrument_count_requested:
+                    count = data["instrument_average_count"]
+                    if type(count) is not int:
+                        raise ConfigurationError(f"{node.id}: instrument_average_count must be an integer.")
+                    if not 2 <= count <= 9999:
+                        raise ConfigurationError(f"{node.id}: instrument_average_count must be in the range 2..9999.")
+                    payload["instrument_average_count"] = count
+                else:
+                    target_s = self._resolve_quantity(data["instrument_average_duration"], DIMENSION_TIME, {}).si_value
+                    timeout_s = parse_quantity(
+                        self._settings.anritsu.acquisition.operation_complete_timeout, DIMENSION_TIME
+                    ).si_value
+                    if not 0 < target_s < timeout_s:
+                        raise ConfigurationError(
+                            f"{node.id}: instrument averaging time must be positive and shorter than the acquisition timeout."
+                        )
+                    payload["instrument_average_duration_s"] = target_s
+                payload["store_source_spectra"] = False
             if node.type == "acquire_reference" and data.get("source_file"):
                 from pathlib import Path
 
@@ -3046,9 +3166,12 @@ class RecipeCompiler:
                     filters, parameters = parse_processing(data.get("processing"))
                 except ValueError as exc:
                     raise ConfigurationError(f"{node.id}: {exc}") from exc
-                if "emi_reject" in filters and (average_count < parameters.emi_min_frames
-                        or operation in {"ratio_linear", "multiply_linear", "subtract_power_signed"}):
-                    raise ConfigurationError(f"{node.id}: EMI requires dB/dBm and at least {parameters.emi_min_frames} raw sweeps per point.")
+                if "emi_reject" in filters:
+                    if instrument_average:
+                        raise ConfigurationError(f"{node.id}: EMI requires individual PyLab sweeps within each point.")
+                    if (average_count < parameters.emi_min_frames
+                            or operation in {"ratio_linear", "multiply_linear", "subtract_power_signed"}):
+                        raise ConfigurationError(f"{node.id}: EMI requires dB/dBm and at least {parameters.emi_min_frames} raw sweeps per point.")
                 if filters:
                     payload["processing"] = processing_mapping(filters, parameters)
                 store_raw = self._optional_boolean(data, "store_raw", True, node.id)
@@ -3340,7 +3463,7 @@ class RecipeCompiler:
         )
         return {"config": config}
 
-    def _compile_rigol(self, data: dict[str, Any]) -> dict[str, Any]:
+    def _compile_rigol(self, data: dict[str, Any], *, update_baseline: RigolChannelConfig | None = None) -> dict[str, Any]:
         try:
             channel = int(data["channel"])
             settings = self._settings.rigol.safety.channels[str(channel)]
@@ -3369,7 +3492,12 @@ class RecipeCompiler:
             low_level=config.low_level_v,
             output_load=config.output_load,
         )
-        applied = self._quantize_rigol_config(config)
+        if update_baseline is None:
+            applied = self._quantize_rigol_config(config)
+        else:
+            levels = self._applied_rigol_level_update(update_baseline, {'high_level_v': config.high_level_v, 'low_level_v': config.low_level_v})
+            applied = replace(config, high_level_v=levels.high_level_v, low_level_v=levels.low_level_v,
+                              frequency_hz=quantize_rigol_frequency(config.frequency_hz))
         validate_rigol_waveform(
             channel=settings,
             safety=self._settings.rigol.safety,

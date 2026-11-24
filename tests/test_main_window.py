@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QTimer, Qt
+from PySide6.QtCore import QObject, QPoint, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -33,8 +33,8 @@ from app.domain.models import DeviceCapabilities
 from app.engine import ExecutionPlan, PlanAction
 from app.inventory import InventoryStore, Sample
 from app.inventory.models import ActiveSampleTarget
-from app.domain.quick_controls import QuickConfigureCommand
-from app.devices.discovery import DiscoveredInstrument
+from app.domain.quick_controls import QuickConfigureCommand, QuickControlCommand
+from app.devices.discovery import DiscoveredInstrument, DiscoveredTcpEndpoint
 from app.devices.moke_box.models import MokeHallVoltageReading
 from app.devices.anritsu_ms2830a import (
     AdvancedSpectrumSnapshot,
@@ -55,7 +55,8 @@ from app.devices.anritsu_ms2830a.ui import AnritsuPageState
 from app.ui.shell import MainWindow
 from app.ui.dashboard.device_card import DeviceCard
 from app.ui.design_system import tokens_for
-from qfluentwidgets import CardWidget, ComboBox, PlainTextEdit
+from qfluentwidgets import CardWidget, ComboBox, PlainTextEdit, PushButton
+from app.ui.moke_address_dialog import MokeAddressDialog
 from app.ui.widgets import LimitEditDialog
 from tests.helpers import SETTINGS_TEMPLATE
 from tests.shell_test_isolation import isolated_shell_persistence as isolated_shell_persistence
@@ -1177,7 +1178,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertTrue(all(not thread.isRunning() for thread in device_threads))
         self.assertFalse(analysis_thread.isRunning())
 
-    def test_anritsu_opens_composed_quick_controls_and_arrows_send_immediately(self) -> None:
+    def test_anritsu_opens_composed_quick_controls_and_rigol_requires_apply(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             targets = (
@@ -1191,6 +1192,8 @@ class MainWindowTests(unittest.TestCase):
             window._controllers["rigol"].call = Mock()
             # A connected but de-energised generator uses the full card
             # configuration path; this must never fall back to a live update.
+            window.rigol_page.waveform.setCurrentText("SIN")
+            window.rigol_page.vpp.setText("2 mV")
             window._controllers["rigol"].state_changed.emit("output_off")
 
             window.anritsu_page.quick_controls_button.click()
@@ -1216,6 +1219,8 @@ class MainWindowTests(unittest.TestCase):
             frequency = floating._rows["rigol.1.frequency"]
             frequency.value.setText("10.000 kHz")
             frequency.increase.click()
+            window._controllers["rigol"].call.assert_not_called()
+            frequency.value.apply.click()
             window._controllers["rigol"].call.assert_called_once()
             operation, payload = window._controllers["rigol"].call.call_args.args
             self.assertEqual(operation, "quick_configure")
@@ -1696,20 +1701,18 @@ class MainWindowTests(unittest.TestCase):
         try:
             page = window.dashboard
             page._discovery_enabled = True
-            page.tcp_network.setText("131.246.221.33")
+            page.tcp_network.setText("131.246.221.92:10002")
             page.tcp_port.setValue(10001)
             with patch.object(page, "_identify_selected_moke") as identify:
                 page._test_entered_moke_ip()
             identify.assert_called_once_with()
-            self.assertEqual(page.tcp_results.selected_endpoint, "131.246.221.33:10001")
+            self.assertEqual(page.tcp_results.selected_endpoint, "131.246.221.92:10002")
             self.assertEqual(page.tcp_results.selected_state, "entered")
-            page.tcp_results.upsert_endpoint(
-                host="131.246.221.33",
-                endpoint="131.246.221.33:10001",
-                state="entered",
-                verification="MOKE Box verified",
-            )
-            page._update_tcp_identify_enabled()
+            with patch.object(page, "_show_moke_test_trace"):
+                page._moke_identification_completed(DiscoveredTcpEndpoint(
+                    host="131.246.221.92", port=10002, moke_verified=True,
+                ))
+            self.assertEqual(page.tcp_results.selected_endpoint, "131.246.221.92:10002")
             self.assertTrue(page.tcp_assign_moke_button.isEnabled())
         finally:
             window.close()
@@ -1719,24 +1722,99 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             settings_path = Path(temporary) / "settings.yml"
             write_engineer_settings(settings_path)
+            repository = SettingsRepository(settings_path)
+            raw = repository.load().raw
+            moke = raw["devices"]["moke_box"]
+            moke.update(enabled=True, endpoint="131.246.221.33:10001", protocol_qualified=True,
+                        allow_vout_control=True, allowed_vout_channels=[2, 0], test_vout_channels=[0])
+            moke["voltage_control"].update(approved=True, binding_id="coil", qualification_reference="lab log")
+            moke["channel_profiles"]["0"].update(approved=True, qualification_reference="lab log",
+                                                 maximum="250 mV")
+            moke["active_calibration_id"] = "saved-calibration"
+            before = repository.save_raw(raw).moke_box
             window = MainWindow(
                 settings_path,
                 simulation=False,
                 authenticated_username=TEST_ENGINEER,
             )
             try:
+                window.resize(1360, 880)
+                window.show()
+                window._navigate_to("settings")
+                page = window.settings_page
+                page.tabs.setCurrentWidget(page.forms["moke_box"])
+                self.application.processEvents()
+                change_address = next(
+                    button for button in page.forms["moke_box"].findChildren(PushButton)
+                    if button.text() == "Change TCP address"
+                )
+                self.assertTrue(change_address.isVisible())
+                prefix = ("devices", "moke_box")
+                display_name = page._form_editors[prefix + ("display_name",)]
+                display_name.setText("MOKE Box local draft")
+                display_name.editingFinished.emit()
                 with patch(
                     "app.ui.shell.main_window.QMessageBox.question",
                     return_value=QMessageBox.StandardButton.Yes,
                 ):
                     window._save_moke_assignment("131.246.221.33:10001")
+                    self.assertEqual(repository.load().settings.moke_box, before)
+
+                class ReadOnlyTest(QObject):
+                    completed = Signal(object)
+                    failed = Signal(str)
+                    finished = Signal()
+
+                    def start(self):
+                        self.completed.emit(DiscoveredTcpEndpoint("131.246.221.92", 10001, True))
+                        self.finished.emit()
+
+                def use_address_dialog(dialog):
+                    dialog.show()
+                    self.application.processEvents()
+                    self.assertTrue(dialog.address.isVisible())
+                    self.assertGreater(dialog.address.width(), 0)
+                    self.assertEqual(dialog.address.text(), before.endpoint)
+                    dialog.address.setText("131.246.221.0/24")
+                    dialog.test_button.click()
+                    self.assertIn("Enter one IPv4 address", dialog.feedback.text())
+                    self.assertFalse(dialog.assign_button.isEnabled())
+                    dialog.address.setText("131.246.221.92")
+                    dialog.test_button.click()
+                    self.assertTrue(dialog.assign_button.isEnabled())
+                    dialog.assign_button.click()
+                    return dialog.result()
+
+                with (
+                    patch.object(MokeAddressDialog, "exec", new=use_address_dialog),
+                    patch("app.ui.moke_address_dialog.MokeIdentificationWorker", return_value=ReadOnlyTest()) as worker,
+                ):
+                    change_address.click()
+                    self.assertEqual(worker.call_args.args[:2], ("131.246.221.92", 10001))
                 self.application.processEvents()
+                self.assertTrue(page.isVisible())
                 profile = SettingsRepository(settings_path).load().settings.moke_box
                 self.assertTrue(profile.enabled)
                 self.assertTrue(profile.protocol_qualified)
-                self.assertEqual(profile.endpoint, "131.246.221.33:10001")
+                self.assertEqual(profile.endpoint, "131.246.221.92:10001")
                 self.assertFalse(profile.allow_vout_control)
                 self.assertEqual(profile.allowed_vout_channels, ())
+                self.assertEqual(profile.test_vout_channels, ())
+                self.assertEqual(profile.voltage_control, before.voltage_control)
+                self.assertEqual(profile.channel_profiles, before.channel_profiles)
+                self.assertEqual(profile.active_calibration_id, before.active_calibration_id)
+                self.assertEqual(display_name.text(), "MOKE Box local draft")
+
+                master = page._form_editors[prefix + ("allow_vout_control",)]
+                self.assertTrue(master.isEnabled())
+                self.assertFalse(master.isChecked())
+                master.setChecked(True)
+                self.assertTrue(page.save_draft(silent=True))
+                restored = repository.load().settings.moke_box
+                self.assertTrue(restored.allow_vout_control)
+                self.assertEqual(restored.allowed_vout_channels, before.allowed_vout_channels)
+                self.assertEqual(restored.test_vout_channels, before.test_vout_channels)
+                self.assertEqual(restored.display_name, "MOKE Box local draft")
             finally:
                 window.close()
                 self.application.processEvents()
@@ -1881,17 +1959,25 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_shared_voltage_budget_clamps_amplitude_on_focus_loss(self) -> None:
+    def test_shared_voltage_budget_rejects_amplitude_without_clamping(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             rigol = window.rigol_page
             rigol.channel.setCurrentText("1")
+            settings = window._settings.model_dump()
+            settings["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["combined_voltage_limit"] = "100 mV"
+            rigol.set_settings(StationSettings.model_validate(settings))
+            rigol.waveform.setCurrentText("SIN")
+            rigol.level_mode.setCurrentText(rigol.LEVEL_MODE_AMPLITUDE_OFFSET)
             rigol.offset.setText("20 mV")
             rigol.vpp.setText("90 mV")
-            rigol.vpp.editingFinished.emit()
-            self.assertEqual(rigol.vpp.text(), "80 mV")
-            self.assertEqual(rigol.combined_voltage_usage.text(), "100 mV")
-            self.assertIn("shared limit", rigol.banner.last_message)
+            rigol.vpp.number.editingFinished.emit()
+            self.assertEqual(rigol.vpp.text(), "90 mV")
+            self.assertEqual(rigol.combined_voltage_usage.text(), "110 mV")
+            rigol._controller.call = Mock()
+            rigol.configure()
+            rigol._controller.call.assert_not_called()
+            self.assertIn("combined_voltage_limit", rigol.banner.last_message)
         finally:
             window.close()
             self.application.processEvents()
@@ -1911,26 +1997,27 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_limit_field_normalizes_units_and_scientific_notation(self) -> None:
+    def test_frequency_displays_selected_units_without_focus_loss_clamping(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             rigol = window.rigol_page
+            rigol.waveform.setCurrentText("SIN")
+            rigol.vpp.setText("2 mV")
             field = rigol._limit_fields[rigol.frequency]
             rigol.frequency.setText("10000 kHz")
-            rigol.frequency.editingFinished.emit()
+            rigol.frequency.number.editingFinished.emit()
+            self.assertEqual(rigol.frequency.text(), "10000 kHz")
+            rigol.frequency.unit.setCurrentText("MHz")
             self.assertEqual(rigol.frequency.text(), "10 MHz")
             self.assertTrue(field.validation_warning.isHidden())
 
-            rigol.frequency.setText("1e9")
-            rigol.frequency.editingFinished.emit()
-            maximum = window._settings.rigol.safety.channels["1"].lab_limits.frequency.max
-            self.assertEqual(rigol.frequency.text(), maximum)
-            self.assertIn("exceeded MAX", field.validation_warning.text())
-
-            rigol.frequency.setText("1000000000 kHZ")
-            rigol.frequency.editingFinished.emit()
-            self.assertEqual(rigol.frequency.text(), maximum)
-            self.assertIn("exceeded MAX", field.validation_warning.text())
+            rigol.frequency.number.setText("1e9")
+            rigol.frequency.number.editingFinished.emit()
+            self.assertEqual(rigol.frequency.text(), "1e9 MHz")
+            rigol._controller.call = Mock()
+            rigol.configure()
+            rigol._controller.call.assert_not_called()
+            self.assertIn("frequency", rigol.banner.last_message.lower())
         finally:
             window.close()
             self.application.processEvents()
@@ -2987,8 +3074,8 @@ class MainWindowTests(unittest.TestCase):
             trace_1 = SpectrumTrace((1e6, 2e6), (-10.0, -20.0), datetime.now(timezone.utc), "TRAC1")
             trace_2 = SpectrumTrace((1e6, 2e6), (0.0, -20.0), datetime.now(timezone.utc), "TRAC1")
             anritsu.start_averaging()
-            anritsu._result("single_sweep", trace_1)
-            anritsu._result("single_sweep", trace_2)
+            anritsu._result("unaveraged_sweep", trace_1)
+            anritsu._result("unaveraged_sweep", trace_2)
             self.assertIs(anritsu._latest_trace, trace_2)
             self.assertIsNotNone(anritsu._averaged_trace)
             self.assertNotEqual(anritsu._averaged_trace.powers_dbm[0], -5.0)
@@ -3039,10 +3126,10 @@ class MainWindowTests(unittest.TestCase):
 
             anritsu.acquire_reference_once()
 
-            anritsu._controller.call.assert_called_once_with("single_sweep", "TRAC1")
+            anritsu._controller.call.assert_called_once_with("unaveraged_sweep", "TRAC1")
             self.assertEqual(anritsu._page_state, AnritsuPageState.ACQUIRING_REFERENCE)
             self.assertFalse(anritsu.live.isEnabled())
-            anritsu._result("single_sweep", trace)
+            anritsu._result("unaveraged_sweep", trace)
 
             reference = anritsu._reference_spectrum
             self.assertIsNotNone(reference)
@@ -3209,14 +3296,14 @@ class MainWindowTests(unittest.TestCase):
 
             anritsu.start_averaging()
 
-            anritsu._controller.call.assert_called_once_with("single_sweep", "TRAC1")
+            anritsu._controller.call.assert_called_once_with("unaveraged_sweep", "TRAC1")
             self.assertEqual(anritsu.average_progress.format(), "0 / 2")
-            anritsu._result("single_sweep", first)
+            anritsu._result("unaveraged_sweep", first)
             self.assertEqual(anritsu.average_progress.value(), 1)
             self.assertEqual(anritsu.average_progress.format(), "1 / 2")
             self.assertIsNone(anritsu._averaged_trace)
 
-            anritsu._result("single_sweep", second)
+            anritsu._result("unaveraged_sweep", second)
             self.assertEqual(anritsu.average_progress.value(), 2)
             self.assertEqual(anritsu.average_progress.format(), "2 / 2")
             self.assertIsNotNone(anritsu._averaged_trace)
@@ -4201,7 +4288,7 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_quick_control_slider_projects_rigol_level_group_immediately(self) -> None:
+    def test_quick_control_slider_projects_rigol_level_group_after_apply(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             quick = window.quick_controls_window
@@ -4214,6 +4301,11 @@ class MainWindowTests(unittest.TestCase):
                 )
             )
             rigol = window.rigol_page
+            rigol.waveform.setCurrentText("SIN")
+            rigol.vpp.setText("2 mV")
+            rigol.offset.setText("0 mV")
+            window._controllers["rigol"].call = Mock()
+            window._controllers["rigol"].state_changed.emit("output_off")
             self.application.processEvents()
 
             row = quick._rows["rigol.1.amplitude"]
@@ -4224,13 +4316,19 @@ class MainWindowTests(unittest.TestCase):
             row.slider.slider.setValue(position + 1)
             self.application.processEvents()
 
-            self.assertEqual(row.value.text(), rigol.vpp.text())
+            self.assertNotEqual(parse_quantity(row.value.text()), parse_quantity(rigol.vpp.text()))
+            window._controllers["rigol"].call.assert_not_called()
+            row.value.apply.click()
+            self.assertEqual(parse_quantity(row.value.text()), parse_quantity(rigol.vpp.text()))
             for target, editor in (
                 ("rigol.1.high_level", rigol.high_level),
                 ("rigol.1.low_level", rigol.low_level),
                 ("rigol.1.offset", rigol.offset),
             ):
-                self.assertEqual(quick._rows[target].value.text(), editor.text())
+                self.assertAlmostEqual(
+                    parse_quantity(quick._rows[target].value.text()).si_value,
+                    parse_quantity(editor.text()).si_value,
+                )
         finally:
             window.close()
             self.application.processEvents()
@@ -4259,18 +4357,29 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_quick_controls_and_rigol_card_share_draft_immediately(self) -> None:
+    def test_quick_controls_and_rigol_card_sync_only_after_explicit_edit(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             quick = window.quick_controls_window
             quick.set_targets(("rigol.1.frequency",))
             rigol = window.rigol_page
-            rigol.waveform.setCurrentText("DC")
+            rigol.waveform.setCurrentText("SIN")
+            rigol.vpp.setText("2 mV")
+            window._controllers["rigol"].call = Mock()
+            window._controllers["rigol"].state_changed.emit("output_off")
+            rigol._cache_applied_carrier(rigol._visible_channel_config())
+            rigol.set_live_control_enabled(True)
 
             rigol.frequency.setText("12.000 kHz")
             self.application.processEvents()
 
-            self.assertEqual(quick._rows["rigol.1.frequency"].value.text(), "12.000 kHz")
+            row = quick._rows["rigol.1.frequency"]
+            self.assertNotEqual(parse_quantity(row.value.text()).si_value, 12000)
+            rigol.frequency.apply.click()
+            self.assertEqual(parse_quantity(row.value.text()).si_value, 12000)
+            window._controllers["rigol"].call.assert_called_once_with(
+                "quick_setpoint", QuickControlCommand("rigol.1.frequency", "12 kHz")
+            )
 
             window.quick_control_coordinator.publish_draft(
                 "rigol.1.frequency", "13.000 kHz", source="quick_controls"
@@ -4543,9 +4652,12 @@ class MainWindowTests(unittest.TestCase):
             second = SpectrumTrace((1e6, 2e6), (0.0, -20.0), datetime.now(timezone.utc), "TRAC1")
 
             anritsu.start_reference_averaging()
-            anritsu._result("single_sweep", first)
+            anritsu._result("start_live", AnritsuConfigurationSnapshot(1e6, 2e6, -10., 1001, "SPECT"))
+            anritsu._result("fetch_current_trace_fast", replace(first, powers_dbm=(-30., -30.)))
+            anritsu._result("fetch_current_trace_fast", first)
             self.assertIsNone(anritsu._reference_trace)
-            anritsu._result("single_sweep", second)
+            anritsu._result("fetch_current_trace_fast", second)
+            anritsu._result("stop_live", None)
 
             self.assertIsNotNone(anritsu._reference_trace)
             self.assertTrue(anritsu.show_reference.isChecked())

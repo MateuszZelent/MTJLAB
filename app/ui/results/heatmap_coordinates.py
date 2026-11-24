@@ -21,6 +21,7 @@ from app.storage import (
 
 _FREQUENCY_ID = "frequency"
 _CHECKPOINT_ID = "measurement.checkpoint"
+VISIT_DIMENSION_ID = "measurement.visit"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +42,7 @@ class HeatmapCoordinates:
     dimensions: tuple[HeatmapDimension, ...]
     checkpoint_count: int
     fallback_reason: str | None = None
+    sweep_dimension_ids: tuple[str, ...] = ()
 
     def dimension(self, dimension_id: str) -> HeatmapDimension:
         for dimension in self.dimensions:
@@ -135,6 +137,16 @@ def build_heatmap_coordinates(
                 tuple(float(index) for index in range(checkpoint_count)),
             ),
         )
+    # A return sweep can store several spectra at identical physical settings.
+    # Give each occurrence its own selector instead of merging measurements.
+    visits = {}
+    ordinals = []
+    for coordinate in zip(*(dimension.values for dimension in dimensions), strict=True):
+        visit = visits.get(coordinate, 0) + 1
+        visits[coordinate] = visit
+        ordinals.append(float(visit))
+    if len(visits) < checkpoint_count and len(ordinals) == checkpoint_count:
+        dimensions = (*dimensions, HeatmapDimension(VISIT_DIMENSION_ID, "Visit", "", tuple(ordinals)))
     return HeatmapCoordinates(
         dimensions=(
             HeatmapDimension(_FREQUENCY_ID, "Frequency", "Hz", (), True),
@@ -142,7 +154,69 @@ def build_heatmap_coordinates(
         ),
         checkpoint_count=checkpoint_count,
         fallback_reason=fallback_reason,
+        sweep_dimension_ids=tuple(
+            key for key in _recipe_axis_ids(run, checkpoint_count)
+            if any(dimension.id == key for dimension in dimensions)
+        ),
     )
+
+
+def default_heatmap_ranges(
+    coordinates: HeatmapCoordinates, x_id: str, y_id: str
+) -> dict[str, HeatmapRange]:
+    """Keep linked recorded views open; slice only independent coordinates.
+
+    A non-axis coordinate needs an exact slice only when it has different
+    values at the same plotted coordinate. Re-evaluate after each slice so
+    derived views (e.g. High/Low from amplitude and offset) cannot pin the
+    chosen sweep to its first point. Prefer the slice preserving the most
+    plotted coordinates; recipe axes break ties when available. This changes
+    selection defaults only; it never derives or averages data.
+    """
+
+    axes = tuple(coordinates.dimension(key) for key in (x_id, y_id))
+    physical_axes = tuple(axis for axis in axes if not axis.is_frequency)
+    dimensions = tuple(d for d in coordinates.dimensions if not d.is_frequency and d.values)
+    ranges = {d.id: HeatmapRange(min(d.values), max(d.values)) for d in dimensions}
+    if not dimensions or not coordinates.checkpoint_count:
+        return ranges
+    values_by_id = {d.id: np.asarray(d.values, dtype=float) for d in dimensions}
+    group_ids = (
+        np.unique(np.column_stack([axis.values for axis in physical_axes]),
+                  axis=0, return_inverse=True)[1]
+        if physical_axes else np.zeros(coordinates.checkpoint_count, dtype=int)
+    )
+    group_count = int(group_ids.max()) + 1
+    selected = np.arange(coordinates.checkpoint_count)
+    axis_ids = {x_id, y_id}
+    while selected.size:
+        groups = group_ids[selected]
+        active_groups = np.unique(groups)
+        best = None
+        for dimension in dimensions:
+            if dimension.id in axis_ids:
+                continue
+            values = values_by_id[dimension.id][selected]
+            lows, highs = np.full(group_count, np.inf), np.full(group_count, -np.inf)
+            np.minimum.at(lows, groups, values)
+            np.maximum.at(highs, groups, values)
+            if np.all(np.isclose(highs[active_groups], lows[active_groups], rtol=1e-9, atol=1e-15)):
+                continue
+            value = float(values.min())
+            indices = selected[np.isclose(values, value, rtol=1e-9, atol=1e-15)]
+            # Approximate equality is asymmetric near zero. Every chosen
+            # slice must remove a checkpoint, otherwise selection can stall.
+            if indices.size == selected.size:
+                continue
+            coverage = np.unique(group_ids[indices]).size
+            score = (coverage, -indices.size, dimension.id in coordinates.sweep_dimension_ids)
+            if best is None or score > best[0]:
+                best = (score, dimension.id, value, indices)
+        if best is None:
+            break
+        _, key, value, selected = best
+        ranges[key] = HeatmapRange(value, value)
+    return ranges
 
 
 def read_heatmap_matrix(
@@ -155,6 +229,7 @@ def read_heatmap_matrix(
     processor=None,
     capture_input: bool = False,
     spectrum_reader=None,
+    checkpoint_indices: Sequence[int] | None = None,
 ) -> HeatmapMatrix:
     """Build one exact coordinate plane; never aggregate duplicate checkpoints."""
 
@@ -205,6 +280,11 @@ def read_heatmap_matrix(
             "Choose a filter range for " + ", ".join(missing_filters) + "."
         )
     selected = _selected_checkpoints(coordinates, request.filters)
+    if checkpoint_indices is not None:
+        exact = set(checkpoint_indices)
+        selected = tuple(index for index in selected if index in exact)
+        if set(selected) != exact:
+            raise ValueError("The batch checkpoints no longer match this heatmap plane.")
     if not selected:
         raise ValueError("No stored checkpoint matches the selected heatmap filters.")
 
@@ -352,18 +432,15 @@ def _private_dimensions(
 def _ordered_private_keys(
     keys: set[str], run: ThatecRun, checkpoint_count: int
 ) -> tuple[str, ...]:
-    try:
-        schema = ThatecSchemaMapper.from_recipe_source(
-            run.recipe_source, expected_points=checkpoint_count
-        )
-    except Exception:
-        schema = None
-    recipe_keys = (
-        tuple(axis.target for axis in schema.axes if axis.target in keys)
-        if schema is not None and schema.mode == "recipe_sweeps"
-        else ()
-    )
+    recipe_keys = tuple(key for key in _recipe_axis_ids(run, checkpoint_count) if key in keys)
     return (*recipe_keys, *(key for key in sorted(keys) if key not in recipe_keys))
+
+
+def _recipe_axis_ids(run: ThatecRun, checkpoint_count: int) -> tuple[str, ...]:
+    schema = ThatecSchemaMapper.from_recipe_source(
+        run.recipe_source, expected_points=checkpoint_count
+    )
+    return tuple(axis.target for axis in schema.axes) if schema.mode == "recipe_sweeps" else ()
 
 
 def _public_control_dimensions(
@@ -427,20 +504,12 @@ def _selected_checkpoints(
     coordinates: HeatmapCoordinates,
     filters: Mapping[str, HeatmapSelection],
 ) -> tuple[int, ...]:
-    selected = []
-    for checkpoint in range(coordinates.checkpoint_count):
-        matches = True
-        for dimension in coordinates.dimensions:
-            if dimension.is_frequency or dimension.id not in filters:
-                continue
-            if not _selection_contains(
-                _checkpoint_value(dimension, checkpoint), filters[dimension.id]
-            ):
-                matches = False
-                break
-        if matches:
-            selected.append(checkpoint)
-    return tuple(selected)
+    selected = np.ones(coordinates.checkpoint_count, dtype=bool)
+    for dimension in coordinates.dimensions:
+        if dimension.is_frequency or dimension.id not in filters:
+            continue
+        selected &= _selection_mask(np.asarray(dimension.values), _selection_range(filters[dimension.id]))
+    return tuple(np.flatnonzero(selected).tolist())
 
 
 def _checkpoint_value(dimension: HeatmapDimension, checkpoint: int) -> float:
@@ -480,27 +549,11 @@ def _selection_range(selection: HeatmapSelection) -> HeatmapRange:
     return HeatmapRange(value, value)
 
 
-def _selection_contains(value: float, selection: HeatmapSelection) -> bool:
-    selected = _selection_range(selection)
-    return (
-        (value > selected.minimum or _values_equal(value, selected.minimum))
-        and (value < selected.maximum or _values_equal(value, selected.maximum))
-    )
-
-
 def _selection_mask(values: np.ndarray, selection: HeatmapRange) -> np.ndarray:
-    return np.asarray(
-        [
-            value >= selection.minimum or _values_equal(float(value), selection.minimum)
-            for value in values
-        ],
-        dtype=bool,
-    ) & np.asarray(
-        [
-            value <= selection.maximum or _values_equal(float(value), selection.maximum)
-            for value in values
-        ],
-        dtype=bool,
+    minimum, maximum = selection.minimum, selection.maximum
+    return (
+        ((values >= minimum) | np.isclose(values, minimum, rtol=1e-9, atol=1e-15))
+        & ((values <= maximum) | np.isclose(values, maximum, rtol=1e-9, atol=1e-15))
     )
 
 

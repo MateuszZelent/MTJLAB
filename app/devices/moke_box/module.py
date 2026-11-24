@@ -48,8 +48,8 @@ def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
         return create_simulated_moke_adapter(settings=settings)
     if not profile.enabled or not profile.protocol_qualified or not profile.endpoint:
         return UnavailableMokeBoxAdapter(
-            "Configure enabled=true, endpoint=host:port and protocol_qualified=true "
-            "for MOKE Box in Station settings, then reconnect."
+            "In Settings → MOKE Box, choose Change TCP address to test and assign the endpoint. "
+            "Enable MOKE Box before connecting."
         )
     return MokeBoxAdapter(
         MokeBoxConfig(

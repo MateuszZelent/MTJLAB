@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QEvent, QSize, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QSizePolicy,
@@ -57,6 +57,8 @@ class SpectrumPlotWidget(QWidget):
         self._traces: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._curves: dict[str, pg.PlotDataItem] = {}
         self._legend_labels: dict[str, str] = {}
+        self._estimated_bands_hz: tuple[tuple[float, float], ...] = ()
+        self._estimated_band_regions: list[pg.LinearRegionItem] = []
         self._plot_title: str | None = None
         self._token_owned_primary_curves: set[str] = set()
         self._hold_source: str | None = None
@@ -217,6 +219,10 @@ class SpectrumPlotWidget(QWidget):
         self.delta_marker.setPen(pg.mkPen(palette.reference, width=2))
         self._style_peak_markers()
         self.replacement_markers.setPen(pg.mkPen(palette.reference))
+        estimate_brush = self._estimated_band_brush()
+        for region in self._estimated_band_regions:
+            region.setBrush(estimate_brush)
+            region.setHoverBrush(estimate_brush)
         danger_color = palette.danger
         self.compliance_markers.setPen(pg.mkPen(danger_color, width=1.5))
         self.compliance_markers.setBrush(pg.mkBrush(danger_color))
@@ -232,6 +238,29 @@ class SpectrumPlotWidget(QWidget):
             if curve is not None:
                 curve.setPen(pg.mkPen(color, width=1.3))
 
+    def _estimated_band_brush(self):
+        color = pg.mkColor(plot_theme(tokens_for(self._theme_name)).reference)
+        color.setAlpha(45)
+        return pg.mkBrush(color)
+
+    def set_estimated_bands(self, bands_hz: tuple[tuple[float, float], ...]) -> None:
+        """Shade estimated samples without affecting zoom, markers or data export."""
+        if bands_hz == self._estimated_bands_hz:
+            return
+        for region in self._estimated_band_regions:
+            self.plot.removeItem(region)
+        self._estimated_band_regions.clear()
+        self._estimated_bands_hz = bands_hz
+        brush = self._estimated_band_brush()
+        pen = pg.mkPen(None)
+        for bounds in bands_hz:
+            region = pg.LinearRegionItem(bounds, movable=False, brush=brush, hoverBrush=brush, pen=pen, hoverPen=pen)
+            region.setToolTip("Estimate from neighbouring frequencies")
+            region.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            region.setZValue(-5)
+            self.plot.addItem(region, ignoreBounds=True)
+            self._estimated_band_regions.append(region)
+
     def set_trace(
         self,
         name: str,
@@ -243,6 +272,8 @@ class SpectrumPlotWidget(QWidget):
         primary: bool = False,
         show_points: bool = False,
         legend_label: str | None = None,
+        opacity: float | None = None,
+        z_value: float | None = None,
     ) -> None:
         caller_supplied_color = color is not None
         token_owned_primary = not caller_supplied_color and primary
@@ -267,6 +298,10 @@ class SpectrumPlotWidget(QWidget):
             self._curves[name] = curve
         elif token_owned_primary or caller_supplied_color or curve.opts["pen"].widthF() != line_width:
             curve.setPen(pg.mkPen(color, width=line_width))
+        if opacity is not None:
+            curve.setOpacity(opacity)
+        if z_value is not None:
+            curve.setZValue(z_value)
         if token_owned_primary:
             self._token_owned_primary_curves.add(name)
         elif caller_supplied_color:
@@ -367,6 +402,7 @@ class SpectrumPlotWidget(QWidget):
     def clear(self) -> None:
         for name in tuple(self._curves):
             self.clear_trace(name)
+        self.set_estimated_bands(())
         self.clear_holds()
         self.marker.hide()
         self.delta_marker.hide()

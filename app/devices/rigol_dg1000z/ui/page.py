@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict, deque
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from copy import deepcopy
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
-    QApplication, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
+    QFormLayout, QFrame, QGridLayout, QHBoxLayout,
     QPushButton, QSplitter,
     QVBoxLayout, QWidget,
 )
@@ -25,20 +25,23 @@ from app.devices.rigol_dg1000z import (
     RigolModulationConfig, RigolOutputConfig,
 )
 from app.devices.rigol_dg1000z.ui.load_estimate import SampleLoadEstimateWidget
+from app.devices.rigol_dg1000z.ui.screen_preview import RigolScreenPreview
 from app.domain.errors import SafetyViolation
 from app.domain.manual_metadata import ManualMetadataValue
 from app.domain.quick_controls import (
     QuickConfigureCommand,
     QuickControlCommand,
-    render_quantity_si_like,
+    step_quantity_text,
 )
 from app.domain.quantities import (
     DIMENSION_FREQUENCY, DIMENSION_TIME, DIMENSION_VOLTAGE,
     format_quantity_auto, parse_quantity,
 )
 from app.safety.rigol_current import (
+    quantize_rigol_frequency,
+    quantize_rigol_level_pair,
+    quantize_rigol_level_update,
     quantize_rigol_voltage,
-    rigol_voltage_resolution_v,
     validate_rigol_frequency_sweep,
     validate_rigol_waveform,
 )
@@ -47,6 +50,7 @@ from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
 from app.ui.dialogs import StationDialog, StationMessageBox as QMessageBox
 from app.ui.widgets import FluentTabView, LimitField, NotificationBanner, SpectrumPlotWidget
+from app.ui.widgets.quantity_editor import QuantityEditor
 from app.ui.workers import DeviceController
 
 
@@ -131,6 +135,10 @@ class RigolPage(QWidget):
         "shape settings are written from this form. OUTPUT ON performs this full apply "
         "when the visible carrier has not already been confirmed."
     )
+    LIVE_VOLTAGE_STEP = "1 mV"
+    _SCREEN_REFRESH_OPERATIONS = frozenset({
+        "configure", "quick_configure", "quick_setpoint", "configure_output", "set_output",
+    })
 
     def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -162,8 +170,6 @@ class RigolPage(QWidget):
         self._execution_readbacks: dict[int, dict[str, object]] = {}
         self._last_execution_render = None
         self._execution_controlled = False
-        self._rigol_field_edited_while_live: set[str] = set()
-        self._rigol_return_pressed_field: str | None = None
         self._control_window: _RigolFloatingControlsWindow | None = None
         self._control_placeholder: QWidget | None = None
         self._page_layout = QVBoxLayout(self)
@@ -198,7 +204,7 @@ class RigolPage(QWidget):
         self.live_control_switch.setOffText("Live control")
         self.live_control_switch.setChecked(False)
         self.live_control_switch.setToolTip(
-            "When enabled, parameter changes in the form are immediately sent to the connected Rigol."
+            "Enable Apply and Enter for individual changes to a verified carrier."
         )
         self.live_control_switch.checkedChanged.connect(self._live_control_toggled)
         header_layout.addWidget(self.live_control_switch)
@@ -237,8 +243,12 @@ class RigolPage(QWidget):
         self.waveform.setCurrentText("SIN")
         self.time_mode = ComboBox()
         self.time_mode.addItems(["Frequency", "Period"])
-        self.frequency = _line("1 kHz")
-        self.period = _line("1 ms")
+        self.frequency = QuantityEditor(
+            "1 kHz", DIMENSION_FREQUENCY, ("Hz", "kHz", "MHz"), "Frequency", number_only=True,
+        )
+        self.period = QuantityEditor(
+            "1 ms", DIMENSION_TIME, ("ns", "us", "ms", "s"), "Period", number_only=True,
+        )
         self.level_mode = ComboBox()
         self.level_mode.addItems(
             [self.LEVEL_MODE_AMPLITUDE_OFFSET, self.LEVEL_MODE_HIGH_LOW]
@@ -250,10 +260,20 @@ class RigolPage(QWidget):
         )
         self.level_mode_hint.setWordWrap(True)
         self.level_mode_hint.setObjectName("muted")
-        self.high_level = _line("1 mV")
-        self.low_level = _line("-1 mV")
-        self.vpp = _line("2 mV")
-        self.offset = _line("0 V")
+        voltage_units = ("uV", "mV", "V")
+        self.high_level = QuantityEditor("1 mV", DIMENSION_VOLTAGE, voltage_units, "High level", number_only=True)
+        self.low_level = QuantityEditor("-1 mV", DIMENSION_VOLTAGE, voltage_units, "Low level", number_only=True)
+        self.vpp = QuantityEditor("2 mV", DIMENSION_VOLTAGE, voltage_units, "Amplitude", number_only=True)
+        self.offset = QuantityEditor("0 mV", DIMENSION_VOLTAGE, voltage_units, "Offset / DC level", number_only=True)
+        self._live_editors = {
+            self.frequency: "frequency", self.period: "frequency",
+            self.high_level: "high_level", self.low_level: "low_level",
+            self.vpp: "amplitude", self.offset: "offset",
+        }
+        self._channel_numeric_drafts: dict[int, dict[QuantityEditor, tuple[str, str, bool, bool]]] = {}
+        self._channel_incomplete_forms: dict[int, RigolConfigurationSnapshot] = {}
+        self._live_feedback: dict[int, str] = {}
+        self._pending_live_setpoints: set[str] = set()
         self.combined_voltage_usage = _line("2 mV")
         self.combined_voltage_usage.setReadOnly(True)
         self.combined_voltage_usage.setObjectName("rigolCombinedVoltageUsage")
@@ -280,7 +300,6 @@ class RigolPage(QWidget):
         self.pulse_trailing = _line("10 ns")
         self._level_syncing = False
         self._time_syncing = False
-        self._quick_control_projection = False
         self._visible_form_channel = 1
         self._channel_form_snapshots: dict[int, RigolConfigurationSnapshot] = {
             1: RigolConfigurationSnapshot(channel=1),
@@ -322,6 +341,12 @@ class RigolPage(QWidget):
         self.basic_form = self.basic_scroll.widget().findChild(QFormLayout)
         self.sample_load_estimate = SampleLoadEstimateWidget(self.basic_scroll.widget())
         basic_layout = self.basic_scroll.widget().layout()
+        self.live_control_hint = CaptionLabel(
+            "Press Enter or Apply to send one value. Unit changes preserve the physical value."
+        )
+        self.live_control_hint.setWordWrap(True)
+        self.live_control_hint.setObjectName("muted")
+        basic_layout.insertWidget(2, self.live_control_hint)
         basic_layout.insertWidget(basic_layout.count() - 1, self.sample_load_estimate)
         shape_apply = PrimaryPushButton("Apply shape parameters")
         self.shape_scroll = self._form_page(
@@ -405,11 +430,20 @@ class RigolPage(QWidget):
         insight_layout.setContentsMargins(10, 0, 0, 0)
         self.preview_title = StrongBodyLabel("Waveform preview")
         self.preview_title.setObjectName("sectionTitle")
-        insight_layout.addWidget(self.preview_title)
+        waveform_preview = QWidget()
+        waveform_preview_layout = QVBoxLayout(waveform_preview)
+        waveform_preview_layout.setContentsMargins(0, 0, 0, 0)
+        waveform_preview_layout.addWidget(self.preview_title)
         self.preview_plot = SpectrumPlotWidget(legend=False)
         self.preview_plot.set_labels(x="Normalized period", x_unit="", y="Voltage", y_unit="V")
         self.preview_plot.setMinimumHeight(260)
-        insight_layout.addWidget(self.preview_plot, 1)
+        waveform_preview_layout.addWidget(self.preview_plot, 1)
+        self.preview_tabs = FluentTabView(insight)
+        self.preview_tabs.setObjectName("rigolPreviewTabs")
+        self.preview_tabs.addTab(waveform_preview, "Waveform")
+        self.screen_preview = RigolScreenPreview(controller, self.preview_tabs)
+        self.preview_tabs.addTab(self.screen_preview, "Rigol screen")
+        insight_layout.addWidget(self.preview_tabs, 1)
 
         self.safety_card = CardWidget()
         safety = self.safety_card
@@ -441,41 +475,18 @@ class RigolPage(QWidget):
         layout.addWidget(splitter, 1)
 
         configure.clicked.connect(self.configure)
-        shape_apply.clicked.connect(self.configure)
+        shape_apply.clicked.connect(lambda: self.configure(allow_live=False))
         configure_output.clicked.connect(self.configure_output)
         self.sync_phases_button.clicked.connect(lambda: self._controller.call("synchronize_phases"))
-        self.high_level.editingFinished.connect(
-            lambda: self._clamp_voltage_to_shared_budget("high_level", self.high_level)
-        )
-        self.low_level.editingFinished.connect(
-            lambda: self._clamp_voltage_to_shared_budget("low_level", self.low_level)
-        )
-        self.vpp.editingFinished.connect(
-            lambda: self._clamp_voltage_to_shared_budget("amplitude", self.vpp)
-        )
-        self.offset.editingFinished.connect(
-            lambda: self._clamp_voltage_to_shared_budget("offset", self.offset)
-        )
-        self.high_level.editingFinished.connect(self._sync_vpp_offset_from_levels)
-        self.low_level.editingFinished.connect(self._sync_vpp_offset_from_levels)
-        self.vpp.editingFinished.connect(self._sync_levels_from_vpp_offset)
-        self.offset.editingFinished.connect(self._sync_levels_from_vpp_offset)
-        self.frequency.editingFinished.connect(self._sync_period_from_frequency)
-        self.period.editingFinished.connect(self._sync_frequency_from_period)
-        self.frequency.editingFinished.connect(self._submit_active_frequency)
-        self.period.editingFinished.connect(self._submit_active_frequency)
-        self.high_level.editingFinished.connect(
-            lambda: self._submit_active_voltage("high_level", self.high_level)
-        )
-        self.low_level.editingFinished.connect(
-            lambda: self._submit_active_voltage("low_level", self.low_level)
-        )
-        self.vpp.editingFinished.connect(
-            lambda: self._submit_active_voltage("amplitude", self.vpp)
-        )
-        self.offset.editingFinished.connect(
-            lambda: self._submit_active_voltage("offset", self.offset)
-        )
+        for editor in self._live_editors:
+            editor.commit_requested.connect(
+                lambda field=editor: self._commit_live_value(field)
+            )
+            editor.enable_explicit_arrow_steps()
+            editor.step_requested.connect(
+                lambda direction, repeated, field=editor: self._step_live_value(field, direction, repeated)
+            )
+            editor.textChanged.connect(self._refresh_live_value_controls)
         self.output_on.clicked.connect(lambda: self.request_output(True))
         self.output_off.clicked.connect(lambda: self.request_output(False))
         controller.request.connect(self._controller_request_queued)
@@ -483,72 +494,12 @@ class RigolPage(QWidget):
         controller.error.connect(self._error)
         controller.state_changed.connect(self._device_state_changed)
         self.waveform.currentTextChanged.connect(self._update_dynamic_controls)
-        self.level_mode.currentTextChanged.connect(self._update_dynamic_controls)
-        self.time_mode.currentTextChanged.connect(self._update_dynamic_controls)
+        self.level_mode.currentTextChanged.connect(self._level_representation_changed)
+        self.time_mode.currentTextChanged.connect(self._time_representation_changed)
         self.waveform.currentTextChanged.connect(self._update_preview)
         self.channel.currentTextChanged.connect(self._update_preview)
         self.channel.currentTextChanged.connect(self._selected_output_channel_changed)
         self.channel.currentTextChanged.connect(self._refresh_rigol_limits)
-        for field in (
-            self.frequency,
-            self.period,
-            self.high_level,
-            self.low_level,
-            self.vpp,
-            self.offset,
-        ):
-            field.setProperty("requiresLiveControl", True)
-        self._live_rigol_timers: dict[str, QTimer] = {}
-        for timer_field in ("frequency", "high_level", "low_level", "amplitude", "offset"):
-            t = QTimer(self)
-            t.setSingleShot(True)
-            self._live_rigol_timers[timer_field] = t
-        self._live_rigol_timers["frequency"].timeout.connect(self._submit_active_frequency)
-        self._live_rigol_timers["high_level"].timeout.connect(
-            lambda: self._submit_active_voltage("high_level", self.high_level)
-        )
-        self._live_rigol_timers["low_level"].timeout.connect(
-            lambda: self._submit_active_voltage("low_level", self.low_level)
-        )
-        self._live_rigol_timers["amplitude"].timeout.connect(
-            lambda: self._submit_active_voltage("amplitude", self.vpp)
-        )
-        self._live_rigol_timers["offset"].timeout.connect(
-            lambda: self._submit_active_voltage("offset", self.offset)
-        )
-        self.frequency.textEdited.connect(lambda: self._on_rigol_field_edited("frequency"))
-        self.period.textEdited.connect(lambda: self._on_rigol_field_edited("frequency"))
-        self.high_level.textEdited.connect(lambda: self._on_rigol_field_edited("high_level"))
-        self.low_level.textEdited.connect(lambda: self._on_rigol_field_edited("low_level"))
-        self.vpp.textEdited.connect(lambda: self._on_rigol_field_edited("amplitude"))
-        self.offset.textEdited.connect(lambda: self._on_rigol_field_edited("offset"))
-
-        self.frequency.returnPressed.connect(
-            lambda: self._on_rigol_return_pressed("frequency", self._submit_active_frequency)
-        )
-        self.period.returnPressed.connect(
-            lambda: self._on_rigol_return_pressed("frequency", self._submit_active_frequency)
-        )
-        self.high_level.returnPressed.connect(
-            lambda: self._on_rigol_return_pressed(
-                "high_level", lambda: self._submit_active_voltage("high_level", self.high_level)
-            )
-        )
-        self.low_level.returnPressed.connect(
-            lambda: self._on_rigol_return_pressed(
-                "low_level", lambda: self._submit_active_voltage("low_level", self.low_level)
-            )
-        )
-        self.vpp.returnPressed.connect(
-            lambda: self._on_rigol_return_pressed(
-                "amplitude", lambda: self._submit_active_voltage("amplitude", self.vpp)
-            )
-        )
-        self.offset.returnPressed.connect(
-            lambda: self._on_rigol_return_pressed(
-                "offset", lambda: self._submit_active_voltage("offset", self.offset)
-            )
-        )
         for field in (self.frequency, self.period, self.high_level, self.low_level, self.vpp, self.offset, self.duty, self.ramp_symmetry, self.pulse_width):
             field.textChanged.connect(self._update_preview)
         for field in (self.high_level, self.low_level, self.vpp, self.offset):
@@ -560,14 +511,6 @@ class RigolPage(QWidget):
             checkbox.stateChanged.connect(self._update_sample_load_estimate)
         self.waveform.currentTextChanged.connect(self._update_combined_voltage_usage)
         self.level_mode.currentTextChanged.connect(self._update_combined_voltage_usage)
-        for field in (
-            self.frequency,
-            self.high_level,
-            self.low_level,
-            self.vpp,
-            self.offset,
-        ):
-            field.textChanged.connect(self._publish_quick_control_drafts)
         self.load_settings_defaults()
         self._sync_vpp_offset_from_levels()
         self._sync_period_from_frequency()
@@ -662,20 +605,61 @@ class RigolPage(QWidget):
         self.live_control_switch.setChecked(enabled)
 
     def _live_control_toggled(self, enabled: bool) -> None:
-        self._suppress_focus_loss_dispatch = True
-        try:
-            focused = QApplication.focusWidget()
-            if focused is not None and hasattr(focused, "clearFocus"):
-                focused.clearFocus()
-            if enabled:
-                if not self._is_device_connected():
-                    self.status.emit("Rigol live control enabled (instrument offline).")
-                else:
-                    self.status.emit("Rigol live control active: parameter changes are applied immediately.")
-            else:
-                self.status.emit("Rigol live control disabled: parameter changes apply on command.")
-        finally:
-            self._suppress_focus_loss_dispatch = False
+        self._stop_live_arrow_repeats()
+        self._live_feedback.clear()
+        self.screen_preview.set_live_control_enabled(enabled)
+        self._refresh_live_value_controls()
+        self.status.emit(
+            "Rigol live control selected. Follow the instructions in Basic parameters."
+            if enabled else "Rigol live control disabled. Full configuration is available with OUTPUT OFF."
+        )
+
+    def _refresh_live_value_controls(self) -> None:
+        channel = int(self.channel.currentText())
+        blocker = self._live_value_blocker(channel)
+        enabled = self.live_control_enabled and not blocker
+        draft_hint = ""
+        invalid_draft = False
+        for editor in self._live_editors:
+            error = ""
+            if editor.is_draft:
+                try:
+                    editor.value_si()
+                except ValueError as exc:
+                    error = str(exc)
+                if self.basic_form.isRowVisible(self._row_widget(editor)) and (error or not draft_hint):
+                    invalid_draft = bool(error)
+                    action = "Press Enter or Apply to send it." if enabled else "Use Validate and apply waveform with OUTPUT OFF."
+                    draft_hint = f"{editor.number.accessibleName()}: {error or f'Draft. {action}'}"
+            editor.apply.setEnabled(enabled and not error)
+        active = self._active_output_selected()
+        self.waveform_apply_button.setText("Apply live value" if active else "Validate and apply waveform")
+        self.waveform_apply_button.setToolTip(
+            "Apply one carrier value while OUTPUT is ON. Requires Live control." if active
+            else "Validate and apply the complete waveform with OUTPUT OFF."
+        )
+        self.live_control_hint.setVisible(self.live_control_enabled or bool(draft_hint))
+        if invalid_draft or not self.live_control_enabled:
+            hint = draft_hint
+        else:
+            hint = blocker or draft_hint or self._live_feedback.get(
+                channel, "Enter or Apply sends one value. For voltage, tap or hold an arrow key for 1 mV steps.",
+            )
+        self.live_control_hint.setText(hint)
+
+    def _live_value_blocker(self, channel: int) -> str:
+        if self._execution_controlled:
+            return "Live changes are unavailable during a sweep."
+        if self._pending_output_channel is not None:
+            return f"Wait for the CH{self._pending_output_channel} output operation to finish."
+        if not self._is_device_connected():
+            return "Connect Rigol from Instrument connection to enable live changes."
+        if self._device_state_value not in {"output_off", "output_on"} or not self._output_state_known[channel]:
+            return f"CH{channel} output state is unknown. Use OUTPUT OFF to request confirmation."
+        if self._confirmed_carrier_configs[channel] is None:
+            action = "Turn OUTPUT OFF, then click" if self._output_states[channel] else "Click"
+            return f"CH{channel} waveform needs verification. {action} Validate and apply waveform."
+        return ""
 
     def quick_control_draft_snapshot(self) -> dict[str, str]:
         """Return all visible/basic channel drafts with explicit units."""
@@ -686,7 +670,9 @@ class RigolPage(QWidget):
             high = parse_quantity(snapshot.high_level, DIMENSION_VOLTAGE).si_value
             low = parse_quantity(snapshot.low_level, DIMENSION_VOLTAGE).si_value
             if channel == int(self.channel.currentText()):
-                values[f"rigol.{channel}.frequency"] = self.frequency.text().strip()
+                values[f"rigol.{channel}.frequency"] = (
+                    snapshot.frequency if snapshot.time_mode == "Period" else self.frequency.text()
+                )
                 values[f"rigol.{channel}.high_level"] = self.high_level.text().strip()
                 values[f"rigol.{channel}.low_level"] = self.low_level.text().strip()
                 values[f"rigol.{channel}.amplitude"] = self.vpp.text().strip()
@@ -724,37 +710,43 @@ class RigolPage(QWidget):
             "offset",
         }:
             return
+        if channel == int(self.channel.currentText()) and (
+            source == "readback" or any(editor.is_draft for editor in self._related_editors(field))
+        ):
+            return
         if channel != int(self.channel.currentText()):
-            self._channel_form_snapshots[channel] = self._snapshot_with_quick_value(
-                self.configuration_snapshot_for(channel), field, text
-            )
+            snapshot = self.configuration_snapshot_for(channel)
+            if (snapshot.waveform == "DC" and field != "offset") or (
+                snapshot.waveform == "NOIS" and field == "frequency"
+            ):
+                return
+            self._channel_form_snapshots[channel] = self._snapshot_with_quick_value(snapshot, field, text)
             if projection_source:
                 self._publish_quick_control_snapshot(channel)
             return
-        self._quick_control_projection = True
-        try:
-            if field == "frequency":
-                self.frequency.setText(text)
-                self._sync_period_from_frequency()
-            elif field == "high_level":
-                self.high_level.setText(text)
-                self._sync_vpp_offset_from_levels()
-            elif field == "low_level":
-                self.low_level.setText(text)
-                self._sync_vpp_offset_from_levels()
-            elif field == "amplitude":
-                self.vpp.setText(text)
-                self._sync_levels_from_vpp_offset()
-            else:
-                self.offset.setText(text)
-                self._sync_levels_from_vpp_offset()
-        finally:
-            self._quick_control_projection = False
+        waveform = self.waveform.currentText()
+        if (waveform == "DC" and field != "offset") or (waveform == "NOIS" and field == "frequency"):
+            return
+        if field == "frequency":
+            self.frequency.setText(text)
+            self._sync_period_from_frequency()
+        elif field == "high_level":
+            self.high_level.setText(text)
+            self._sync_vpp_offset_from_levels()
+        elif field == "low_level":
+            self.low_level.setText(text)
+            self._sync_vpp_offset_from_levels()
+        elif field == "amplitude":
+            self.vpp.setText(text)
+            self._sync_levels_from_vpp_offset()
+        else:
+            self.offset.setText(text)
+            self._sync_levels_from_vpp_offset()
         if projection_source:
             self._publish_quick_control_snapshot(channel)
 
     def quick_control_hardware_request(
-        self, target: str, text: str, state: str
+        self, target: str, text: str, state: str, *, live_only: bool = False,
     ) -> tuple[str, object]:
         """Build the safe OFF configuration or ON live-update operation."""
 
@@ -769,7 +761,13 @@ class RigolPage(QWidget):
         channel_output_on = (
             self._output_state_known[channel] and self._output_states[channel]
         )
-        if normalized_state == "output_on" and channel_output_on:
+        if live_only:
+            if not self.live_control_enabled:
+                raise SafetyViolation("Enable Live control before sending an individual value.")
+            blocker = self._live_value_blocker(channel)
+            if blocker:
+                raise SafetyViolation(blocker)
+        if live_only or (normalized_state == "output_on" and channel_output_on):
             if self._confirmed_carrier_configs[channel] is None:
                 raise SafetyViolation(
                     f"Rigol CH{channel} has no carrier configuration verified by the card; "
@@ -779,7 +777,12 @@ class RigolPage(QWidget):
             parse_quantity(text, dimension)
             snapshot = self.configuration_snapshot_for(channel)
             updated = self._snapshot_with_quick_value(snapshot, field, text)
-            self._channel_config_from_snapshot(updated)
+            candidate = self._channel_config_from_snapshot(updated, update_baseline=self._confirmed_carrier_configs[channel])
+            if not self._only_quick_field_changed(self._confirmed_carrier_configs[channel], candidate, field):
+                raise SafetyViolation(
+                    "The visible Rigol waveform, load, shape or other voltage control differs from the confirmed carrier. "
+                    "Turn OUTPUT OFF and apply the changed settings before live control."
+                )
             return "quick_setpoint", QuickControlCommand(target, text)
         if normalized_state == "output_on" and not self._output_state_known[channel]:
             raise SafetyViolation(
@@ -791,23 +794,34 @@ class RigolPage(QWidget):
             )
         snapshot = self.configuration_snapshot_for(channel)
         updated = self._snapshot_with_quick_value(snapshot, field, text)
-        config = self._channel_config_from_snapshot(updated)
         confirmed = self._confirmed_carrier_configs[channel]
+        config = self._channel_config_from_snapshot(updated, update_baseline=confirmed)
         if confirmed is not None and self._only_quick_field_changed(confirmed, config, field):
             # An OFF output does not require rebuilding an already verified
             # carrier on every slider/key step. The adapter still validates
             # the baseline, limits and actual output state before the write.
             return "quick_setpoint", QuickControlCommand(target, text)
-        return "quick_configure", QuickConfigureCommand(target, config)
+        has_numeric_drafts = (
+            any(editor.is_draft for editor in self._live_editors)
+            if channel == int(self.channel.currentText())
+            else bool(self._channel_numeric_drafts.get(channel))
+        )
+        if has_numeric_drafts:
+            raise SafetyViolation(
+                f"Rigol CH{channel} has unfinished numeric edits. Review them and apply the waveform with OUTPUT OFF."
+            )
+        return "quick_configure", QuickConfigureCommand(target, self._channel_config_from_snapshot(updated))
 
     @staticmethod
     def _only_quick_field_changed(
-        before: RigolChannelConfig, after: RigolChannelConfig, field: str,
+        before: RigolChannelConfig, after: RigolChannelConfig, field: str | None,
     ) -> bool:
         ignored = {"changed_fields"}
+        if before.waveform.upper() == after.waveform.upper() and before.waveform.upper() in {"DC", "NOIS"}:
+            ignored.update({"frequency_hz", "phase_deg"})
         if field == "frequency":
             ignored.add("frequency_hz")
-        else:
+        elif field is not None:
             ignored.update({"high_level_v", "low_level_v"})
             if before.waveform.upper() != "DC":
                 preserved = {
@@ -820,10 +834,19 @@ class RigolPage(QWidget):
                 }[field]
                 if not math.isclose(*preserved, rel_tol=1e-9, abs_tol=1e-12):
                     return False
-        return all(
-            getattr(before, name) == getattr(after, name)
-            for name in RigolChannelConfig.__dataclass_fields__ if name not in ignored
-        )
+        for name in RigolChannelConfig.__dataclass_fields__:
+            if name in ignored:
+                continue
+            first, second = getattr(before, name), getattr(after, name)
+            if name == 'frequency_hz':
+                equal = quantize_rigol_frequency(first) == quantize_rigol_frequency(second)
+            elif isinstance(first, (int, float)) and isinstance(second, (int, float)):
+                equal = math.isclose(first, second, rel_tol=1e-12, abs_tol=0.)
+            else:
+                equal = first == second
+            if not equal:
+                return False
+        return True
 
     def quick_control_configuration_verified(
         self, target: str, command: object
@@ -839,8 +862,40 @@ class RigolPage(QWidget):
             or config.channel not in {1, 2}
         ):
             return
-        self._confirmed_carrier_configs[config.channel] = config
+        self._cache_applied_carrier(config)
         self._refresh_confirmed_advanced_controls()
+
+    def _cache_applied_carrier(self, requested: RigolChannelConfig) -> None:
+        """A successful apply confirms the wire representation, not raw digits."""
+        high, low = quantize_rigol_level_pair(requested.high_level_v, requested.low_level_v, waveform=requested.waveform)
+        applied = replace(requested, high_level_v=high, low_level_v=low,
+                          frequency_hz=quantize_rigol_frequency(requested.frequency_hz))
+        self._confirmed_carrier_configs[requested.channel] = applied
+        if requested.channel != int(self.channel.currentText()):
+            return
+        self._refresh_live_value_controls()
+        try:
+            if self._visible_channel_config() != requested:
+                return  # Keep a newer in-flight draft; do not label it confirmed.
+        except (ValueError, SafetyViolation):
+            return
+        previous_sync = self._level_syncing
+        self._level_syncing = True
+        try:
+            self.high_level.set_value_si(high)
+            self.low_level.set_value_si(low)
+            # The applied waveform is programmed as Vpp and offset. Render
+            # those wire values without float noise from the derived endpoints.
+            self.offset.set_value_si(quantize_rigol_voltage((high + low) / 2))
+            if requested.waveform.upper() != 'DC':
+                self.vpp.set_value_si(quantize_rigol_voltage(high - low))
+            if requested.waveform.upper() not in {'DC', 'NOIS'}:
+                self.frequency.set_value_si(applied.frequency_hz)
+                self._sync_period_from_frequency()
+        finally:
+            self._level_syncing = previous_sync
+        self._update_preview()
+        self._publish_quick_control_snapshot(requested.channel)
 
     def _publish_quick_control_snapshot(self, channel: int) -> None:
         try:
@@ -852,43 +907,34 @@ class RigolPage(QWidget):
             if target.startswith(prefix):
                 self.quick_control_draft_changed.emit(target, text)
 
-    def _publish_quick_control_drafts(self, *_args: object) -> None:
-        if self._quick_control_projection:
-            return
-        try:
-            values = self.quick_control_draft_snapshot()
-        except (TypeError, ValueError):
-            return
-        channel = self.channel.currentText()
-        prefix = f"rigol.{channel}."
-        for target, text in values.items():
-            if target.startswith(prefix):
-                self.quick_control_draft_changed.emit(target, text)
-
     def _snapshot_with_quick_value(
         self,
         snapshot: RigolConfigurationSnapshot,
         field: str,
         text: str,
     ) -> RigolConfigurationSnapshot:
+        if snapshot.waveform.upper() == "DC" and field != "offset":
+            raise SafetyViolation("DC supports only Offset / DC level; AC controls are not DC setpoints.")
         if field == "frequency":
+            if snapshot.waveform.upper() == "NOIS":
+                raise SafetyViolation("Noise waveforms have no frequency setpoint.")
             return replace(snapshot, frequency=text)
         high = parse_quantity(snapshot.high_level, DIMENSION_VOLTAGE).si_value
         low = parse_quantity(snapshot.low_level, DIMENSION_VOLTAGE).si_value
         value = parse_quantity(text, DIMENSION_VOLTAGE).si_value
         if snapshot.waveform == "DC":
-            high = low = quantize_rigol_voltage(value)
+            high = low = value
         elif field == "high_level":
-            high = quantize_rigol_voltage(value)
+            high = value
         elif field == "low_level":
-            low = quantize_rigol_voltage(value)
+            low = value
         elif field == "amplitude":
-            offset = quantize_rigol_voltage((high + low) / 2.0)
-            amplitude = quantize_rigol_voltage(value)
+            offset = (high + low) / 2.0
+            amplitude = value
             high, low = offset + amplitude / 2.0, offset - amplitude / 2.0
         elif field == "offset":
-            amplitude = quantize_rigol_voltage(high - low)
-            offset = quantize_rigol_voltage(value)
+            amplitude = high - low
+            offset = value
             high, low = offset + amplitude / 2.0, offset - amplitude / 2.0
         preferred = (
             "mV"
@@ -901,97 +947,95 @@ class RigolPage(QWidget):
             low_level=self._format_voltage(low, preferred_unit=preferred),
         )
 
-    def _on_rigol_field_edited(self, field: str) -> None:
-        if not self.live_control_switch.isChecked():
-            return
-        timer = getattr(self, "_live_rigol_timers", {}).get(field)
-        if timer is not None:
-            timer.start(400)
+    def _stop_live_arrow_repeats(self) -> None:
+        for editor in self._live_editors:
+            editor.stop_arrow_repeat()
 
-    def _on_rigol_return_pressed(self, field: str, submit_callback: Callable[[], None]) -> None:
-        timer = getattr(self, "_live_rigol_timers", {}).get(field)
-        if timer is not None:
-            timer.stop()
-        submit_callback()
-
-    def _submit_active_frequency(self) -> None:
-        timer = getattr(self, "_live_rigol_timers", {}).get("frequency")
-        if not self.live_control_switch.isChecked():
-            return
-        if self.waveform.currentText() in {"DC", "NOIS"}:
-            return
-        if getattr(self, "_suppress_focus_loss_dispatch", False):
-            return
-        if not self._is_device_connected():
-            return
-        if (
-            bool(self.frequency.property("precisionArrowStepInProgress"))
-            or bool(self.period.property("precisionArrowStepInProgress"))
-        ):
-            if timer is not None and not timer.isActive():
-                timer.start(60)
-            return
-        if timer is not None:
-            timer.stop()
-
+    def _step_live_value(self, editor: QuantityEditor, direction: int, repeated: bool) -> None:
         channel = int(self.channel.currentText())
+        if not self.live_control_enabled or not self.basic_form.isRowVisible(self._row_widget(editor)):
+            editor.stop_arrow_repeat()
+            return
+        blocker = self._live_value_blocker(channel)
+        if blocker:
+            editor.stop_arrow_repeat()
+            self.banner.show_message(blocker, severity="warning")
+            return
+        if repeated and self._pending_live_setpoints:
+            return  # Skip ticks while the worker catches up. Never enqueue missed steps.
         try:
-            parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY)
-        except Exception as exc:
+            baseline = self._confirmed_carrier_configs[channel]
+            displayed = editor.value_si()
+            if editor.is_draft:
+                editor.stop_arrow_repeat()
+                self.banner.show_message("Press Enter or Apply to send the edited value before stepping.", severity="warning")
+                return
+            field = self._live_editors[editor]
+            if field == "frequency":
+                displayed_hz = self._frequency_from_period(displayed) if editor is self.period else displayed
+                matches = quantize_rigol_frequency(displayed_hz) == quantize_rigol_frequency(baseline.frequency_hz)
+                step = None
+            else:
+                high, low = baseline.high_level_v, baseline.low_level_v
+                applied = {"high_level": high, "low_level": low, "amplitude": high - low,
+                           "offset": (high + low) / 2}[field]
+                matches = math.isclose(displayed, applied, rel_tol=1e-9, abs_tol=1e-12)
+                step = self.LIVE_VOLTAGE_STEP
+            if not matches:
+                if not repeated:
+                    self.banner.show_message("Wait for the previous change or press Enter to apply the displayed value.", severity="warning")
+                return
+            text, _ = step_quantity_text(editor.text(), editor.dimension, direction, step_text=step)
+        except (ValueError, SafetyViolation) as exc:
+            editor.stop_arrow_repeat()
+            self.banner.show_message(str(exc), severity="warning")
+            return
+        self._commit_live_value(editor, explicit_value=text)
+
+    def _commit_live_value(self, editor: QuantityEditor, *, explicit_value: str | None = None) -> None:
+        field = self._live_editors[editor]
+        if not self.basic_form.isRowVisible(self._row_widget(editor)):
+            return
+        channel = int(self.channel.currentText())
+        if not self.live_control_enabled:
+            return
+        try:
+            if explicit_value is None:
+                explicit_value = editor.committed_text()
+            text = explicit_value
+            if editor is self.period:
+                period_s = parse_quantity(explicit_value, DIMENSION_TIME).si_value
+                text = f"{self._frequency_from_period(period_s):.15g} Hz"
+            target = f"rigol.{channel}.{field}"
+            self.quick_control_hardware_request(
+                target, text, self._device_state_value, live_only=True,
+            )
+        except (ValueError, SafetyViolation) as exc:
+            editor.stop_arrow_repeat()
             self.banner.show_message(
-                f"Rigol CH{channel}: invalid frequency: {exc}",
+                f"Rigol CH{channel}: change rejected before hardware traffic. {exc}",
                 severity="error",
                 timeout_ms=12_000,
             )
             return
-        if self._confirmed_carrier_configs[channel] is None:
-            self.configure()
-            return
-        self.quick_setpoint_requested.emit(
-            f"rigol.{channel}.frequency",
-            self.frequency.text().strip(),
-        )
-
-    def _submit_active_voltage(self, field: str, editor: QWidget) -> None:
-        timer = getattr(self, "_live_rigol_timers", {}).get(field)
-        if not self.live_control_switch.isChecked():
-            return
-        if getattr(self, "_suppress_focus_loss_dispatch", False):
-            return
-        if not self._is_device_connected():
-            return
-        if bool(editor.property("precisionArrowStepInProgress")):
-            # Throttle repeated arrow steps rather than restarting a debounce
-            # forever while the key is held. The coordinator coalesces queued
-            # values while a previous hardware request is still in flight.
-            if timer is not None and not timer.isActive():
-                timer.start(60)
-            return
-        if timer is not None:
-            timer.stop()
-
-        channel = int(self.channel.currentText())
-        try:
-            parse_quantity(editor.text(), DIMENSION_VOLTAGE)  # type: ignore[attr-defined]
-            self._channel_config_from_snapshot(self.configuration_snapshot())
-        except Exception as exc:
-            self.banner.show_message(
-                f"Rigol CH{channel}: voltage change rejected before hardware traffic: {exc}",
-                severity="error",
-                timeout_ms=12_000,
-            )
-            return
-        if self._confirmed_carrier_configs[channel] is None:
-            self.configure()
-            return
-        self.quick_setpoint_requested.emit(
-            f"rigol.{channel}.{field}",
-            editor.text().strip(),  # type: ignore[attr-defined]
-        )
+        editor.setText(explicit_value)
+        self.quick_setpoint_requested.emit(target, text)
 
     def quick_setpoint_state_changed(self, target: str, state: str, detail: str) -> None:
         if not target.startswith("rigol."):
             return
+        parts = target.split(".")
+        if len(parts) == 3 and parts[1] in {"1", "2"} and state in {"pending", "applying", "applied", "draft", "rejected"}:
+            if state in {"pending", "applying"}:
+                self._pending_live_setpoints.add(target)
+            else:
+                self._pending_live_setpoints.discard(target)
+                if state in {"draft", "rejected"}:
+                    self._stop_live_arrow_repeats()
+            channel = int(parts[1])
+            self._live_feedback[channel] = detail
+            if channel == int(self.channel.currentText()):
+                self._refresh_live_value_controls()
         if state == "rejected":
             self.banner.show_message(
                 f"Active Rigol change rejected: {detail}",
@@ -1009,65 +1053,37 @@ class RigolPage(QWidget):
         self._record_confirmed_quick_readback(int(parts[1]), field, value_si)
         if parts[1] != self.channel.currentText():
             return
-        if field == "frequency":
-            timer = getattr(self, "_live_rigol_timers", {}).get("frequency")
-            if (
-                self.frequency.hasFocus()
-                or self.period.hasFocus()
-                or bool(self.frequency.property("precisionArrowStepInProgress"))
-                or bool(self.period.property("precisionArrowStepInProgress"))
-                or (timer is not None and timer.isActive())
-            ):
-                return
-        else:
-            editors = {
-                "high_level": self.high_level,
-                "low_level": self.low_level,
-                "amplitude": self.vpp,
-                "offset": self.offset,
-            }
-            editor = editors.get(field)
-            if editor is None:
-                return
-            timer = getattr(self, "_live_rigol_timers", {}).get(field)
-            if (
-                editor.hasFocus()
-                or bool(editor.property("precisionArrowStepInProgress"))
-                or (timer is not None and timer.isActive())
-            ):
-                return
+        editors = self._related_editors(field)
+        if not editors or any(editor.is_draft for editor in editors):
+            return
 
-        self._quick_control_projection = True
-        try:
-            if field == "frequency":
-                try:
-                    text = render_quantity_si_like(self.frequency.text(), DIMENSION_FREQUENCY, value_si)
-                except Exception:
-                    text = format_quantity_auto(value_si, DIMENSION_FREQUENCY)
-                self.frequency.setText(text)
+        if field == "frequency":
+            self.frequency.set_value_si(value_si)
+            # Keep the written step size if the period already represents this
+            # frequency at the instrument's programming resolution.
+            if (self.time_mode.currentText() != "Period" or not self._period_matches_frequency(value_si)):
                 self._sync_period_from_frequency()
+        else:
+            editor = next(editor for editor in editors if self._live_editors[editor] == field)
+            editor.set_value_si(value_si)
+            if field in {"high_level", "low_level"}:
+                self._sync_vpp_offset_from_levels()
             else:
-                editors = {
-                    "high_level": self.high_level,
-                    "low_level": self.low_level,
-                    "amplitude": self.vpp,
-                    "offset": self.offset,
-                }
-                editor = editors.get(field)
-                if editor is None:
-                    return
-                value_si = quantize_rigol_voltage(value_si)
-                try:
-                    text = render_quantity_si_like(editor.text(), DIMENSION_VOLTAGE, value_si)
-                except Exception:
-                    text = format_quantity_auto(value_si, DIMENSION_VOLTAGE)
-                editor.setText(text)
-                if field in {"high_level", "low_level"}:
-                    self._sync_vpp_offset_from_levels()
-                else:
-                    self._sync_levels_from_vpp_offset()
-        finally:
-            self._quick_control_projection = False
+                self._sync_levels_from_vpp_offset()
+
+    def _related_editors(self, field: str) -> tuple[QuantityEditor, ...]:
+        if field == "frequency":
+            return self.frequency, self.period
+        if field in {"high_level", "low_level", "amplitude", "offset"}:
+            return self.high_level, self.low_level, self.vpp, self.offset
+        return ()
+
+    def _period_matches_frequency(self, frequency_hz: float) -> bool:
+        try:
+            displayed_hz = self._frequency_from_period(self.period.value_si())
+            return quantize_rigol_frequency(displayed_hz) == quantize_rigol_frequency(frequency_hz)
+        except (ValueError, SafetyViolation):
+            return False
 
     def apply_execution_readback(
         self,
@@ -1157,33 +1173,28 @@ class RigolPage(QWidget):
         if self._last_execution_render == render:
             return
         self._last_execution_render = deepcopy(render)
-        previous_projection = self._quick_control_projection
-        self._quick_control_projection = True
-        try:
-            waveform = actual.get("waveform")
-            if isinstance(waveform, str) and self.waveform.findText(waveform) >= 0:
-                self.waveform.setCurrentText(waveform)
-            if "output_load" in actual:
-                self.load.setText(str(actual["output_load"]))
-            for name, editor, dimension in (
-                ("phase_deg", self.phase, None),
-                ("square_duty_percent", self.duty, None),
-                ("ramp_symmetry_percent", self.ramp_symmetry, None),
-                ("pulse_width_s", self.pulse_width, DIMENSION_TIME),
-                ("pulse_leading_s", self.pulse_leading, DIMENSION_TIME),
-                ("pulse_trailing_s", self.pulse_trailing, DIMENSION_TIME),
-            ):
-                value = self._execution_number(actual.get(name))
-                if value is not None:
-                    editor.setText(format_quantity_auto(value, dimension) if dimension else f"{value:.12g}")
-            self.apply_execution_readback(
-                channel,
-                frequency_hz=self._execution_number(actual.get("frequency_hz")),
-                high_level_v=self._execution_number(actual.get("high_level_v")),
-                low_level_v=self._execution_number(actual.get("low_level_v")),
-            )
-        finally:
-            self._quick_control_projection = previous_projection
+        waveform = actual.get("waveform")
+        if isinstance(waveform, str) and self.waveform.findText(waveform) >= 0:
+            self.waveform.setCurrentText(waveform)
+        if "output_load" in actual:
+            self.load.setText(str(actual["output_load"]))
+        for name, editor, dimension in (
+            ("phase_deg", self.phase, None),
+            ("square_duty_percent", self.duty, None),
+            ("ramp_symmetry_percent", self.ramp_symmetry, None),
+            ("pulse_width_s", self.pulse_width, DIMENSION_TIME),
+            ("pulse_leading_s", self.pulse_leading, DIMENSION_TIME),
+            ("pulse_trailing_s", self.pulse_trailing, DIMENSION_TIME),
+        ):
+            value = self._execution_number(actual.get(name))
+            if value is not None:
+                editor.setText(format_quantity_auto(value, dimension) if dimension else f"{value:.12g}")
+        self.apply_execution_readback(
+            channel,
+            frequency_hz=self._execution_number(actual.get("frequency_hz")),
+            high_level_v=self._execution_number(actual.get("high_level_v")),
+            low_level_v=self._execution_number(actual.get("low_level_v")),
+        )
 
     @staticmethod
     def _execution_number(value: object) -> float | None:
@@ -1194,10 +1205,13 @@ class RigolPage(QWidget):
 
     def set_execution_controlled(self, controlled: bool) -> None:
         if controlled and not self._execution_controlled:
+            self._stop_live_arrow_repeats()
             self._execution_readbacks.clear()
             self._last_execution_render = None
         self._execution_controlled = controlled
         self.execution_badge.setVisible(controlled)
+        self.screen_preview.set_execution_controlled(controlled)
+        self._refresh_live_value_controls()
 
     def _record_confirmed_quick_readback(self, channel: int, field: str, value: float) -> None:
         """Update only the verified field; never promote a form draft to readback."""
@@ -1237,7 +1251,7 @@ class RigolPage(QWidget):
         help_items = {
             self.live_control_switch: (
                 "Live control",
-                "When enabled, parameter changes (frequency, voltage, offset) are immediately sent to the connected generator. When disabled, parameters can be edited safely offline without sending commands or raising connection errors.",
+                "Press Enter or Apply to validate and send a single value to a verified carrier. Typing and switching units only edit the draft.",
             ),
             self.channel: ("Channel", "Selects physical output CH1 or CH2. Each channel has independent settings and safety limits."),
             self.waveform: ("Waveform", "SIN is sine, SQU square, RAMP triangular/ramp, PULS pulse, NOIS noise, USER selects the arbitrary waveform already stored in the generator, and DC is a constant voltage. USER is deliberately programmed in Frequency mode; sample-rate playback and sample upload are not represented by this form."),
@@ -1382,7 +1396,7 @@ class RigolPage(QWidget):
 
     def _bounded(self, editor: QWidget, limit_key: str) -> LimitField:
         minimum, maximum = self._rigol_limit_values(limit_key)
-        field = LimitField(editor, minimum, maximum, range_mode=True)
+        field = LimitField(editor, minimum, maximum, stack_range=isinstance(editor, QuantityEditor))
         field.setProperty("limitKey", limit_key)
         self._limit_fields[editor] = field
         return field
@@ -1412,11 +1426,9 @@ class RigolPage(QWidget):
                 ].lab_limits.combined_voltage_limit,
                 DIMENSION_VOLTAGE,
             ).si_value
-        except Exception as exc:
-            self.combined_voltage_usage.setText("invalid")
-            self._limit_fields[self.combined_voltage_usage]._show_validation_warning(
-                str(exc)
-            )
+        except (ValueError, SafetyViolation):
+            self.combined_voltage_usage.setText("—")
+            self._limit_fields[self.combined_voltage_usage]._clear_validation_warning()
             return
 
         self.combined_voltage_usage.setText(
@@ -1431,109 +1443,6 @@ class RigolPage(QWidget):
         else:
             field._clear_validation_warning()
 
-    def _clamp_voltage_to_shared_budget(self, field_name: str, editor: QWidget) -> None:
-        """Keep keyboard/arrow edits inside the coupled voltage budget."""
-
-        try:
-            limit_v = parse_quantity(
-                self._station_settings.rigol.safety.channels[
-                    self.channel.currentText()
-                ].lab_limits.combined_voltage_limit,
-                DIMENSION_VOLTAGE,
-            ).si_value
-            requested_v = parse_quantity(
-                editor.text(), DIMENSION_VOLTAGE  # type: ignore[attr-defined]
-            ).si_value
-            original_text = editor.text()  # type: ignore[attr-defined]
-            preferred = "mV" if "mV" in original_text else "V"
-            clamped_v = requested_v
-
-            if field_name == "amplitude":
-                offset_v = parse_quantity(
-                    self.offset.text(), DIMENSION_VOLTAGE
-                ).si_value
-                clamped_v = min(max(requested_v, 0.0), max(0.0, limit_v - abs(offset_v)))
-            elif field_name == "offset":
-                amplitude_vpp = (
-                    0.0
-                    if self.waveform.currentText() == "DC"
-                    else parse_quantity(self.vpp.text(), DIMENSION_VOLTAGE).si_value
-                )
-                remaining_v = max(0.0, limit_v - amplitude_vpp)
-                clamped_v = min(max(requested_v, -remaining_v), remaining_v)
-            elif field_name in {"high_level", "low_level"}:
-                high_v = parse_quantity(
-                    self.high_level.text(), DIMENSION_VOLTAGE
-                ).si_value
-                low_v = parse_quantity(
-                    self.low_level.text(), DIMENSION_VOLTAGE
-                ).si_value
-
-                def used(candidate_high: float, candidate_low: float) -> float:
-                    return (
-                        candidate_high
-                        - candidate_low
-                        + abs((candidate_high + candidate_low) / 2.0)
-                    )
-
-                if high_v > low_v and used(high_v, low_v) > limit_v:
-                    if field_name == "high_level" and abs(low_v) <= limit_v:
-                        safe, unsafe = low_v, high_v
-                        for _ in range(64):
-                            candidate = (safe + unsafe) / 2.0
-                            if used(candidate, low_v) <= limit_v:
-                                safe = candidate
-                            else:
-                                unsafe = candidate
-                        clamped_v = safe
-                    elif field_name == "low_level" and abs(high_v) <= limit_v:
-                        unsafe, safe = low_v, high_v
-                        for _ in range(64):
-                            candidate = (unsafe + safe) / 2.0
-                            if used(high_v, candidate) <= limit_v:
-                                safe = candidate
-                            else:
-                                unsafe = candidate
-                        clamped_v = safe
-
-            clamped_v = quantize_rigol_voltage(clamped_v)
-            for _ in range(4):
-                if field_name == "amplitude":
-                    candidate_used_v = clamped_v + abs(offset_v)
-                    safer_direction = -1.0
-                elif field_name == "offset":
-                    candidate_used_v = amplitude_vpp + abs(clamped_v)
-                    safer_direction = -1.0 if clamped_v > 0 else 1.0
-                elif field_name == "high_level":
-                    candidate_used_v = used(clamped_v, low_v)
-                    safer_direction = -1.0
-                else:
-                    candidate_used_v = used(high_v, clamped_v)
-                    safer_direction = 1.0
-                if candidate_used_v <= limit_v + max(limit_v, 1.0) * 1e-12:
-                    break
-                step_v = rigol_voltage_resolution_v(clamped_v)
-                clamped_v = quantize_rigol_voltage(
-                    clamped_v + safer_direction * step_v
-                )
-            if not math.isclose(
-                requested_v, clamped_v, rel_tol=1e-12, abs_tol=1e-12
-            ):
-                editor.setText(  # type: ignore[attr-defined]
-                    self._format_voltage(clamped_v, preferred_unit=preferred)
-                )
-                self.banner.show_message(
-                    "Rigol voltage clamped to the shared limit: "
-                    "Vpp + |offset| may not exceed "
-                    f"{self._station_settings.rigol.safety.channels[self.channel.currentText()].lab_limits.combined_voltage_limit}.",
-                    severity="warning",
-                    timeout_ms=12_000,
-                )
-        except Exception:
-            # Parsing and complete validation remain fail-closed in the submit
-            # and configure paths, which provide the actionable error text.
-            return
-
     def set_settings(self, settings: StationSettings) -> None:
         self._station_settings = settings
         # A completion queued under the previous station profile must never
@@ -1546,6 +1455,7 @@ class RigolPage(QWidget):
                 self._confirmed_advanced_states[channel][mode] = None
         self._refresh_rigol_limits()
         self._refresh_confirmed_advanced_controls()
+        self._refresh_live_value_controls()
 
     @staticmethod
     def _snapshot_from_defaults(
@@ -1588,6 +1498,8 @@ class RigolPage(QWidget):
     def load_settings_defaults(self) -> None:
         """Restore both persisted channel forms without issuing device commands."""
 
+        self._channel_numeric_drafts.clear()
+        self._channel_incomplete_forms.clear()
         self._channel_form_snapshots = {
             channel: self._snapshot_from_defaults(
                 channel,
@@ -1614,6 +1526,9 @@ class RigolPage(QWidget):
 
         snapshots = dict(self._channel_form_snapshots)
         channel = int(self.channel.currentText())
+        if self._channel_incomplete_forms:
+            incomplete = ", ".join(f"CH{number}" for number in sorted(self._channel_incomplete_forms))
+            raise ValueError(f"Finish editing Rigol {incomplete} before saving settings.")
         snapshots[channel] = replace(self.configuration_snapshot(), channel=channel)
         return snapshots
 
@@ -1718,10 +1633,31 @@ class RigolPage(QWidget):
         self.counter_level.setText(text("counter_level", "0 V"))
         self.counter_sensitivity.setText(text("counter_sensitivity", "25"))
 
+    def voltage_entry_modes(self) -> dict[int, str]:
+        """Display preferences only; incomplete numeric drafts need not parse."""
+        modes = {channel: snapshot.level_mode for channel, snapshot in self._channel_form_snapshots.items()}
+        modes[int(self.channel.currentText())] = (
+            "High Level / Low Level" if self.level_mode.currentText() == self.LEVEL_MODE_HIGH_LOW
+            else "Amplitude / Offset"
+        )
+        return modes
+
     def configuration_snapshot(self) -> RigolConfigurationSnapshot:
         """Return the visible carrier state without communicating with hardware."""
+        return self._form_snapshot()
 
-        high, low = self._effective_levels()
+    def _form_snapshot(
+        self, *, draft_fallback: RigolConfigurationSnapshot | None = None,
+    ) -> RigolConfigurationSnapshot:
+        # A channel switch stores editable state. Invalid numbers remain in
+        # separate drafts and the fallback is never used to build a command.
+        try:
+            frequency = self._effective_frequency()
+        except (ValueError, SafetyViolation):
+            if draft_fallback is None:
+                raise
+            frequency = draft_fallback.frequency
+
         preferred = (
             "mV"
             if (
@@ -1741,18 +1677,26 @@ class RigolPage(QWidget):
                 else None
             )
         )
+        try:
+            high, low = self._effective_levels()
+            high_level = self._format_voltage(high, preferred_unit=preferred)
+            low_level = self._format_voltage(low, preferred_unit=preferred)
+        except (ValueError, SafetyViolation):
+            if draft_fallback is None:
+                raise
+            high_level, low_level = draft_fallback.high_level, draft_fallback.low_level
         return RigolConfigurationSnapshot(
             channel=int(self.channel.currentText()),
             waveform=self.waveform.currentText(),
             time_mode=self.time_mode.currentText(),
-            frequency=self.frequency.text().strip(),
+            frequency=frequency,
             level_mode=(
                 "High Level / Low Level"
                 if self.level_mode.currentText() == self.LEVEL_MODE_HIGH_LOW
                 else "Amplitude / Offset"
             ),
-            high_level=self._format_voltage(high, preferred_unit=preferred),
-            low_level=self._format_voltage(low, preferred_unit=preferred),
+            high_level=high_level,
+            low_level=low_level,
             output_load=self.load.text().strip(),
             phase_deg=self.phase.text().strip(),
             square_duty_percent=self.duty.text().strip(),
@@ -1801,7 +1745,7 @@ class RigolPage(QWidget):
             waveform=carrier.waveform,
             time_mode=visible.time_mode,
             frequency=format_quantity_auto(
-                carrier.frequency_hz, DIMENSION_FREQUENCY
+                carrier.frequency_hz, DIMENSION_FREQUENCY, precision=15
             ),
             level_mode=visible.level_mode,
             high_level=self._format_voltage(carrier.high_level_v, preferred_unit=preferred),
@@ -1946,7 +1890,7 @@ class RigolPage(QWidget):
 
     @staticmethod
     def _format_voltage(value_v: float, preferred_unit: str | None = None) -> str:
-        value_v = quantize_rigol_voltage(value_v)
+        # Formatting must preserve raw requests and derived half-step endpoints.
         if abs(value_v) < 1e-12:
             value_v = 0.0
             if preferred_unit == "mV":
@@ -1955,12 +1899,12 @@ class RigolPage(QWidget):
                 return "0 V"
             return "0 V"
         if preferred_unit == "mV":
-            return f"{value_v * 1e3:.12g} mV"
+            return f"{value_v * 1e3:.15g} mV"
         if preferred_unit == "V":
-            return f"{value_v:.12g} V"
+            return f"{value_v:.15g} V"
         if 0 < abs(value_v) < 1:
-            return f"{value_v * 1e3:.12g} mV"
-        return f"{value_v:.12g} V"
+            return f"{value_v * 1e3:.15g} mV"
+        return f"{value_v:.15g} V"
 
     def _new_ui_operation(
         self,
@@ -2038,6 +1982,15 @@ class RigolPage(QWidget):
                 purpose="observed_external_request",
             )
         self._queued_ui_operations[operation].append(request)
+        self._sync_screen_traffic(operation)
+
+    def _sync_screen_traffic(self, operation: str, *, succeeded: bool = False) -> None:
+        if operation == "capture_screen":
+            return
+        self.screen_preview.set_control_activity(
+            any(queue for name, queue in self._queued_ui_operations.items() if name != "capture_screen"),
+            applied=succeeded and operation in self._SCREEN_REFRESH_OPERATIONS,
+        )
 
     def _completion_request(self, operation: str) -> _RigolUiOperation | None:
         # A GUI-thread operation guard reports its error synchronously and does
@@ -2065,6 +2018,7 @@ class RigolPage(QWidget):
         enable: bool,
         stage: str,
     ) -> None:
+        self._stop_live_arrow_repeats()
         self._pending_output_enable = enable
         self._pending_output_channel = request.channel
         self._pending_output_request_id = request.request_id
@@ -2288,6 +2242,8 @@ class RigolPage(QWidget):
                 for channel in (1, 2):
                     self._set_rigol_channel_output_unknown(channel)
         elif normalized in {"disconnected", "fault", "unknown"}:
+            self._stop_live_arrow_repeats()
+            self._pending_live_setpoints.clear()
             self._execution_readbacks.clear()
             self._last_execution_render = None
             for channel in (1, 2):
@@ -2310,14 +2266,30 @@ class RigolPage(QWidget):
         previous_channel = self._visible_form_channel
         next_channel = int(value)
         if previous_channel != next_channel:
-            self._channel_form_snapshots[previous_channel] = replace(
-                self.configuration_snapshot(), channel=previous_channel
-            )
+            self._stop_live_arrow_repeats()
+            try:
+                self._channel_form_snapshots[previous_channel] = replace(
+                    self.configuration_snapshot(), channel=previous_channel,
+                )
+            except (ValueError, SafetyViolation):
+                self._channel_incomplete_forms[previous_channel] = replace(
+                    self._form_snapshot(draft_fallback=self._channel_form_snapshots[previous_channel]),
+                    channel=previous_channel,
+                )
+            incomplete = previous_channel in self._channel_incomplete_forms
+            self._channel_numeric_drafts[previous_channel] = {
+                editor: (editor.number.text(), editor.unit.currentText(), editor.is_draft, editor.input_was_rejected)
+                for editor in self._live_editors if incomplete or editor.is_draft
+            }
             self._channel_advanced_defaults[
                 previous_channel
             ] = self._advanced_defaults_snapshot()
             self._visible_form_channel = next_channel
-            self._load_basic_snapshot(self._channel_form_snapshots[next_channel])
+            self._load_basic_snapshot(self._channel_incomplete_forms.pop(
+                next_channel, self._channel_form_snapshots[next_channel],
+            ))
+            for editor, draft in self._channel_numeric_drafts.pop(next_channel, {}).items():
+                editor.restore_input(*draft)
             self._load_advanced_defaults(self._channel_advanced_defaults[next_channel])
         self.output_action_context.setText(f"Physical output · CH{value}")
         self._refresh_confirmed_advanced_controls()
@@ -2329,13 +2301,15 @@ class RigolPage(QWidget):
         """Display one channel's cached form state without issuing device commands."""
 
         self.waveform.setCurrentText(snapshot.waveform)
-        self.time_mode.setCurrentText(snapshot.time_mode)
+        with QSignalBlocker(self.time_mode):
+            self.time_mode.setCurrentText(snapshot.time_mode)
         self.frequency.setText(snapshot.frequency)
-        self.level_mode.setCurrentText(
-            self.LEVEL_MODE_HIGH_LOW
-            if snapshot.level_mode == "High Level / Low Level"
-            else self.LEVEL_MODE_AMPLITUDE_OFFSET
-        )
+        with QSignalBlocker(self.level_mode):
+            self.level_mode.setCurrentText(
+                self.LEVEL_MODE_HIGH_LOW
+                if snapshot.level_mode == "High Level / Low Level"
+                else self.LEVEL_MODE_AMPLITUDE_OFFSET
+            )
         self.high_level.setText(snapshot.high_level)
         self.low_level.setText(snapshot.low_level)
         self.load.setText(snapshot.output_load)
@@ -2418,6 +2392,41 @@ class RigolPage(QWidget):
             widget.style().unpolish(widget)
             widget.style().polish(widget)
         self._refresh_manual_trigger_controls()
+        self._refresh_live_value_controls()
+
+    def _level_representation_changed(self, mode: str) -> None:
+        high_low = mode == self.LEVEL_MODE_HIGH_LOW
+        source = (self.vpp, self.offset) if high_low else (self.high_level, self.low_level)
+        dest = (self.high_level, self.low_level) if high_low else (self.vpp, self.offset)
+        draft = any(editor.is_draft for editor in source)
+        if self.waveform.currentText() == "DC" or high_low:
+            converted = self._sync_levels_from_vpp_offset()
+        else:
+            converted = self._sync_vpp_offset_from_levels()
+        if not converted:
+            previous = self.LEVEL_MODE_AMPLITUDE_OFFSET if mode == self.LEVEL_MODE_HIGH_LOW else self.LEVEL_MODE_HIGH_LOW
+            with QSignalBlocker(self.level_mode):
+                self.level_mode.setCurrentText(previous)
+            self.banner.show_message("Complete the voltage values before changing their representation.", severity="warning")
+        elif self.waveform.currentText() != "DC":
+            for editor in source:
+                editor.is_draft = False
+            for editor in dest:
+                editor.is_draft = draft
+        self._update_dynamic_controls()
+
+    def _time_representation_changed(self, mode: str) -> None:
+        to_period = mode == "Period"
+        source, dest = (self.frequency, self.period) if to_period else (self.period, self.frequency)
+        converted = self._sync_period_from_frequency() if to_period else self._sync_frequency_from_period()
+        if converted:
+            dest.is_draft = source.is_draft
+            source.is_draft = False
+        else:
+            with QSignalBlocker(self.time_mode):
+                self.time_mode.setCurrentText("Frequency" if to_period else "Period")
+            self.banner.show_message("Enter a positive time value before changing its representation.", severity="warning")
+        self._update_dynamic_controls()
 
     def _update_dynamic_controls(self, *_args: object) -> None:
         waveform = self.waveform.currentText()
@@ -2461,18 +2470,32 @@ class RigolPage(QWidget):
             self.control_tabs.setCurrentIndex(0)
         self._update_preview()
 
+    def _effective_frequency(self) -> str:
+        if self.waveform.currentText() in {"DC", "NOIS"}:
+            return "1 Hz"  # Unused schema placeholder, never a carrier-frequency command.
+        if self.time_mode.currentText() != "Period":
+            self.frequency.value_si()
+            return self.frequency.text().strip()
+        return f"{self._frequency_from_period(self.period.value_si()):.15g} Hz"
+
+    @staticmethod
+    def _frequency_from_period(period_s: float) -> float:
+        if period_s <= 0:
+            raise SafetyViolation("Rigol period must be greater than zero.")
+        frequency_hz = 1 / period_s
+        if not math.isfinite(frequency_hz):
+            raise SafetyViolation("Rigol period is too small to represent as a finite frequency.")
+        return frequency_hz
+
     def _effective_levels(self) -> tuple[float, float]:
         if self.waveform.currentText() == "DC":
-            value = quantize_rigol_voltage(parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value)
+            value = self.offset.value_si()
             return value, value
         if self.level_mode.currentText() == self.LEVEL_MODE_AMPLITUDE_OFFSET:
-            vpp = quantize_rigol_voltage(parse_quantity(self.vpp.text(), DIMENSION_VOLTAGE).si_value)
-            offset = quantize_rigol_voltage(parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value)
+            vpp = self.vpp.value_si()
+            offset = self.offset.value_si()
             return offset + vpp / 2, offset - vpp / 2
-        return (
-            quantize_rigol_voltage(parse_quantity(self.high_level.text(), DIMENSION_VOLTAGE).si_value),
-            quantize_rigol_voltage(parse_quantity(self.low_level.text(), DIMENSION_VOLTAGE).si_value),
-        )
+        return self.high_level.value_si(), self.low_level.value_si()
 
     def _update_sample_load_estimate(self, *_args: object) -> None:
         # Advisory form preview only: never submits a command or widens a limit.
@@ -2556,127 +2579,65 @@ class RigolPage(QWidget):
             value = fallback
         return min(max(value, minimum), maximum)
 
-    def _sync_vpp_offset_from_levels(self) -> None:
+    def _sync_vpp_offset_from_levels(self) -> bool:
         if self._level_syncing:
-            return
+            return False
         try:
-            high = parse_quantity(self.high_level.text(), DIMENSION_VOLTAGE).si_value
-            low = parse_quantity(self.low_level.text(), DIMENSION_VOLTAGE).si_value
+            high = self.high_level.value_si()
+            low = self.low_level.value_si()
         except Exception:
-            return
+            return False
         self._level_syncing = True
         try:
-            high = quantize_rigol_voltage(high)
-            low = quantize_rigol_voltage(low)
-            preferred = (
-                "mV"
-                if (
-                    "mV" in self.high_level.text()
-                    or "mV" in self.low_level.text()
-                )
-                else (
-                    "V"
-                    if (
-                        "V" in self.high_level.text()
-                        or "V" in self.low_level.text()
-                    )
-                    else (
-                        "mV"
-                        if "mV" in self.offset.text()
-                        else ("V" if "V" in self.offset.text() else None)
-                    )
-                )
-            )
-            self.vpp.setText(self._format_voltage(high - low, preferred_unit=preferred))
-            self.offset.setText(self._format_voltage((high + low) / 2, preferred_unit=preferred))
+            self.vpp.set_value_si(high - low)
+            self.offset.set_value_si((high + low) / 2)
         finally:
             self._level_syncing = False
         self._update_preview()
+        return True
 
-    def _sync_levels_from_vpp_offset(self) -> None:
+    def _sync_levels_from_vpp_offset(self) -> bool:
         if self._level_syncing:
-            return
+            return False
         try:
-            offset = parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value
+            offset = self.offset.value_si()
             vpp = (
                 0.0
                 if self.waveform.currentText() == "DC"
-                else parse_quantity(self.vpp.text(), DIMENSION_VOLTAGE).si_value
+                else self.vpp.value_si()
             )
         except Exception:
-            return
+            return False
         self._level_syncing = True
         try:
-            offset = quantize_rigol_voltage(offset)
-            vpp = quantize_rigol_voltage(vpp)
-            preferred = (
-                "mV"
-                if (
-                    "mV" in self.offset.text()
-                    or "mV" in self.vpp.text()
-                )
-                else (
-                    "V"
-                    if (
-                        "V" in self.offset.text()
-                        or "V" in self.vpp.text()
-                    )
-                    else (
-                        "mV"
-                        if "mV" in self.high_level.text()
-                        else ("V" if "V" in self.high_level.text() else None)
-                    )
-                )
-            )
-            self.high_level.setText(self._format_voltage(offset + vpp / 2, preferred_unit=preferred))
-            self.low_level.setText(self._format_voltage(offset - vpp / 2, preferred_unit=preferred))
+            self.high_level.set_value_si(offset + vpp / 2)
+            self.low_level.set_value_si(offset - vpp / 2)
         finally:
             self._level_syncing = False
         self._update_preview()
+        return True
 
-    def _sync_period_from_frequency(self) -> None:
+    def _sync_period_from_frequency(self) -> bool:
+        return self._sync_reciprocal(self.frequency, self.period)
+
+    def _sync_frequency_from_period(self) -> bool:
+        return self._sync_reciprocal(self.period, self.frequency)
+
+    def _sync_reciprocal(self, source: QuantityEditor, dest: QuantityEditor) -> bool:
         if self._time_syncing:
-            return
+            return False
         try:
-            frequency = parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY).si_value
-            if frequency <= 0:
-                return
-        except Exception:
-            return
+            value = source.value_si()
+            if value <= 0 or not math.isfinite(1 / value):
+                return False
+        except ValueError:
+            return False
         self._time_syncing = True
         try:
-            period = 1 / frequency
-            if period < 1e-6:
-                self.period.setText(f"{period * 1e9:.12g} ns")
-            elif period < 1e-3:
-                self.period.setText(f"{period * 1e6:.12g} us")
-            elif period < 1:
-                self.period.setText(f"{period * 1e3:.12g} ms")
-            else:
-                self.period.setText(f"{period:.12g} s")
+            dest.set_value_si(1 / value)
         finally:
             self._time_syncing = False
-
-    def _sync_frequency_from_period(self) -> None:
-        if self._time_syncing:
-            return
-        try:
-            period = parse_quantity(self.period.text(), DIMENSION_TIME).si_value
-            if period <= 0:
-                return
-        except Exception:
-            return
-        self._time_syncing = True
-        try:
-            frequency = 1 / period
-            if frequency >= 1e6:
-                self.frequency.setText(f"{frequency / 1e6:.12g} MHz")
-            elif frequency >= 1e3:
-                self.frequency.setText(f"{frequency / 1e3:.12g} kHz")
-            else:
-                self.frequency.setText(f"{frequency:.12g} Hz")
-        finally:
-            self._time_syncing = False
+        return True
 
     def _modulation_tab(self) -> QWidget:
         tab = QWidget()
@@ -2928,15 +2889,11 @@ class RigolPage(QWidget):
         return self._channel_config_from_snapshot(self.configuration_snapshot())
 
     def _channel_config_from_snapshot(
-        self, snapshot: RigolConfigurationSnapshot
+        self, snapshot: RigolConfigurationSnapshot, *, update_baseline: RigolChannelConfig | None = None,
     ) -> RigolChannelConfig:
         waveform = snapshot.waveform
-        high_level = quantize_rigol_voltage(
-            parse_quantity(snapshot.high_level, DIMENSION_VOLTAGE).si_value
-        )
-        low_level = quantize_rigol_voltage(
-            parse_quantity(snapshot.low_level, DIMENSION_VOLTAGE).si_value
-        )
+        high_level = parse_quantity(snapshot.high_level, DIMENSION_VOLTAGE).si_value
+        low_level = parse_quantity(snapshot.low_level, DIMENSION_VOLTAGE).si_value
         frequency_hz = (
             1.0
             if waveform in {"DC", "NOIS"}
@@ -2985,10 +2942,35 @@ class RigolPage(QWidget):
             low_level=config.low_level_v,
             output_load=config.output_load,
         )
+        if update_baseline is None:
+            high, low = quantize_rigol_level_pair(high_level, low_level, waveform=waveform)
+        else:
+            high, low = quantize_rigol_level_update(update_baseline.high_level_v, update_baseline.low_level_v,
+                                                   high_level, low_level, waveform=waveform)
+        validate_rigol_waveform(
+            channel=self._station_settings.rigol.safety.channels[str(config.channel)],
+            safety=self._station_settings.rigol.safety, waveform=waveform,
+            frequency=quantize_rigol_frequency(config.frequency_hz), high_level=high, low_level=low,
+            output_load=config.output_load,
+        )
         return config
 
-    def configure(self, _checked: bool = False) -> None:
+    def configure(self, _checked: bool = False, *, allow_live: bool = True) -> None:
         del _checked
+        channel = int(self.channel.currentText())
+        if self._active_output_selected():
+            if allow_live:
+                self._apply_live_form_change(channel)
+            else:
+                self.banner.show_message("Turn OUTPUT OFF before applying waveform shape settings.",
+                                         severity="warning")
+            return
+        if self._pending_output_channel is not None or (
+            self._device_state_value == "output_on" and not self._output_state_known[channel]
+        ):
+            self.banner.show_message(f"Wait for a confirmed CH{channel} output state before applying the waveform.",
+                                     severity="warning")
+            return
         try:
             config = self._visible_channel_config()
         except Exception as exc:
@@ -3004,6 +2986,32 @@ class RigolPage(QWidget):
         self._dispatch_ui_operation(
             "configure", config, purpose="manual_configure"
         )
+
+    def _apply_live_form_change(self, channel: int) -> None:
+        blocker = self._live_value_blocker(channel)
+        if blocker or not self.live_control_enabled:
+            self.banner.show_message(
+                blocker or "Enable Live control to apply one value while OUTPUT is ON.",
+                severity="warning")
+            return
+        baseline = self._confirmed_carrier_configs[channel]
+        try:
+            draft = self._channel_config_from_snapshot(self.configuration_snapshot(), update_baseline=baseline)
+        except (ValueError, SafetyViolation) as exc:
+            self.banner.show_message(f"Invalid waveform settings: {exc}", severity="error")
+            return
+        if self._only_quick_field_changed(baseline, draft, None):
+            self.status.emit(f"Rigol CH{channel}: current waveform values are already applied.")
+            return
+        editors = [editor for editor, field in self._live_editors.items()
+                   if self.basic_form.isRowVisible(self._row_widget(editor))
+                   and self._only_quick_field_changed(baseline, draft, field)]
+        if len(editors) != 1:
+            self.banner.show_message(
+                "Apply one live value at a time. For waveform, load or shape changes, turn OUTPUT OFF first.",
+                severity="warning")
+            return
+        self._commit_live_value(editors[0])
 
     def configure_output(self) -> None:
         try:
@@ -3203,7 +3211,8 @@ class RigolPage(QWidget):
                 or "The visible Rigol settings could not be validated.",
             )
             return
-        carrier_confirmed = self._confirmed_carrier_configs[channel] == config
+        confirmed = self._confirmed_carrier_configs[channel]
+        carrier_confirmed = confirmed is not None and self._only_quick_field_changed(confirmed, config, None)
         request = self._new_ui_operation(
             "configure_output" if carrier_confirmed else "configure",
             output_config if carrier_confirmed else config,
@@ -3228,6 +3237,8 @@ class RigolPage(QWidget):
 
     def _result(self, operation: str, result: object) -> None:
         request = self._completion_request(operation)
+        if request is not None:
+            self._sync_screen_traffic(operation, succeeded=True)
         if operation == "configure" and hasattr(result, "peak_absolute_current_a"):
             estimate = result
             self.estimate.setText(
@@ -3244,7 +3255,7 @@ class RigolPage(QWidget):
             if request is not None and isinstance(
                 request.payload, RigolChannelConfig
             ):
-                self._confirmed_carrier_configs[channel] = request.payload
+                self._cache_applied_carrier(request.payload)
             self._set_rigol_channel_output(channel, False)
             for mode in ("modulation", "sweep", "burst"):
                 self._confirmed_advanced_states[channel][mode] = False
@@ -3327,6 +3338,8 @@ class RigolPage(QWidget):
 
     def _error(self, operation: str, error: str) -> None:
         request = self._completion_request(operation)
+        if request is not None:
+            self._sync_screen_traffic(operation)
         if operation in {
             "configure",
             "set_output",

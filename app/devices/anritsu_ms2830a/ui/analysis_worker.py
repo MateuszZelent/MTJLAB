@@ -50,6 +50,7 @@ class SpectrumAnalysisRequest:
     interference_calibration: object = None
     tracking_context: tuple[int, float, float] | None = None
     additional_tracking_contexts: tuple[tuple[int, float, float], ...] = ()
+    history_reference: tuple[tuple[float, ...], str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,10 +279,14 @@ class _SpectrumAnalysisWorker(QObject):
             self._check_interruption()
             started = time.perf_counter()
             statistics = None
+            history = request.history_dbm
+            if request.history_reference is not None:
+                baseline, operation = request.history_reference
+                history = tuple(apply_reference_operation(row, baseline, operation)[0] for row in history)
             if isinstance(request.mode, tuple):
                 cleanup, statistics = self._preview_processor.process(
                     request.powers_dbm, unit="dBm" if request.reference_operation != "none" else request.source_unit, modes=request.mode,
-                    history=request.history_dbm, parameters=request.parameters,
+                    history=history, parameters=request.parameters,
                     frequencies_hz=request.frequencies_hz,
                     background_profile=request.background_profile,
                     background_context=request.background_context,
@@ -294,7 +299,7 @@ class _SpectrumAnalysisWorker(QObject):
                 cleanup = clean_spectrum_dbm(
                     request.powers_dbm,
                     mode=request.mode,
-                    history_dbm=request.history_dbm,
+                    history_dbm=history,
                     parameters=request.parameters,
                     frequencies_hz=request.frequencies_hz,
                 )
@@ -303,7 +308,7 @@ class _SpectrumAnalysisWorker(QObject):
                     request.powers_dbm,
                     unit=request.source_unit,
                     mode=request.mode,
-                    history_dbm=request.history_dbm,
+                    history_dbm=history,
                     parameters=request.parameters,
                     frequencies_hz=request.frequencies_hz,
                 )

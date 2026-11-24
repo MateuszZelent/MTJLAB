@@ -15,6 +15,7 @@ from app.domain.quantities import format_quantity_auto
 from app.recipes.parameter_registry import PARAMETERS_BY_TARGET
 from app.ui.design_system import tokens_for, plot_theme
 from app.ui.widgets.plot_ownership import coalesce_plot_refresh, create_plot_widget
+from app.ui.execution.rigol_projection import project_rigol
 
 
 @dataclass
@@ -22,6 +23,7 @@ class PlannedSeries:
     target: str
     steps: list[int]
     values: list[float]
+    label: str | None = None
 
 
 def action_values(action):
@@ -61,8 +63,10 @@ def action_values(action):
     return values
 
 
-def planned_series(actions):
+def planned_series(actions, *, rigol_level_modes=None, rigol_projection=None):
     """Compress held values; absent initial values remain unknown, never zero."""
+    actions = tuple(actions)
+    projection = rigol_projection or project_rigol(actions, rigol_level_modes)
     series = {}
     prior_context = {}
     held = {}
@@ -78,6 +82,9 @@ def planned_series(actions):
         values = {k: v for k, v in context.items() if prior_context.get(k) != v}
         prior_context = context
         values.update(action_values(action))
+        for target in projection.masked[step - 1]:
+            values.pop(target, None)
+        values.update(projection.changes[step - 1])
         request = action.payload.get("request")
         if action.kind == "configure_moke_box":
             active_moke = f"moke_box.vout{action.payload['profile'].channel}.voltage"
@@ -94,14 +101,14 @@ def planned_series(actions):
             elif len(moke_safe) == 1:
                 values.update(moke_safe)
         for target, value in values.items():
-            if not isinstance(value, (int, float)) or not math.isfinite(value):
+            if not isinstance(value, (int, float)) or (not math.isfinite(value) and target not in projection.labels):
                 continue
             if target not in PARAMETERS_BY_TARGET and not target.endswith(".output"):
                 continue
             if held.get(target) == value:
                 continue
             held[target] = value
-            row = series.setdefault(target, PlannedSeries(target, [], []))
+            row = series.setdefault(target, PlannedSeries(target, [], [], projection.labels.get(target)))
             row.steps.append(step)
             row.values.append(float(value))
     return tuple(series.values())
@@ -138,6 +145,10 @@ class ExecutionPlanTimeline(CardWidget):
                          "X = action number, not time; vertical steps do not imply a physical ramp.", self)
         note.setWordWrap(True)
         layout.addWidget(note)
+        self.rigol_voltage_summary = BodyLabel('', self)
+        self.rigol_voltage_summary.setWordWrap(True)
+        self.rigol_voltage_summary.hide()
+        layout.addWidget(self.rigol_voltage_summary)
         self.plot = create_plot_widget(self)
         coalesce_plot_refresh(self.plot)
         self.plot.setMinimumHeight(260)
@@ -171,32 +182,44 @@ class ExecutionPlanTimeline(CardWidget):
         self.follow.toggled.connect(lambda enabled: self.set_current_step(self.current_step) if enabled else None)
         self.hide()
 
-    def set_plan(self, actions, *, shutdown_actions=(), execution_mode="measurement"):
+    def set_plan(self, actions, *, shutdown_actions=(), execution_mode="measurement", rigol_level_modes=None):
         self.actions = tuple(actions)
         self.setVisible(bool(self.actions))
-        self.series = planned_series(self.actions)
+        projection = project_rigol(self.actions, rigol_level_modes)
+        self.series = planned_series(self.actions, rigol_projection=projection)
+        summary = projection.summary()
+        if execution_mode == 'dry_run' and summary:
+            summary = 'DRY RUN: outputs forced OFF; values below show authored intent.\n' + summary
+        self.rigol_voltage_summary.setText(summary)
+        self.rigol_voltage_summary.setVisible(bool(summary))
         # Ranges are known from the complete plan. Recomputing all existing
         # curves' bounds after every addItem makes construction quadratic.
         self.plot.disableAutoRange()
         self.plot.clear()
         theme = plot_theme(tokens_for("dark" if isDarkTheme() else "light"))
         self.plot.setBackground(theme.background)
+        for name in ('left', 'bottom'):
+            axis = self.plot.getAxis(name)
+            axis.setPen(pg.mkPen(theme.axes))
+            axis.setTextPen(pg.mkPen(theme.axes))
+        self.plot.setLabel('bottom', 'Action number', color=theme.axes)
         ticks = [(0, "Actions")]
         # Distinct parameter colours; plots retain SI-derived engineering labels.
         colours = ("#1677ff", "#d46b08", "#389e0d", "#9254de", "#c41d7f", "#08979c")
         legends = []
         for lane, row in enumerate(self.series, 1):
-            lo, hi = min(row.values), max(row.values)
-            label = PARAMETERS_BY_TARGET[row.target].ui_label if row.target in PARAMETERS_BY_TARGET else row.target
+            finite = [value for value in row.values if math.isfinite(value)]
+            lo, hi = min(finite), max(finite)
+            label = row.label or (PARAMETERS_BY_TARGET[row.target].ui_label if row.target in PARAMETERS_BY_TARGET else row.target)
             ticks.append((lane, f"{label} [{format_planned(row.target, lo)} … {format_planned(row.target, hi)}]"))
             xs, ys = [], []
             for i, (step, value) in enumerate(zip(row.steps, row.values)):
-                y = lane + (0.65 * (value - lo) / (hi - lo) - 0.325 if hi != lo else 0)
+                y = (lane + (0.65 * (value - lo) / (hi - lo) - 0.325 if hi != lo else 0)) if math.isfinite(value) else math.nan
                 end = row.steps[i + 1] if i + 1 < len(row.steps) else len(self.actions) + 1
                 xs.extend((step, end))
                 ys.extend((y, y))
             self.plot.plot(xs, ys, pen=pg.mkPen(colours[(lane - 1) % len(colours)], width=2))
-            legends.append(f'<span style="color:{colours[(lane - 1) % len(colours)]}">● {escape(row.target)}</span>')
+            legends.append(f'<span style="color:{colours[(lane - 1) % len(colours)]}">● {escape(label)}</span>')
         self.legend.setText(" &nbsp; ".join(legends))
         self.plot.getAxis("left").setTicks([ticks])
         self.plot.setYRange(-0.5, max(1, len(self.series)) + 0.6, padding=0)
@@ -242,8 +265,8 @@ class ExecutionPlanTimeline(CardWidget):
         values = []
         for row in self.series:
             index = bisect_right(row.steps, step) - 1
-            if index >= 0:
-                values.append(f"{row.target}: {format_planned(row.target, row.values[index])}")
+            if index >= 0 and math.isfinite(row.values[index]):
+                values.append(f"{row.label or row.target}: {format_planned(row.target, row.values[index])}")
         return f"Action {step}/{len(self.actions)} · {action.kind} · {action.node_id}" + (" · FINALLY" if action.is_finally else "") + "\n" + " · ".join(values)
 
     def inspect_step(self, step):

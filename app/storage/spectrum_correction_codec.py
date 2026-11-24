@@ -15,6 +15,7 @@ from app.domain.spectrum_correction import (
 )
 
 SCHEMA = "spectrum-correction-v1"
+INSTRUMENT_BACKGROUND_SCHEMA = "spectrum-instrument-background-v1"
 
 
 def safe_record_id(value: str) -> str:
@@ -61,7 +62,8 @@ def write_profile(group, context: SpectrumAcquisitionContext, profile: Backgroun
         raise ExecutionError("Profile acquisition identity does not match its frequency axis.")
     if profile.mean_w.shape != context.frequencies_hz.shape:
         raise ExecutionError("Profile and frequency grid have mismatched lengths.")
-    group.attrs["schema"] = SCHEMA
+    instrument_mean = profile.averaging_source == "instrument"
+    group.attrs["schema"] = INSTRUMENT_BACKGROUND_SCHEMA if instrument_mean else SCHEMA
     group.attrs["profile_id"] = profile.profile_id
     group.attrs["content_hash"] = profile.content_hash
     metadata = {
@@ -76,17 +78,22 @@ def write_profile(group, context: SpectrumAcquisitionContext, profile: Backgroun
         "reference_state": profile.reference_state,
         "signal_free_qualified": profile.signal_free_qualified,
     }
+    if instrument_mean:
+        metadata["nominal_sweep_time_s"] = profile.nominal_sweep_time_s
     group.attrs["metadata_json"] = json.dumps(metadata, sort_keys=True, allow_nan=False)
     _array(group, "frequency_hz", context.frequencies_hz, "Hz")
     _array(group, "mean_w", profile.mean_w, "W")
-    _array(group, "sample_variance_w2", profile.sample_variance_w2, "W^2")
+    if profile.sample_variance_w2 is not None:
+        _array(group, "sample_variance_w2", profile.sample_variance_w2, "W^2")
     if profile.mean_variance_w2 is not None:
         _array(group, "mean_variance_w2", profile.mean_variance_w2, "W^2")
 
 
 def read_profile(group) -> tuple[SpectrumAcquisitionContext, BackgroundProfile]:
-    if group.attrs.get("schema") != SCHEMA or not bool(group.attrs.get("complete", False)):
+    schema = group.attrs.get("schema")
+    if schema not in {SCHEMA, INSTRUMENT_BACKGROUND_SCHEMA} or not bool(group.attrs.get("complete", False)):
         raise ExecutionError("Unknown or uncommitted spectrum profile schema.")
+    instrument_mean = schema == INSTRUMENT_BACKGROUND_SCHEMA
     try:
         metadata = json.loads(group.attrs["metadata_json"])
         context = SpectrumAcquisitionContext(
@@ -99,7 +106,10 @@ def read_profile(group) -> tuple[SpectrumAcquisitionContext, BackgroundProfile]:
         profile = BackgroundProfile(
             profile_id=str(group.attrs["profile_id"]), context_id=metadata["context_id"],
             mean_w=_read_array(group, "mean_w", "W"),
-            sample_variance_w2=_read_array(group, "sample_variance_w2", "W^2"),
+            sample_variance_w2=(
+                _read_array(group, "sample_variance_w2", "W^2")
+                if not instrument_mean or "sample_variance_w2" in group else None
+            ),
             mean_variance_w2=(
                 _read_array(group, "mean_variance_w2", "W^2")
                 if "mean_variance_w2" in group else None
@@ -108,6 +118,8 @@ def read_profile(group) -> tuple[SpectrumAcquisitionContext, BackgroundProfile]:
             completed_at_s=metadata["completed_at_s"],
             reference_state=metadata["reference_state"],
             signal_free_qualified=metadata["signal_free_qualified"],
+            averaging_source="instrument" if instrument_mean else "pc",
+            nominal_sweep_time_s=metadata["nominal_sweep_time_s"] if instrument_mean else None,
         )
         if context.context_id != profile.context_id:
             raise ExecutionError("Stored profile frequency/configuration identity is corrupted.")

@@ -239,7 +239,7 @@ class ResultsBrowserTests(unittest.TestCase):
                 self.assertTrue(np.allclose(tab.heatmap._data[0], (-1.0, -2.0, -3.0)))
                 self.assertEqual(
                     tab.heatmap.color_bar.getAxis("right").label.toPlainText().strip(),
-                    "Processed amplitude (dB)",
+                    "Relative power (dB)",
                 )
             finally:
                 tab.close()

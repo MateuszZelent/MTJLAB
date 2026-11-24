@@ -2,9 +2,10 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+import numpy as np
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QSplitter, QWidget
-from qfluentwidgets import FlowLayout
+from qfluentwidgets import CheckBox, FlowLayout, PushButton
 
 from app.devices.anritsu_ms2830a.ui.spectrum_workbench import SpectrumWorkbench
 from app.ui.dialogs import StationDialog, StationFileDialog
@@ -13,9 +14,12 @@ from .analysis_export import ensure_derived_destination, write_analysis_manifest
 
 
 class ResultSpectrumWorkbench(SpectrumWorkbench):
+    absolute_changed = Signal()
+
     def __init__(self, parent=None):
         self._hold_frames = {}
         self._frame_identity = None
+        self._signed_sources = {}
         super().__init__(parent)
         # Live places this panel beside its workbench. Results owns it until
         # an inspector/floating window explicitly hosts it; an unlaid-out
@@ -36,6 +40,16 @@ class ResultSpectrumWorkbench(SpectrumWorkbench):
         for button in self.toolbar_buttons:
             grid.removeWidget(button)
             flow.addWidget(button)
+        self.show_absolute = CheckBox("Abs", toolbar)
+        self.show_absolute.setAccessibleName("Show absolute spectrum difference")
+        self.show_absolute.setToolTip("Show the magnitude of signed dB or W differences.")
+        self.show_absolute.setEnabled(False)
+        self.show_absolute.toggled.connect(self._absolute_view_changed)
+        flow.addWidget(self.show_absolute)
+        self.batch_button = PushButton("Postprocess all measurements…", toolbar)
+        self.batch_button.setEnabled(False)
+        self.batch_button.setToolTip("Apply this spectrum view and processing to every recorded checkpoint.")
+        flow.addWidget(self.batch_button)
         grid.deleteLater()
         root.insertWidget(0, toolbar)
         self._toolbar_host, self._toolbar_flow = toolbar, flow
@@ -76,12 +90,45 @@ class ResultSpectrumWorkbench(SpectrumWorkbench):
         super().set_labels(**kwargs)
         self._trace_units.update({name: self.amplitude_unit for name in self._traces})
 
-    def set_trace(self, name, x, y, **kwargs):
+    def set_trace(self, name, x, y, *, signed_difference=False, absolute_capable=True, **kwargs):
         self.set_trace_unit(name, self.amplitude_unit)
-        super().set_trace(name, x, y, **kwargs)
+        if absolute_capable and (self.amplitude_unit == "dB" or (self.amplitude_unit == "W" and signed_difference)):
+            self._signed_sources[name] = (x, y, kwargs)
+        else:
+            self._signed_sources.pop(name, None)
+        self.show_absolute.setEnabled(bool(self._signed_sources))
+        self._draw_trace(name, x, y, kwargs)
+
+    def _draw_trace(self, name, x, y, options):
+        if name in self._signed_sources and self.show_absolute.isChecked():
+            y = np.abs(np.asarray(y, dtype=float))
+            options = {**options, "legend_label": f"Abs · {options.get('legend_label') or name}"}
+        super().set_trace(name, x, y, **options)
+
+    def clear_trace(self, name):
+        self._signed_sources.pop(name, None)
+        if hasattr(self, "show_absolute"):
+            self.show_absolute.setEnabled(bool(self._signed_sources))
+        super().clear_trace(name)
+
+    def _absolute_view_changed(self):
+        if not self._signed_sources:
+            return
+        x_range = self.plot.viewRange()[0]
+        self.clear_holds()
+        for name, (x, y, options) in self._signed_sources.items():
+            self._draw_trace(name, x, y, options)
+        self.auto_range()
+        self.plot.setXRange(*x_range, padding=0)
+        self.sync_floating()
+        self.absolute_changed.emit()
+
+    def _absolute_trace_names(self):
+        return list(self._signed_sources) if self.show_absolute.isChecked() else []
 
     def prepare_traces(self, names):
         """Keep compatible holds and measurement selection across checkpoints."""
+        self.set_estimated_bands(())
         for name in tuple(self._traces):
             if name not in names and name not in {"Max hold", "Min hold"}:
                 self.clear_trace(name)
@@ -107,6 +154,7 @@ class ResultSpectrumWorkbench(SpectrumWorkbench):
             dialog.setMinimumSize(640, 480)
             split = QSplitter(Qt.Orientation.Horizontal, dialog)
             mirror = ResultSpectrumWorkbench(split)
+            mirror.show_absolute.hide()
             mirror.freeze.show()
             mirror.freeze.setToolTip("Keep this recorded spectrum while browsing other checkpoints in Results.")
             split.addWidget(mirror)
@@ -137,8 +185,10 @@ class ResultSpectrumWorkbench(SpectrumWorkbench):
             curve = self._curves.get(name)
             if curve is not None and curve.isVisible():
                 mirror.set_trace(name, x, y, color=curve.opts["pen"].color().name(),
-                                 primary=name == self._hold_source)
-        mirror.export_metadata = dict(self.export_metadata)
+                                 primary=name == self._hold_source,
+                                 legend_label=self._legend_labels.get(name))
+        mirror.set_estimated_bands(self._estimated_bands_hz)
+        mirror.export_metadata = {**self.export_metadata, "absolute_traces": self._absolute_trace_names()}
         mirror.register_frame(self._frame_identity)
         mirror.auto_range()
 
@@ -157,7 +207,8 @@ class ResultSpectrumWorkbench(SpectrumWorkbench):
         write_analysis_manifest(path, self.analysis_manifest())
 
     def analysis_manifest(self):
-        return {**self.export_metadata, "value_unit": self._y_unit,
+        return {"absolute_traces": self._absolute_trace_names(),
+                **self.export_metadata, "value_unit": self._y_unit,
                 "log_mode": [self.plot.plotItem.ctrl.logXCheck.isChecked(), self.plot.plotItem.ctrl.logYCheck.isChecked()],
                 "inverted_axes": [bool(self.plot.getViewBox().state["xInverted"]),
                                   bool(self.plot.getViewBox().state["yInverted"])],

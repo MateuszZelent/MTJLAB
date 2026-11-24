@@ -119,7 +119,7 @@ def inspect_finalization_sources(paths, *, cancellation_check=None):
                     if not isinstance(axis, h5py.Dataset) or len(axis.shape) != 1 or axis.shape[0] > 1048576:
                         raise ExecutionError("Profile selection exceeds the bounded vector memory budget.")
                     for name in ("frequency_hz", "mean_w", "sample_variance_w2", "mean_variance_w2"):
-                        if name not in record and name == "mean_variance_w2":
+                        if name not in record and name in {"sample_variance_w2", "mean_variance_w2"}:
                             continue
                         dataset = record.get(name)
                         if not isinstance(dataset, h5py.Dataset) or dataset.shape != axis.shape or dataset.dtype.kind not in "fiu":

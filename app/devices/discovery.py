@@ -18,6 +18,25 @@ from app.devices.moke_box.protocol import (
     readback_vout,
 )
 
+MOKE_DEFAULT_TCP_PORT = 10_001
+
+
+def parse_moke_ipv4_endpoint(value: str, default_port: int = MOKE_DEFAULT_TCP_PORT) -> tuple[str, int]:
+    """Accept a single IPv4 host, optionally with an explicit TCP port."""
+    address, separator, port_text = value.strip().partition(":")
+    port = default_port
+    if separator:
+        if not port_text.isascii() or not port_text.isdecimal():
+            raise ValueError("The port must be a number between 1 and 65535.")
+        port = int(port_text)
+    if not 1 <= port <= 65_535:
+        raise ValueError("The port must be between 1 and 65535.")
+    try:
+        host = str(ipaddress.IPv4Address(address.removesuffix("/32")))
+    except ValueError as exc:
+        raise ValueError("Enter one IPv4 address, optionally followed by :port.") from exc
+    return host, port
+
 
 @dataclass(frozen=True, slots=True)
 class DiscoveredInstrument:

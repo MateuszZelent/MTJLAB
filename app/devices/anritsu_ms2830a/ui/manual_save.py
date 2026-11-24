@@ -74,9 +74,8 @@ class ManualSpectrumSaveDialog(StationDialog):
         heading = TitleLabel("Manual spectrum archive", surface)
         layout.addWidget(heading)
         note = BodyLabel(
-            "Save the completed trace currently visible in Anritsu. Device values below "
-            "are the last confirmed readbacks already held by the station; this dialog "
-            "does not send a new instrument query or change an output.",
+            "The archive includes the visible Anritsu curves and the active reference. "
+            "Results can reopen that view. Device values below use the station's last confirmed readbacks.",
             surface,
         )
         note.setWordWrap(True)

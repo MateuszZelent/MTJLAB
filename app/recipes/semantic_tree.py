@@ -508,6 +508,9 @@ def _label(node: RecipeNode) -> str:
         return f"Repeat · {node.data.get('count', '?')} times"
     if node.type == "sequence" and not node.data.get("device_module"):
         return "Measurement sequence"
+    if node.type in {"configure_rigol", "configure_rigol_output"}:
+        purpose = "waveform settings" if node.type == "configure_rigol" else "output and SYNC"
+        return f"{_device_prefix(node)} · {purpose}"
     if node.type.startswith("configure_") or node.data.get("device_module"):
         device = _device_prefix(node)
         if device and (
@@ -516,10 +519,17 @@ def _label(node: RecipeNode) -> str:
             or node.data.get("device_module")
         ):
             return f"{device} · configuration"
-    if node.type == "acquire_spectrum":
-        return "Acquire spectrum · Anritsu"
-    if node.type == "acquire_reference":
-        return "Acquire reference · Anritsu"
+    if node.type in {"acquire_spectrum", "acquire_reference"}:
+        label = "Acquire spectrum" if node.type == "acquire_spectrum" else "Acquire reference"
+        if node.type == "acquire_reference" and node.data.get("purpose") == "background":
+            label = "Acquire background"
+        if count := node.data.get("instrument_average_count"):
+            return f"{label} · Anritsu Lin Average · {count} sweeps"
+        if target := node.data.get("instrument_average_duration"):
+            return f"{label} · Anritsu Lin Average · ~{target}"
+        if node.data.get("acquisition_mode") == "continuous_live":
+            return f"{label} · PyLab Live averaging"
+        return f"{label} · Anritsu"
     if node.type == "wait":
         return f"Wait · {node.data.get('duration', 'timing')}"
     if node.type == "set_keithley_output":

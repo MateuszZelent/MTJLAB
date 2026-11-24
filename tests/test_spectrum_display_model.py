@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from math import isnan
 
 import pytest
 
@@ -12,7 +13,7 @@ def _trace(name: str, values: tuple[float, ...]) -> SpectrumTrace:
     return SpectrumTrace(
         frequencies_hz=(1.0, 2.0, 3.0),
         powers_dbm=values,
-        acquired_at_utc=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        acquired_at_utc=datetime(2026, 8, 1, tzinfo=UTC),
         trace_name=name,
     )
 
@@ -93,3 +94,27 @@ def test_state_rejects_unknown_selection_and_keeps_units_explicit() -> None:
         state.select("missing")
     assert isinstance(state, SpectrumDisplayState)
     assert state.selected.unit == "dBm"
+
+
+def test_live_frame_uses_same_reference_operation_and_keeps_undefined_power_gaps() -> None:
+    raw = _trace("TRAC1", (-70., -60., -50.))
+    average = _trace("Live average", (-60., -60., -60.))
+    reference = _trace("reference", (-65., -65., -65.))
+
+    state = build_display_state(
+        raw=raw,
+        averaged=average,
+        reference=reference,
+        reference_operation="subtract_power",
+        use_average_for_reference=True,
+        show_live_frame=True,
+        visible={"raw": False, "averaged": False, "reference": False},
+        frame_id=10,
+    )
+
+    assert state.primary_key == state.selected_key == "processed"
+    curve = state.by_key["live_frame"]
+    assert curve.unit == state.by_key["processed"].unit == "dBm"
+    assert isnan(curve.values[0])
+    assert curve.values[1] == state.by_key["processed"].values[1]
+    assert curve.values[2] > state.by_key["processed"].values[2]

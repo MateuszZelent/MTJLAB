@@ -162,7 +162,9 @@ class ConfigurationComparison(TableWidget):
                     status = "Same as device tab" if same else "Changes from device tab"
                     color = tokens.success if same else tokens.caution
                 else:
-                    status, color = "Automatic source-range coupling", tokens.caution
+                    status = ("Automatic source-range coupling" if "range" in row.key
+                              else "Depends on preceding recipe (coupled value)")
+                    color = tokens.caution
             elif prerequisite_failed:
                 status, color = "Earlier recipe requirement not met", tokens.danger
             elif row.current is None:

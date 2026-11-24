@@ -8,6 +8,7 @@ of the selected plane, after component subtraction and stationary-line masking.
 import math
 import warnings
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from numbers import Integral, Real
 
 import numpy as np
@@ -17,6 +18,10 @@ MAX_IMAGE_WINDOW = 31
 MIN_IMAGE_SIGMA = 0.05
 MAX_IMAGE_SIGMA = 31.0
 _IMAGE_TILE_SIZE = 64
+_STRIPE_CONTRAST_DB = 0.6
+_STRIPE_SIGN_AGREEMENT = 0.85
+_STRIPE_MAD_MULTIPLIER = 2.5
+STRIPE_OPERATIONS = frozenset({"stationary_stripes_db", "repair_stripe_bands_db"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +38,8 @@ class MapProcessing:
     line_neighbourhood_hz: float = 60e6
     minimum_coverage: float = 0.8
     protected_bands_hz: tuple[tuple[float, float], ...] = ()
+    stripe_bands_hz: tuple[tuple[float, float], ...] = ()
+    stripe_shoulder_hz: float = 5e6
     view: str = "result"
     colour_range: str = "full"
     image_filter: str = "none"
@@ -40,9 +47,10 @@ class MapProcessing:
     image_sweep_window: int = 3
     image_frequency_sigma: float = 1.0
     image_sweep_sigma: float = 1.0
+    stripe_sweep_window: int = 5
 
     def __post_init__(self):
-        if self.component not in {"none", "median_power", "quantile_power", "reference_power", "median_db"}:
+        if self.component not in {"none", "median_power", "quantile_power", "reference_power", "median_db", *STRIPE_OPERATIONS}:
             raise ValueError("Unknown map component operation.")
         if self.view not in {"result", "input", "component", "removed"} or self.colour_range not in {"full", "robust", "symmetric"}:
             raise ValueError("Unknown map view or colour range.")
@@ -51,6 +59,9 @@ class MapProcessing:
         for value in (self.image_frequency_window, self.image_sweep_window):
             if isinstance(value, bool) or not isinstance(value, Integral) or not 1 <= value <= MAX_IMAGE_WINDOW or value % 2 != 1:
                 raise ValueError(f"Image windows must be odd integer counts from 1 to {MAX_IMAGE_WINDOW} bins/points.")
+        value = self.stripe_sweep_window
+        if isinstance(value, bool) or not isinstance(value, Integral) or not 3 <= value <= MAX_IMAGE_WINDOW or value % 2 == 0:
+            raise ValueError(f"Stripe sweep window must be an odd integer from 3 to {MAX_IMAGE_WINDOW} points.")
         for value in (self.image_frequency_sigma, self.image_sweep_sigma):
             if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or not MIN_IMAGE_SIGMA <= value <= MAX_IMAGE_SIGMA:
                 raise ValueError(f"Image Gaussian sigma must be finite, from {MIN_IMAGE_SIGMA:g} to {MAX_IMAGE_SIGMA:g} bins/points.")
@@ -72,6 +83,13 @@ class MapProcessing:
             for low, high in self.protected_bands_hz
         ):
             raise ValueError("Use at most 32 finite, ordered protected frequency bands.")
+        if not math.isfinite(self.stripe_shoulder_hz) or self.stripe_shoulder_hz <= 0:
+            raise ValueError("Stripe shoulder width must be positive and finite.")
+        bands = sorted(self.stripe_bands_hz)
+        if len(bands) > 32 or any(not (math.isfinite(lo) and math.isfinite(hi) and 0 <= lo < hi) for lo, hi in bands):
+            raise ValueError("Use at most 32 finite, ordered stripe bands.")
+        if any(left[1] >= right[0] for left, right in pairwise(bands)):
+            raise ValueError("Stripe bands must be disjoint.")
 
     @property
     def active(self):
@@ -87,6 +105,7 @@ class MapAnalysis:
     masked_frequencies_hz: tuple[float, ...]
     notes: tuple[str, ...]
     levels: tuple[float, float]
+    corrected_frequencies_hz: tuple[float, ...] = ()
 
 
 def _cancel(cancelled):
@@ -148,6 +167,76 @@ def _stationary_lines(values_dbm, frequencies, state, minimum, cancelled):
     for low, high in state.protected_bands_hz:
         mask[(frequencies >= low) & (frequencies <= high)] = False
     return mask
+
+
+def _stripe_residuals(rows, frequencies, state, cancelled):
+    """Measure each marked interval against its two local frequency shoulders."""
+    if not state.stripe_bands_hz:
+        raise ValueError("Enter at least one stripe band in Map settings.")
+    excluded = np.zeros(frequencies.shape, dtype=bool)
+    protected = excluded.copy()
+    for low, high in state.stripe_bands_hz:
+        excluded |= (frequencies >= low) & (frequencies <= high)
+    for low, high in state.protected_bands_hz:
+        protected |= (frequencies >= low) & (frequencies <= high)
+    for low, high in state.stripe_bands_hz:
+        _cancel(cancelled)
+        core = (frequencies >= low) & (frequencies <= high) & ~protected
+        if not np.any(core):
+            continue
+        shoulder = state.stripe_shoulder_hz
+        left = (frequencies >= low - shoulder) & (frequencies < low) & ~excluded
+        right = (frequencies > high) & (frequencies <= high + shoulder) & ~excluded
+        if min(np.count_nonzero(left), np.count_nonzero(right)) < 3:
+            raise ValueError(f"Stripe band {low:g}–{high:g} Hz needs at least three frequency bins on each shoulder. Increase the shoulder width or use a wider map.")
+        left_values, right_values = rows[:, left], rows[:, right]
+        readable = ((np.count_nonzero(np.isfinite(left_values), axis=1) >= 3)
+                    & (np.count_nonzero(np.isfinite(right_values), axis=1) >= 3))
+        fraction = ((frequencies[core] - np.median(frequencies[left]))
+                    / (np.median(frequencies[right]) - np.median(frequencies[left])))
+        background = (np.nanmedian(left_values[readable], axis=1)[:, None] * (1 - fraction)
+                      + np.nanmedian(right_values[readable], axis=1)[:, None] * fraction)
+        residual = rows[np.ix_(readable, core)] - background
+        yield core, readable, residual
+
+
+def _stripe_component(rows, frequencies, state, minimum, cancelled):
+    offsets = np.zeros(frequencies.shape, dtype=float)
+    for core, readable, residual in _stripe_residuals(rows, frequencies, state, cancelled):
+        if np.count_nonzero(readable) < minimum:
+            continue
+        centre = _column_stat(residual, 0.5, minimum, cancelled)
+        mad = _column_stat(np.abs(residual - centre), 0.5, minimum, cancelled)
+        count = np.count_nonzero(np.isfinite(residual), axis=0)
+        same_sign = np.count_nonzero(np.sign(residual) == np.sign(centre), axis=0)
+        qualifies = ((np.abs(centre) >= _STRIPE_CONTRAST_DB)
+                     & (np.abs(centre) >= _STRIPE_MAD_MULTIPLIER * mad)
+                     & (same_sign >= _STRIPE_SIGN_AGREEMENT * count))
+        offsets[core] = np.where(qualifies, centre, 0.0)
+    return offsets
+
+
+def _repair_stripe_bands(rows, frequencies, coordinate, state, minimum, cancelled):
+    """Estimate a correction that can vary with the swept parameter."""
+    order = np.argsort(coordinate)
+    radius = state.stripe_sweep_window // 2
+    smoothing = replace(state, image_filter="median", image_frequency_window=1,
+                        image_sweep_window=state.stripe_sweep_window, view="result")
+    delta = np.zeros_like(rows)
+    corrected = np.zeros(frequencies.shape, dtype=bool)
+    unsupported = 0
+    for core, readable, residual in _stripe_residuals(rows[order], frequencies, state, cancelled):
+        supported = np.count_nonzero(np.isfinite(residual), axis=0) >= minimum
+        estimate = np.full((rows.shape[0], np.count_nonzero(core)), np.nan)
+        estimate[readable] = residual
+        padded = np.pad(estimate, ((radius, radius), (0, 0)), mode="edge")
+        local, _ = _smooth_image(padded, "dB", smoothing, cancelled)
+        local = local[radius:-radius, :]
+        valid = np.isfinite(local) & supported
+        delta[np.ix_(order, core)] = np.where(valid, local, 0.)
+        corrected[core] = np.any(valid, axis=0)
+        unsupported += np.count_nonzero(np.isfinite(rows[:, core])) - np.count_nonzero(valid)
+    return delta, corrected, unsupported
 
 
 def _smooth_image(values, unit, state, cancelled):
@@ -237,13 +326,29 @@ def analyse_map(values, *, unit, frequencies_hz, coordinate_values, frequency_ax
     notes = []
     finite_rows = int(np.count_nonzero(np.any(np.isfinite(rows), axis=1)))
     minimum = max(3, math.ceil(rows.shape[0] * state.minimum_coverage))
-    if (state.component in {"median_power", "quantile_power", "median_db"} or state.mask_lines) and finite_rows < 3:
+    if (state.component in {"median_power", "quantile_power", "median_db", *STRIPE_OPERATIONS} or state.mask_lines) and finite_rows < 3:
         raise ValueError("Common-component/line analysis requires at least three readable parameter values.")
     component = None
     component_unit = unit
     output = rows.copy() if state.component == "median_db" or state.mask_lines else rows
     output_unit = unit
-    if state.component != "none":
+    corrected_frequencies = ()
+    if state.component in STRIPE_OPERATIONS:
+        if unit != "dB":
+            raise ValueError("Stripe band correction requires relative dB. Choose Raw − reference — Subtract [dB] first.")
+        if state.component == "repair_stripe_bands_db":
+            component, corrected, unsupported = _repair_stripe_bands(rows, f, coordinate, state, minimum, cancelled)
+            corrected_frequencies = tuple(f[corrected])
+            notes.append(f"Local stripe-band subtraction: {len(corrected_frequencies)} frequency bins, "
+                         f"{state.stripe_sweep_window}-point sweep median. "
+                         "Compare Input and Common component for stationary physical signals.")
+            if unsupported:
+                notes.append(f"{unsupported} samples in the stripe bands lacked correction support.")
+        else:
+            component = _stripe_component(rows, f, state, minimum, cancelled)
+            notes.append(f"Stationary stripe subtraction: {np.count_nonzero(component)} corrected frequency bins in the selected bands; minimum {_STRIPE_CONTRAST_DB:g} dB, {_STRIPE_SIGN_AGREEMENT:.0%} same sign and {_STRIPE_MAD_MULTIPLIER:g}× MAD. Compare Input and Common component for stationary physical signals.")
+        output = rows - component
+    elif state.component != "none":
         if state.component == "median_db":
             if unit != "dBm":
                 raise ValueError("Relative dB contrast requires absolute raw dBm power.")
@@ -325,5 +430,7 @@ def analyse_map(values, *, unit, frequencies_hz, coordinate_values, frequency_ax
     elif state.colour_range == "symmetric":
         bound = max(abs(low), abs(high))
         low, high = -bound, bound
+    if component is not None and component.ndim == 2 and frequency_axis == 0:
+        component = component.T
     return MapAnalysis(output if frequency_axis == 1 else output.T, output_unit, component,
-                       component_unit, tuple(f[mask]), tuple(notes), (low, high))
+                       component_unit, tuple(f[mask]), tuple(notes), (low, high), corrected_frequencies)

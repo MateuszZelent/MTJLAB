@@ -1,4 +1,4 @@
-"""Worker-owned source cache for one immutable archive coordinate plane."""
+"""Worker-owned spectral sources for a result archive."""
 
 from collections import OrderedDict
 
@@ -8,13 +8,14 @@ from app.storage import Hdf5RunReader, ThatecRunReader
 class HeatmapSourceCache:
     """Keep full grids: crop and DSP are derived views, never cached sources.
 
-    The tab replaces this object when the file identity, row or plane changes.
-    Only the serial result worker accesses its dictionaries.
+    A preloaded archive shares compact matrices across all coordinate planes.
+    Only the serial result worker accesses mutable cache entries.
     """
 
-    def __init__(self):
+    def __init__(self, spectral_rows=None):
         self._values = {}
         self._baselines = OrderedDict()
+        self._spectral_rows = spectral_rows or {}
 
     def _read(self, method, path, *args, **kwargs):
         key = (method, str(path), args, tuple(sorted(kwargs.items())))
@@ -29,7 +30,14 @@ class HeatmapSourceCache:
         return values[key]
 
     def spectrum_slice(self, path, row_id, checkpoint):
+        row = self._spectral_rows.get(row_id)
+        if row is not None:
+            return row.spectrum(checkpoint)
         return self._read("spectrum_slice", path, row_id, checkpoint)
+
+    def preloaded_row(self, row_id):
+        """Return the immutable bulk-loaded matrix, if this archive has one."""
+        return self._spectral_rows.get(row_id)
 
     def spectrum(self, path, checkpoint):
         return self._read("spectrum", path, checkpoint)

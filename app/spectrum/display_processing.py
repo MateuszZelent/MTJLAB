@@ -1,4 +1,4 @@
-"""Shared display filtering that preserves undefined logarithmic residual bins."""
+"""Shared display filtering that preserves missing spectrum bins."""
 
 import numpy as np
 
@@ -14,7 +14,7 @@ def _finite_runs(values):
 def clean_display_spectrum(
     values, *, allow_gaps=False, pipeline=clean_spectrum_pipeline, **options
 ):
-    """Preserve invalid linear-subtraction bins without filtering across gaps."""
+    """Filter each finite segment independently, preserving all gaps."""
     array = np.asarray(values, dtype=float)
     if np.all(np.isfinite(array)) or not allow_gaps:
         return pipeline(values, **options)
@@ -45,10 +45,10 @@ def clean_display_spectrum(
         modified.extend(start + index for index in result.modified_bin_indices)
         removed.extend(start + index for index in result.removed_peak_indices)
         interference.extend(start + index for index in result.stationary_interference_indices)
-    notes.insert(
-        0,
-        f"{np.count_nonzero(~np.isfinite(array))} non-positive power residual bins remain undefined in dBm.",
-    )
+    gap_note = f"{np.count_nonzero(~np.isfinite(array))} missing spectrum bins retained as gaps."
+    if options["unit"] == "dBm":
+        gap_note += " Non-positive power is undefined in dBm."
+    notes.insert(0, gap_note)
     return SpectrumCleanupResult(
         tuple(cleaned),
         max(noise, default=0.0),

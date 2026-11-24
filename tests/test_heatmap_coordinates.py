@@ -13,20 +13,21 @@ from app.storage import Hdf5RunReader, Hdf5RunWriter, ThatecRunReader
 from app.ui.results.heatmap_coordinates import (
     HeatmapRequest,
     build_heatmap_coordinates,
+    default_heatmap_ranges,
     read_heatmap_matrix,
 )
 
 
-def _write_current_sweep(path: Path) -> None:
+def _write_current_sweep(path: Path, currents=(0.0, 0.001, 0.002)) -> None:
     writer = Hdf5RunWriter(
         path,
         recipe_source="name: current sweep\n",
         settings_source="schema_version: 1\n",
         plan_hash="current-sweep",
         device_idn={},
-        expected_points=3,
+        expected_points=len(currents),
     )
-    for index, current_a in enumerate((0.0, 0.001, 0.002)):
+    for index, current_a in enumerate(currents):
         writer.append(
             MeasurementPoint(
                 index=index,
@@ -153,6 +154,23 @@ def test_coordinates_can_swap_frequency_to_the_y_axis() -> None:
         assert matrix.values.shape == (3, 3)
         assert np.allclose(matrix.x_values, (0.0, 0.001, 0.002))
         assert matrix.cell_checkpoints[0, :].tolist() == [0, 1, 2]
+
+
+def test_heatmap_separates_outward_and_return_visits(tmp_path):
+    path = tmp_path / "return-sweep.h5"
+    _write_current_sweep(path, (0.0, 0.001, 0.002, 0.001, 0.0))
+    run = ThatecRunReader.describe(path)
+    row = next(candidate for candidate in run.rows.values() if len(candidate.shape) == 2)
+    coordinates = build_heatmap_coordinates(path, run, row, Hdf5RunReader.points(path))
+    assert coordinates.dimension("measurement.visit").values == (1, 1, 1, 2, 2)
+    x, y = "frequency", "keithley.B.current"
+    filters = default_heatmap_ranges(coordinates, x, y)
+    assert filters["measurement.visit"].minimum == filters["measurement.visit"].maximum == 1
+    first = read_heatmap_matrix(path, row, coordinates, HeatmapRequest(x, y, filters))
+    assert first.cell_checkpoints[:, 0].tolist() == [0, 1, 2]
+    filters["measurement.visit"] = 2
+    second = read_heatmap_matrix(path, row, coordinates, HeatmapRequest(x, y, filters))
+    assert second.cell_checkpoints[:, 0].tolist() == [4, 3]
 
 
 def test_coordinates_filter_other_sweeps_and_build_a_non_frequency_plane() -> None:

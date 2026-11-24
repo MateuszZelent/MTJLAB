@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import math
+import struct
 from typing import Literal, NoReturn
 
 from app.devices.base import (
@@ -22,7 +23,9 @@ from app.safety.rigol_current import (
     RigolCurrentEstimate,
     RIGOL_DG1000Z_FREQUENCY_RESOLUTION_HZ,
     quantize_rigol_frequency,
+    quantize_rigol_level_pair,
     quantize_rigol_voltage,
+    rigol_level_update_control,
     validate_rigol_waveform,
 )
 from app.settings.models import RigolSettings, StationSettings
@@ -157,6 +160,32 @@ class RigolAdapter(DeviceAdapter):
         if self._session is None:
             raise ConnectionError("Rigol is not connected.")
         return self._session
+
+    def capture_screen(self) -> bytes:
+        """Read the front panel as BMP without configuring or enabling outputs.
+
+        DG1000Z Programming Guide 2-28: HCOP:SDUM:DATA? returns a definite
+        binary block. The production VISA transport removes that block header.
+        A short timeout bounds the delay before a queued output-off action.
+        """
+        session = self._require_session()
+        try:
+            with self.io_timeout(1.0):
+                data = bytes(session.query_binary_values(
+                    ":HCOP:SDUM:DATA?", datatype="B", container=bytes,
+                ))
+        except Exception as exc:
+            raise DeviceError(f"Could not capture the Rigol screen: {exc}") from exc
+        if not 54 <= len(data) <= 4 * 1024 * 1024 or data[:2] != b"BM":
+            raise DeviceError("Rigol screen response is not a valid BMP image.")
+        file_size = struct.unpack_from("<I", data, 2)[0]
+        offset = struct.unpack_from("<I", data, 10)[0]
+        dib_size, width, height, planes, bits = struct.unpack_from("<IiiHH", data, 14)
+        if (dib_size < 40 or width != 320 or abs(height) != 240 or planes != 1
+                or bits not in {24, 32} or not 54 <= offset <= file_size <= len(data)
+                or file_size < offset + ((width * bits + 31) // 32 * 4) * abs(height)):
+            raise DeviceError("Rigol screen BMP header or pixel data is invalid or truncated.")
+        return data
 
     def connect(self) -> DeviceIdentity:
         if self._session is not None:
@@ -722,6 +751,23 @@ class RigolAdapter(DeviceAdapter):
                 changed.add("output_load")
         return tuple(name for name in selected if name in changed)
 
+    def _confirmed_update_output_state(self, channel: int) -> bool:
+        """A front-panel transition cannot authorize an otherwise valid update."""
+        try:
+            observed = self._parse_output_state(
+                self._require_session().query(f":OUTP{channel}?"), channel=channel
+            )
+        except Exception as exc:  # noqa: BLE001 - any failed state query requires shutdown
+            self._last_config.pop(channel, None)
+            self._fail_live_setpoint_update(output_was_on=True, cause=exc)
+        if observed != self._output_states[channel]:
+            self._last_config.pop(channel, None)
+            self._fail_live_setpoint_update(
+                output_was_on=True,
+                cause=DeviceError(f"Rigol CH{channel} OUTPUT changed outside the confirmed control path."),
+            )
+        return observed
+
     def update_frequency(self, channel: int, frequency_hz: float) -> float:
         """Change only carrier frequency while preserving the current OUTPUT state."""
 
@@ -749,16 +795,7 @@ class RigolAdapter(DeviceAdapter):
         self._assert_independent_channels()
         session = self._require_session()
         prefix = f":SOUR{channel}"
-        output_before = self._parse_output_state(
-            session.query(f":OUTP{channel}?"), channel=channel
-        )
-        if output_before != self._output_states[channel]:
-            self._fail_live_setpoint_update(
-                output_was_on=output_before,
-                cause=DeviceError(
-                    f"Rigol CH{channel} OUTPUT changed before a frequency update."
-                ),
-            )
+        output_before = self._confirmed_update_output_state(channel)
         try:
             self._verify_applied_configuration(
                 config, expected_output=output_before
@@ -825,38 +862,21 @@ class RigolAdapter(DeviceAdapter):
             low_level_v=float(low_level_v),
         )
         self._validate_waveform_config(raw_updated)
-        updated = replace(
-            raw_updated,
-            high_level_v=quantize_rigol_voltage(raw_updated.high_level_v),
-            low_level_v=quantize_rigol_voltage(raw_updated.low_level_v),
-        )
-        self._validate_waveform_config(updated)
-        high_changed = not self._same_number(
-            updated.high_level_v, config.high_level_v, absolute=1e-12
-        )
-        low_changed = not self._same_number(
-            updated.low_level_v, config.low_level_v, absolute=1e-12
-        )
-        if high_changed and not low_changed:
+        # Choose the authored control before rounding; an odd Vpp step has
+        # half-step endpoints that must not be rounded independently.
+        updated = raw_updated
+        control = rigol_level_update_control(config.high_level_v, config.low_level_v,
+                                             updated.high_level_v, updated.low_level_v, waveform=config.waveform)
+        if control == 'high_level':
             self.update_high_level(channel, updated.high_level_v)
             applied = self.last_channel_config(channel)
             return applied.high_level_v, applied.low_level_v
-        if low_changed and not high_changed:
+        if control == 'low_level':
             self.update_low_level(channel, updated.low_level_v)
             applied = self.last_channel_config(channel)
             return applied.high_level_v, applied.low_level_v
-        if not high_changed and not low_changed:
-            session = self._require_session()
-            output_before = self._parse_output_state(
-                session.query(f":OUTP{channel}?"), channel=channel
-            )
-            if output_before != self._output_states[channel]:
-                self._fail_live_setpoint_update(
-                    output_was_on=output_before,
-                    cause=DeviceError(
-                        f"Rigol CH{channel} OUTPUT changed before a level update."
-                    ),
-                )
+        if control == 'unchanged':
+            output_before = self._confirmed_update_output_state(channel)
             try:
                 self._verify_applied_configuration(
                     config, expected_output=output_before
@@ -868,15 +888,13 @@ class RigolAdapter(DeviceAdapter):
             self._output_states[channel] = output_before
             self._update_aggregate_output_state()
             return config.high_level_v, config.low_level_v
-        old_offset = (config.high_level_v + config.low_level_v) / 2.0
         new_offset = (updated.high_level_v + updated.low_level_v) / 2.0
-        old_amplitude = config.high_level_v - config.low_level_v
         new_amplitude = updated.high_level_v - updated.low_level_v
-        if self._same_number(old_offset, new_offset, absolute=1e-12):
+        if control == 'amplitude':
             self.update_amplitude_vpp(channel, new_amplitude)
             applied = self.last_channel_config(channel)
             return applied.high_level_v, applied.low_level_v
-        if self._same_number(old_amplitude, new_amplitude, absolute=1e-12):
+        if control == 'offset':
             self.update_offset(channel, new_offset)
             applied = self.last_channel_config(channel)
             return applied.high_level_v, applied.low_level_v
@@ -888,9 +906,7 @@ class RigolAdapter(DeviceAdapter):
         self._assert_independent_channels()
         session = self._require_session()
         prefix = f":SOUR{channel}"
-        output_before = self._parse_output_state(
-            session.query(f":OUTP{channel}?"), channel=channel
-        )
+        output_before = self._confirmed_update_output_state(channel)
         try:
             self._verify_applied_configuration(
                 config, expected_output=output_before
@@ -949,12 +965,11 @@ class RigolAdapter(DeviceAdapter):
             raise SafetyViolation("Configure the Rigol channel before quick amplitude control.")
         if not math.isfinite(amplitude_vpp_v) or amplitude_vpp_v < 0:
             raise SafetyViolation("Rigol amplitude Vpp must be finite and non-negative.")
-        offset_v = quantize_rigol_voltage((config.high_level_v + config.low_level_v) / 2.0)
-        amplitude_vpp_v = quantize_rigol_voltage(amplitude_vpp_v)
+        offset_v = (config.high_level_v + config.low_level_v) / 2.0
         updated = replace(
             config,
-            high_level_v=quantize_rigol_voltage(offset_v + amplitude_vpp_v / 2.0),
-            low_level_v=quantize_rigol_voltage(offset_v - amplitude_vpp_v / 2.0),
+            high_level_v=offset_v + amplitude_vpp_v / 2.0,
+            low_level_v=offset_v - amplitude_vpp_v / 2.0,
         )
         return self._update_voltage_representation(
             channel, updated, command_suffix="VOLT", requested=amplitude_vpp_v
@@ -984,9 +999,7 @@ class RigolAdapter(DeviceAdapter):
             self._assert_independent_channels()
             session = self._require_session()
             prefix = f":SOUR{channel}"
-            output_before = self._parse_output_state(
-                session.query(f":OUTP{channel}?"), channel=channel
-            )
+            output_before = self._confirmed_update_output_state(channel)
             try:
                 self._verify_applied_configuration(
                     config, expected_output=output_before
@@ -1034,12 +1047,11 @@ class RigolAdapter(DeviceAdapter):
             self._output_states[channel] = output_after
             self._update_aggregate_output_state()
             return quantize_rigol_voltage(actual_offset)
-        offset_v = quantize_rigol_voltage(offset_v)
-        amplitude_vpp_v = quantize_rigol_voltage(config.high_level_v - config.low_level_v)
+        amplitude_vpp_v = config.high_level_v - config.low_level_v
         updated = replace(
             config,
-            high_level_v=quantize_rigol_voltage(offset_v + amplitude_vpp_v / 2.0),
-            low_level_v=quantize_rigol_voltage(offset_v - amplitude_vpp_v / 2.0),
+            high_level_v=offset_v + amplitude_vpp_v / 2.0,
+            low_level_v=offset_v - amplitude_vpp_v / 2.0,
         )
         return self._update_voltage_representation(
             channel, updated, command_suffix="VOLT:OFFS", requested=offset_v
@@ -1047,18 +1059,16 @@ class RigolAdapter(DeviceAdapter):
 
     def update_high_level(self, channel: int, high_level_v: float) -> float:
         config = self.last_channel_config(channel)
-        quantized = quantize_rigol_voltage(float(high_level_v))
-        updated = replace(config, high_level_v=quantized)
+        updated = replace(config, high_level_v=float(high_level_v))
         return self._update_voltage_representation(
-            channel, updated, command_suffix="VOLT:HIGH", requested=quantized
+            channel, updated, command_suffix="VOLT:HIGH", requested=float(high_level_v)
         )
 
     def update_low_level(self, channel: int, low_level_v: float) -> float:
         config = self.last_channel_config(channel)
-        quantized = quantize_rigol_voltage(float(low_level_v))
-        updated = replace(config, low_level_v=quantized)
+        updated = replace(config, low_level_v=float(low_level_v))
         return self._update_voltage_representation(
-            channel, updated, command_suffix="VOLT:LOW", requested=quantized
+            channel, updated, command_suffix="VOLT:LOW", requested=float(low_level_v)
         )
 
     def _update_voltage_representation(
@@ -1078,16 +1088,24 @@ class RigolAdapter(DeviceAdapter):
         # then rebuilt from the semantic control being changed so an
         # amplitude update is not accidentally rounded as two endpoint values.
         self._validate_waveform_config(updated)
-        normalized_requested = quantize_rigol_voltage(float(requested))
-        if command_suffix == "VOLT":
-            offset = quantize_rigol_voltage((config.high_level_v + config.low_level_v) / 2.0)
+        held_value = {
+            'VOLT': config.high_level_v - config.low_level_v,
+            'VOLT:OFFS': (config.high_level_v + config.low_level_v) / 2,
+            'VOLT:HIGH': config.high_level_v, 'VOLT:LOW': config.low_level_v,
+        }.get(command_suffix)
+        unchanged = held_value is not None and self._same_number(float(requested), held_value, absolute=1e-12)
+        normalized_requested = held_value if unchanged else quantize_rigol_voltage(float(requested))
+        if unchanged:
+            normalized_updated = config
+        elif command_suffix == "VOLT":
+            offset = (config.high_level_v + config.low_level_v) / 2.0
             normalized_updated = replace(
                 config,
                 high_level_v=offset + normalized_requested / 2.0,
                 low_level_v=offset - normalized_requested / 2.0,
             )
         elif command_suffix == "VOLT:OFFS":
-            amplitude = quantize_rigol_voltage(config.high_level_v - config.low_level_v)
+            amplitude = config.high_level_v - config.low_level_v
             normalized_updated = replace(
                 config,
                 high_level_v=normalized_requested + amplitude / 2.0,
@@ -1110,15 +1128,17 @@ class RigolAdapter(DeviceAdapter):
         self._assert_independent_channels()
         session = self._require_session()
         prefix = f":SOUR{channel}"
-        output_before = self._parse_output_state(
-            session.query(f":OUTP{channel}?"), channel=channel
-        )
+        output_before = self._confirmed_update_output_state(channel)
         try:
             self._verify_applied_configuration(config, expected_output=output_before)
             if output_before:
                 self._validate_active_quick_update(channel, updated)
         except Exception as exc:
             self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
+        if unchanged:
+            self._output_states[channel] = output_before
+            self._update_aggregate_output_state()
+            return held_value
         self._last_config.pop(channel, None)
         try:
             session.write(
@@ -1272,36 +1292,23 @@ class RigolAdapter(DeviceAdapter):
             snapshot[f"rigol.{channel}.frequency"] = config.frequency_hz
             snapshot[f"rigol.{channel}.high_level"] = config.high_level_v
             snapshot[f"rigol.{channel}.low_level"] = config.low_level_v
-            snapshot[f"rigol.{channel}.amplitude"] = quantize_rigol_voltage(
-                config.high_level_v - config.low_level_v
-            )
-            snapshot[f"rigol.{channel}.offset"] = quantize_rigol_voltage(
-                (config.high_level_v + config.low_level_v) / 2.0
-            )
+            # These are views of the accepted endpoints. An individual
+            # HighL/LowL write can leave the midpoint between offset steps.
+            snapshot[f"rigol.{channel}.amplitude"] = config.high_level_v - config.low_level_v
+            snapshot[f"rigol.{channel}.offset"] = (config.high_level_v + config.low_level_v) / 2.0
         return snapshot
 
     @staticmethod
     def _quantize_channel_config(config: RigolChannelConfig) -> RigolChannelConfig:
         frequency_hz = quantize_rigol_frequency(config.frequency_hz)
-        if config.waveform.upper() == "DC":
-            dc_level = quantize_rigol_voltage(config.high_level_v)
-            return replace(
-                config,
-                frequency_hz=frequency_hz,
-                high_level_v=dc_level,
-                low_level_v=dc_level,
-            )
-        amplitude_vpp = quantize_rigol_voltage(
-            config.high_level_v - config.low_level_v
-        )
-        offset_v = quantize_rigol_voltage(
-            (config.high_level_v + config.low_level_v) / 2.0
+        high_v, low_v = quantize_rigol_level_pair(
+            config.high_level_v, config.low_level_v, waveform=config.waveform,
         )
         return replace(
             config,
             frequency_hz=frequency_hz,
-            high_level_v=offset_v + amplitude_vpp / 2.0,
-            low_level_v=offset_v - amplitude_vpp / 2.0,
+            high_level_v=high_v,
+            low_level_v=low_v,
         )
 
     def _validate_waveform_config(self, config: RigolChannelConfig) -> RigolCurrentEstimate:
@@ -1518,6 +1525,11 @@ class RigolAdapter(DeviceAdapter):
             raise DeviceError(
                 description + "; ".join(mismatches)
             )
+        if expected_output:
+            output_config = self._last_output_config.get(expected.channel)
+            if output_config is None:
+                raise SafetyViolation("Rigol live updates require a confirmed output-path configuration.")
+            self._verify_output_configuration(output_config, expected_output=True)
         return replace(
             expected,
             frequency_hz=actual_frequency,

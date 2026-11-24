@@ -32,6 +32,13 @@ from app.settings.models import AnritsuSettings, StationSettings
 from .configuration import SignalGeneratorConfig, SpectrumConfig
 
 
+_LIVE_BINARY_READBACK = "SWE:POIN?;FREQ:STAR?;FREQ:STOP?;FORM?;FORM:BORD?;TRAC:STOR:MODE? 1;SYST:ERR?"
+_TRACE_STORAGE_MODES = frozenset({"OFF", "AVER", "LAV", "MAXH", "MINH"})
+_BINARY_TRACE_FORMAT = ("REAL,32", "SWAP")
+ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS = 2
+ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS = 9999
+
+
 @dataclass(frozen=True, slots=True)
 class AnritsuConfigurationSnapshot:
     """Read-only snapshot of the analyser's current spectrum settings."""
@@ -117,6 +124,45 @@ class SpectrumTrace:
     acquisition_started_at_utc: datetime | None = None
     acquisition_completed_at_utc: datetime | None = None
     configuration_generation: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentAverageTarget:
+    """A finite analyser average specified by sweeps or nominal seconds."""
+
+    frame_count: int | None = None
+    duration_s: float | None = None
+
+    def __post_init__(self) -> None:
+        if (self.frame_count is None) == (self.duration_s is None):
+            raise SafetyViolation("Select either a sweep count or a duration for Anritsu averaging.")
+        if self.frame_count is not None and (
+            type(self.frame_count) is not int
+            or not ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS <= self.frame_count <= ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS
+        ):
+            raise SafetyViolation("Anritsu instrument averaging requires an integer count of 2 to 9999 sweeps.")
+        if self.duration_s is not None and (
+            type(self.duration_s) not in (int, float) or not 0 < self.duration_s < math.inf
+        ):
+            raise SafetyViolation("Anritsu instrument averaging duration must be finite and positive in seconds.")
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentAverageResult:
+    """Completed linear-power mean and the analyser's nominal per-sweep time."""
+
+    trace: SpectrumTrace
+    count: int
+    nominal_sweep_time_s: float
+
+
+@dataclass(frozen=True, slots=True)
+class _InstrumentAverageSettings:
+    storage_mode: str
+    count: int
+    write_mode: str
+    data_format: str
+    byte_order: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +267,8 @@ class AnritsuAdapter(DeviceAdapter):
         self._factory = session_factory or PyVisaSessionFactory()
         self._session: InstrumentSession | None = None
         self._live = False
+        self._live_storage_before: tuple[bool, str] | None = None
+        self._group_live_queries = False
         self._last_sg_config: SignalGeneratorConfig | None = None
         self._sg_control_owned = False
         self._sg_output_enabled = False
@@ -265,7 +313,7 @@ class AnritsuAdapter(DeviceAdapter):
             raise DeviceError(f"Anritsu returned unknown remote language {language!r}.")
         return language
 
-    def _prepare_trace_a(self) -> None:
+    def _prepare_trace_a(self) -> str:
         session = self._require_session()
         # Mainframe Remote Control 1.6.2: Native moves the indexed SCPI
         # header's number into the first argument. Never change the language
@@ -274,6 +322,7 @@ class AnritsuAdapter(DeviceAdapter):
         command = "TRAC:TYPE 1,WRIT" if language == "NAT" else "TRAC1:TYPE WRIT"
         session.write(command)
         self._check_scpi_errors(session, f"Trace A preparation ({command}, language={language})")
+        return language
 
     def _require_session(self) -> InstrumentSession:
         if self._session is None:
@@ -372,19 +421,22 @@ class AnritsuAdapter(DeviceAdapter):
                     "Cannot disconnect Anritsu because RF OUTPUT OFF could not be verified. "
                     "Keep the session open and use E-STOP or remove RF power externally."
                 )
-        session, self._session = self._session, None
-        self._remote_entered = False
-        self._sg_control_owned = False
-        self._live = False
-        self._last_sg_config = None
-        self._sg_output_enabled = False
-        if session is not None:
-            try:
-                session.close()
-            finally:
-                self._identity = None
-                self._capabilities = None
-                self._state = DeviceState.DISCONNECTED
+        try:
+            self.stop_live()
+        finally:
+            session, self._session = self._session, None
+            self._remote_entered = False
+            self._sg_control_owned = False
+            self._live_storage_before = None
+            self._last_sg_config = None
+            self._sg_output_enabled = False
+            if session is not None:
+                try:
+                    session.close()
+                finally:
+                    self._identity = None
+                    self._capabilities = None
+                    self._state = DeviceState.DISCONNECTED
 
     @staticmethod
     def _stop_spectrum_acquisition(session) -> None:
@@ -399,12 +451,13 @@ class AnritsuAdapter(DeviceAdapter):
         """Stop spectrum acquisition without selecting or controlling SG/RF."""
         session = self._require_session()
         try:
-            self._stop_spectrum_acquisition(session)
+            try:
+                self._stop_spectrum_acquisition(session)
+            finally:
+                self.stop_live()
         except Exception:
-            self._live = False
             self._state = DeviceState.UNKNOWN
             raise
-        self._live = False
         self._state = DeviceState.VERIFIED
         return True
 
@@ -439,11 +492,13 @@ class AnritsuAdapter(DeviceAdapter):
             self._stop_spectrum_acquisition(session)
         except Exception as exc:
             errors.append(exc)
+        try:
+            self.stop_live()
+        except Exception as exc:
+            errors.append(exc)
         if errors:
-            self._live = False
             self._state = DeviceState.UNKNOWN
         else:
-            self._live = False
             self._state = DeviceState.VERIFIED
         return not errors
 
@@ -1232,11 +1287,15 @@ class AnritsuAdapter(DeviceAdapter):
             self._remote_entered = True
 
     @staticmethod
-    def _check_scpi_errors(session: InstrumentSession, context: str) -> None:
+    def _check_scpi_errors(
+        session: InstrumentSession, context: str, *, first_response: str | None = None
+    ) -> None:
         """Preserve transient front-panel errors in the caller's fault/log."""
         errors = []
-        for _ in range(16):
-            response = session.query("SYST:ERR?").strip()
+        for index in range(16):
+            response = (
+                first_response if index == 0 and first_response is not None else session.query("SYST:ERR?")
+            ).strip()
             try:
                 code = int(response.split(",", 1)[0])
             except ValueError as exc:
@@ -1249,50 +1308,68 @@ class AnritsuAdapter(DeviceAdapter):
         raise DeviceError(f"Anritsu error queue did not empty during {context}: " + "; ".join(errors))
 
     def start_live(self, ensure_continuous: bool = False) -> AnritsuConfigurationSnapshot:
-        """Start Live polling, optionally ensuring free-running measurement."""
+        """Start Live polling, using unaveraged Trace A in continuous mode."""
 
-        snapshot = self.read_current_configuration()
-        if "SPECT" not in snapshot.instrument_mode.upper():
-            raise DeviceError(
-                f"Read-only Live requires Spectrum Analyzer mode; current mode is "
-                f"{snapshot.instrument_mode!r}. Select Spectrum Analyzer on the instrument."
-            )
-        if ensure_continuous:
-            session = self._require_session()
-            self._ensure_acquisition_remote()
-            self._check_scpi_errors(session, "before Live preparation")
-            # Live owns the expectation that every poll can observe the Trace
-            # A measurement being refreshed. This changes the trace display
-            # mode once at Live startup; individual timer ticks remain reads.
-            self._prepare_trace_a()
-            # Do not probe TRAC:TYPE? here. Although documented for Spectrum
-            # Analyzer mode, MS2830A firmware can leave the query unanswered
-            # in measurement applications where trace-type control is not
-            # available (for example SEM/Spurious contexts). Reading TRAC1
-            # does not require this query; repeated identical frames are
-            # detected by the UI and reported without breaking Live.
-            continuous_response = session.query("INIT:CONT?").strip().upper()
-            if continuous_response in {"1", "+1", "ON"}:
-                continuous = True
-            elif continuous_response in {"0", "+0", "OFF"}:
-                continuous = False
-            else:
-                raise DeviceError(
-                    f"Anritsu returned invalid INIT:CONT? response {continuous_response!r}."
-                )
-            if not continuous:
-                # The MS2830A command explicitly selects Continuous mode and
-                # starts continuous measurement.
-                session.write("INIT:MODE:CONT")
-            self._check_scpi_errors(session, "Live preparation (TRAC1:TYPE WRIT / INIT:MODE:CONT)")
+        if not ensure_continuous or not self._live:
+            self.stop_live()
+        self._group_live_queries = False
+        try:
+            snapshot = self.read_current_configuration()
+            if ensure_continuous:
+                self._prepare_unaveraged_live()
+        except Exception:
+            self.stop_live()
+            raise
         self._live = True
         return snapshot
 
+    def _prepare_unaveraged_live(self) -> None:
+        self._assert_acquisition_allowed()
+        session = self._require_session()
+        self._ensure_acquisition_remote()
+        self._check_scpi_errors(session, "before Live preparation")
+        # TRAC:TYPE? can time out in some measurement applications. Prepare
+        # WRIT using the qualified command, just as for triggered acquisitions.
+        native = self._prepare_trace_a() == "NAT"
+        continuous = self._parse_switch(session.query("INIT:CONT?"), "continuous acquisition")
+        current_mode = session.query(self._trace_storage_query(1, native)).strip().upper()
+        if current_mode not in _TRACE_STORAGE_MODES:
+            raise DeviceError(f"Anritsu returned invalid Trace A storage mode {current_mode!r}.")
+        storage_changed = False
+        if self._live_storage_before is None:
+            self._live_storage_before = native, current_mode
+            if current_mode != "OFF":
+                storage_changed = True
+                session.write(self._trace_storage_command(1, "OFF", native))
+                self._check_scpi_errors(session, "disabling Trace A storage for Live")
+                current_mode = session.query(self._trace_storage_query(1, native)).strip().upper()
+        self._assert_live_storage_off(current_mode)
+        if not continuous or storage_changed:
+            session.write("INIT:MODE:CONT")
+        self._check_scpi_errors(session, "Live preparation (Trace A / Continuous)")
+        if not self._parse_switch(session.query("INIT:CONT?"), "continuous acquisition"):
+            raise DeviceError("Anritsu did not confirm Continuous acquisition for Live.")
+        self._group_live_queries = native and self._supports_grouped_native_queries()
+
+    def _supports_grouped_native_queries(self) -> bool:
+        identity = self._identity
+        return (
+            identity is not None
+            and identity.model == "MS2830A"
+            and identity.firmware == "7.03.00"
+            and identity.resource.upper().startswith("GPIB")
+        )
+
     def stop_live(self) -> None:
-        # Stop only application polling.  Turning INIT:CONT OFF here would
-        # freeze the front-panel trace and make the next current-trace read
-        # return stale data (or -999 after a range change).
+        """Restore the trace storage setting while leaving front-panel acquisition active."""
+
         self._live = False
+        self._group_live_queries = False
+        if self._live_storage_before is not None:
+            native, previous = self._live_storage_before
+            if previous != "OFF":
+                self._restore_trace_storage_modes(self._require_session(), native, [(1, previous)])
+            self._live_storage_before = None
 
     @property
     def live(self) -> bool:
@@ -1368,6 +1445,7 @@ class AnritsuAdapter(DeviceAdapter):
                     )
                 time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
         except Exception as exc:
+            session.timeout = original_timeout_ms
             try:
                 self.abort_acquisition()
             except Exception as abort_error:
@@ -1407,9 +1485,12 @@ class AnritsuAdapter(DeviceAdapter):
             if not self._parse_switch(session.query("INIT:CONT?"), "continuous acquisition"):
                 raise DeviceError("Anritsu did not restore the confirmed Continuous acquisition mode.")
             self._check_scpi_errors(session, "restoring Continuous acquisition")
+        return self._stamp_single_sweep(result, started, completed)
+
+    def _stamp_single_sweep(self, trace: SpectrumTrace, started: datetime, completed: datetime) -> SpectrumTrace:
         self._acquisition_sequence += 1
         return replace(
-            result,
+            trace,
             sweep_evidence=SweepEvidence.QUALIFIED_SINGLE_SWEEP,
             sweep_id=str(self._acquisition_sequence),
             acquisition_started_at_utc=started,
@@ -1425,6 +1506,277 @@ class AnritsuAdapter(DeviceAdapter):
         session = self._require_session()
         return self._read_ascii_trace(session, trace, prepare_ascii=True)
 
+    def acquire_unaveraged_sweep(self) -> SpectrumTrace:
+        """Acquire one Trace A sweep for application-side averaging."""
+
+        self._assert_acquisition_allowed()
+        if not self._single_sweep_supported:
+            raise SafetyViolation("Application averaging requires the qualified Anritsu single-sweep protocol.")
+        session = self._require_session()
+        if session.query("INST?").strip().upper() != "SPECT":
+            raise SafetyViolation("Application averaging requires Spectrum Analyzer mode.")
+        self._ensure_acquisition_remote()
+        self._check_scpi_errors(session, "before application averaging")
+        native = self._read_remote_language(session) == "NAT"
+        previous = self._read_trace_storage_modes(session, native)
+        changed: list[tuple[int, str]] = []
+        try:
+            # Even when fetching Trace A, another trace's storage can keep
+            # INIT:MODE:SING sweeping until its accumulation completes.
+            for index, mode in enumerate(previous, start=1):
+                if mode != "OFF":
+                    changed.append((index, mode))
+                    session.write(self._trace_storage_command(index, "OFF", native))
+            if changed:
+                self._check_scpi_errors(session, "disabling trace storage")
+                if any(mode != "OFF" for mode in self._read_trace_storage_modes(session, native)):
+                    raise DeviceError("Anritsu did not confirm trace storage OFF before starting the sweep.")
+            result = self.acquire_single_sweep(restore_continuous=False)
+            if any(mode != "OFF" for mode in self._read_trace_storage_modes(session, native)):
+                raise DeviceError("Anritsu trace storage mode changed during acquisition.")
+            return result
+        finally:
+            if changed:
+                self._restore_trace_storage_modes(session, native, changed)
+
+    def acquire_instrument_average(
+        self, duration_s: float | None = None, *, acquisition_timeout_s: float, sweep_count: int | None = None,
+    ) -> tuple[SpectrumTrace, int, float]:
+        """Acquire one Trace A linear-power mean and retain Single between recipe points."""
+
+        return self._acquire_instrument_average(
+            InstrumentAverageTarget(frame_count=sweep_count, duration_s=duration_s),
+            acquisition_timeout_s=acquisition_timeout_s,
+            restore_continuous=self._live,
+        )
+
+    def acquire_manual_instrument_average(self, target: InstrumentAverageTarget) -> InstrumentAverageResult:
+        """Acquire one mean for the manual worker and restore the operating state."""
+
+        timeout_s = parse_quantity(self._settings.acquisition.operation_complete_timeout, DIMENSION_TIME).si_value
+        trace, count, sweep_time_s = self._acquire_instrument_average(
+            target, acquisition_timeout_s=timeout_s, restore_continuous=True,
+        )
+        return InstrumentAverageResult(replace(trace, trace_name=f"TRAC1_ANRITSU_LAV{count}"), count, sweep_time_s)
+
+    def _acquire_instrument_average(
+        self, target: InstrumentAverageTarget, *, acquisition_timeout_s: float, restore_continuous: bool,
+    ) -> tuple[SpectrumTrace, int, float]:
+        self._assert_acquisition_allowed()
+        if not self._single_sweep_supported:
+            raise SafetyViolation("Instrument averaging requires the qualified Anritsu single-sweep protocol.")
+        if type(acquisition_timeout_s) not in (int, float) or not 0 < acquisition_timeout_s < math.inf:
+            raise SafetyViolation("Anritsu acquisition timeout must be finite and positive in seconds.")
+        if target.duration_s is not None and target.duration_s >= acquisition_timeout_s:
+            raise SafetyViolation("Instrument averaging time must be positive and shorter than the acquisition timeout.")
+        session = self._require_session()
+        if session.query("INST?").strip().upper() != "SPECT":
+            raise SafetyViolation("Instrument averaging requires Spectrum Analyzer mode.")
+        self._check_scpi_errors(session, "before instrument averaging")
+        try:
+            sweep_time_s = float(session.query("SWE:TIME?"))
+        except ValueError as exc:
+            raise DeviceError("Anritsu returned an invalid sweep time for instrument averaging.") from exc
+        if not math.isfinite(sweep_time_s) or sweep_time_s <= 0:
+            raise DeviceError("Anritsu returned a non-positive or non-finite sweep time.")
+        count = target.frame_count
+        if target.duration_s is not None:
+            if target.duration_s > ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS * sweep_time_s:
+                raise SafetyViolation("Instrument averaging target exceeds the Anritsu limit of 9999 sweeps.")
+            # Compare in seconds to avoid rounding an exact multiple one sweep higher.
+            count = max(ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS, math.floor(target.duration_s / sweep_time_s))
+            if count * sweep_time_s < target.duration_s:
+                count += 1
+        if count * sweep_time_s >= acquisition_timeout_s:
+            raise SafetyViolation("Required instrument sweeps exceed the acquisition deadline.")
+
+        self._ensure_acquisition_remote()
+        native = self._read_remote_language(session) == "NAT"
+        before = self._read_instrument_average_settings(session, native)
+        continuous_before = self._parse_switch(session.query("INIT:CONT?"), "continuous acquisition")
+        live_before, grouped_before, raw_live = self._live, self._group_live_queries, self._live_storage_before
+        if raw_live is not None:
+            if raw_live[0] != native:
+                raise DeviceError("Anritsu remote language changed during Live acquisition.")
+            self._assert_live_storage_off(before.storage_mode)
+
+        # Keep the pre-Live backup intact. A sweep timeout calls abort_acquisition(),
+        # which must not restore that backup while the temporary settings are active.
+        self._live = self._group_live_queries = False
+        self._live_storage_before = None
+        mode_query = self._trace_storage_query(1, native)
+        type_query = self._trace_write_mode_query(native)
+        restore = []
+        acquisition_attempted = False
+        failure = None
+        try:
+            if before.count != count:
+                restore.append(f"AVER:COUN {before.count}")
+                session.write(f"AVER:COUN {count}")
+            if before.storage_mode != "LAV":
+                restore.append(self._trace_storage_command(1, before.storage_mode, native))
+                session.write(self._trace_storage_command(1, "LAV", native))
+            self._confirm_instrument_average(session, mode_query, "LAV", count)
+            if before.write_mode != "WRIT":
+                trace_type = f"TRAC:TYPE 1,{before.write_mode}" if native else f"TRAC1:TYPE {before.write_mode}"
+                restore.append(trace_type)
+
+            acquisition_attempted = True
+            started_at = datetime.now(timezone.utc)
+            try:
+                self.start_single_sweep()
+            except Exception as exc:
+                # The VISA write may have reached the analyser before reporting an error.
+                try:
+                    self.abort_acquisition()
+                except Exception as abort_error:  # noqa: BLE001 - retain the acquisition failure
+                    exc.add_note(f"Anritsu instrument averaging abort also failed: {abort_error}")
+                raise
+            self.wait_complete(deadline_s=acquisition_timeout_s)
+            completed_at = datetime.now(timezone.utc)
+            count_query = "SWEEPCOUNT?" if native else "TRAC:SWE:COUN?"
+            completed_count = self._parse_integer(session.query(count_query), "completed sweep count", minimum=0)
+            self._check_scpi_errors(session, "instrument average completion")
+            if completed_count != count:
+                raise DeviceError(f"Instrument average completed {completed_count} of {count} requested sweeps.")
+            if before.data_format != "ASC,0":
+                restore.extend((f"FORM {before.data_format}", f"FORM:BORD {before.byte_order}"))
+            trace = self.fetch_trace("TRAC1")
+            write_mode = session.query(type_query).strip().upper()
+            self._confirm_instrument_average(session, mode_query, "LAV", count)
+            if write_mode != "WRIT":
+                raise DeviceError("Anritsu Trace A write mode changed during instrument averaging.")
+            return self._stamp_single_sweep(trace, started_at, completed_at), completed_count, sweep_time_s
+        except Exception as exc:
+            failure = exc
+            raise
+        finally:
+            try:
+                continuous_after = continuous_before and (restore_continuous or not acquisition_attempted)
+                self._restore_instrument_average(
+                    session, native, before, restore,
+                    continuous=continuous_after,
+                    restart_continuous=continuous_after and acquisition_attempted,
+                )
+            except DeviceError as exc:
+                if failure is not None:
+                    raise DeviceError(f"{failure} {exc}") from failure
+                raise
+            finally:
+                self._live_storage_before = raw_live
+            if self._state != DeviceState.UNKNOWN:
+                self._live, self._group_live_queries = live_before, grouped_before
+
+    @staticmethod
+    def _trace_write_mode_query(native: bool) -> str:
+        return "TRAC:TYPE? 1" if native else "TRAC1:TYPE?"
+
+    def _read_instrument_average_settings(self, session: InstrumentSession, native: bool) -> _InstrumentAverageSettings:
+        mode = session.query(self._trace_storage_query(1, native)).strip().upper()
+        count = self._parse_integer(
+            session.query("AVER:COUN?"), "average count", minimum=ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS,
+        )
+        write_mode = session.query(self._trace_write_mode_query(native)).strip().upper()
+        data_format = session.query("FORM?").replace(" ", "").strip().upper()
+        if data_format == "ASC":
+            data_format = "ASC,0"
+        byte_order = session.query("FORM:BORD?").strip().upper()
+        self._check_scpi_errors(session, "instrument averaging settings")
+        if mode not in _TRACE_STORAGE_MODES or count > ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS:
+            raise DeviceError("Anritsu returned invalid Trace A averaging settings.")
+        if write_mode not in {"WRIT", "VIEW", "BLAN"}:
+            raise DeviceError(f"Anritsu returned invalid Trace A write mode {write_mode!r}.")
+        if data_format not in {"ASC,0", "REAL,32", "INT,32"} or byte_order not in {"SWAP", "NORM"}:
+            raise DeviceError(f"Anritsu returned invalid trace format {data_format!r} or byte order {byte_order!r}.")
+        return _InstrumentAverageSettings(mode, count, write_mode, data_format, byte_order)
+
+    def _confirm_instrument_average(self, session: InstrumentSession, mode_query: str, mode: str, count: int) -> None:
+        actual_mode = session.query(mode_query).strip().upper()
+        actual_count = self._parse_integer(
+            session.query("AVER:COUN?"), "average count", minimum=ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS,
+        )
+        self._check_scpi_errors(session, "Trace A averaging settings")
+        if (actual_mode, actual_count) != (mode, count):
+            raise DeviceError(f"Anritsu Trace A averaging readback {actual_mode}/{actual_count} differs from {mode}/{count}.")
+
+    def _restore_instrument_average(
+        self, session: InstrumentSession, native: bool, previous: _InstrumentAverageSettings, commands: list[str],
+        *, continuous: bool, restart_continuous: bool,
+    ) -> None:
+        try:
+            if (self._read_remote_language(session) == "NAT") != native:
+                raise DeviceError("Anritsu remote language changed during instrument averaging.")
+        except Exception as exc:
+            self._state = DeviceState.UNKNOWN
+            raise DeviceError(f"Anritsu averaging settings could not be restored: {exc}") from exc
+        errors = []
+        for command in commands:
+            try:
+                session.write(command)
+            except Exception as exc:  # noqa: BLE001 - attempt the remaining restorations
+                errors.append(f"{command}: {exc}")
+        try:
+            actual = self._read_instrument_average_settings(session, native)
+            if actual != previous:
+                raise DeviceError(f"Expected averaging settings {previous}, read {actual}.")
+        except Exception as exc:  # noqa: BLE001 - report uncertain settings
+            errors.append(str(exc))
+        if errors:
+            self._state = DeviceState.UNKNOWN
+            raise DeviceError("Anritsu averaging settings could not be restored: " + " | ".join(errors))
+        if self._state == DeviceState.UNKNOWN:
+            raise DeviceError("Anritsu could not confirm acquisition stopped after averaging.")
+        try:
+            if restart_continuous:
+                session.write("INIT:MODE:CONT")
+            actual_continuous = self._parse_switch(session.query("INIT:CONT?"), "continuous acquisition")
+            self._check_scpi_errors(session, "restoring acquisition mode after averaging")
+            if actual_continuous != continuous:
+                raise DeviceError("Anritsu did not confirm the expected sweep mode after averaging.")
+        except Exception as exc:
+            self._state = DeviceState.UNKNOWN
+            raise DeviceError(f"Anritsu acquisition mode could not be restored: {exc}") from exc
+
+    def _read_trace_storage_modes(self, session: InstrumentSession, native: bool) -> tuple[str, ...]:
+        queries = tuple(self._trace_storage_query(index, native) for index in range(1, 7))
+        if native and self._supports_grouped_native_queries():
+            responses = session.query(";".join(queries)).split(";")
+        else:
+            responses = [session.query(query) for query in queries]
+        modes = tuple(response.strip().upper() for response in responses)
+        if len(modes) != len(queries) or not set(modes) <= _TRACE_STORAGE_MODES:
+            raise DeviceError(f"Anritsu returned invalid trace storage modes {modes!r}.")
+        return modes
+
+    @staticmethod
+    def _trace_storage_query(index: int, native: bool) -> str:
+        return f"TRAC:STOR:MODE? {index}" if native else f"TRAC{index}:STOR:MODE?"
+
+    @staticmethod
+    def _trace_storage_command(index: int, mode: str, native: bool) -> str:
+        return f"TRAC:STOR:MODE {index},{mode}" if native else f"TRAC{index}:STOR:MODE {mode}"
+
+    def _restore_trace_storage_modes(
+        self, session: InstrumentSession, native: bool, changed: list[tuple[int, str]]
+    ) -> None:
+        errors: list[str] = []
+        for index, mode in reversed(changed):
+            try:
+                session.write(self._trace_storage_command(index, mode, native))
+            except Exception as exc:  # noqa: BLE001 - attempt the remaining restorations
+                errors.append(f"Trace {index} ({mode}): {exc}")
+        try:
+            self._check_scpi_errors(session, "restoring trace storage")
+            actual = self._read_trace_storage_modes(session, native)
+            for index, mode in changed:
+                if actual[index - 1] != mode:
+                    errors.append(f"Trace {index}: expected {mode}, read {actual[index - 1]}")
+        except Exception as exc:  # noqa: BLE001 - report uncertain instrument state
+            errors.append(str(exc))
+        if errors:
+            self._state = DeviceState.UNKNOWN
+            raise DeviceError("Anritsu trace storage restoration could not be confirmed: " + "; ".join(errors))
+
     def fetch_current_trace(self, trace: str = "TRAC1") -> SpectrumTrace:
         """Read the currently displayed trace using the proven library sequence."""
 
@@ -1438,46 +1790,81 @@ class AnritsuAdapter(DeviceAdapter):
         trace = validate_anritsu_trace_name(trace)
         self._assert_acquisition_allowed()
         session = self._require_session()
-        points = AnritsuAdapter._parse_integer(session.query("SWE:POIN?"), "sweep point count", minimum=2)
-        start_hz = float(session.query("FREQ:STAR?"))
-        stop_hz = float(session.query("FREQ:STOP?"))
-        return self._read_binary_trace(
-            session, trace, points=points, start_hz=start_hz, stop_hz=stop_hz
-        )
-
-    def _read_binary_trace(
-        self,
-        session: InstrumentSession,
-        trace: str,
-        *,
-        points: int,
-        start_hz: float,
-        stop_hz: float,
-    ) -> SpectrumTrace:
-        # Verify transfer state, but do not reprogram it at every Live tick.
-        # Querying also detects another client changing byte order or ASCII mode.
-        self._check_scpi_errors(session, "before binary trace transfer")
-        format_changed = session.query("FORM?").strip().upper() != "REAL,32"
-        if format_changed:
-            session.write("FORM REAL,32")
-        border_changed = session.query("FORM:BORD?").strip().upper() != "SWAP"
-        if border_changed:
-            session.write("FORM:BORD SWAP")
-        self._check_scpi_errors(session, "binary transfer setup (FORM / FORM:BORD)")
-        if format_changed and session.query("FORM?").strip().upper() != "REAL,32":
-            raise DeviceError("Anritsu did not confirm REAL,32 transfer format.")
-        if border_changed and session.query("FORM:BORD?").strip().upper() != "SWAP":
-            raise DeviceError("Anritsu did not confirm SWAP transfer byte order.")
+        grouped = self._live and self._group_live_queries
+        raw_live = self._live_storage_before
+        if grouped:
+            before, transfer_format = self._read_grouped_live_state(session, "before binary trace transfer")
+        else:
+            if raw_live is not None:
+                self._assert_live_storage_off(session.query(self._trace_storage_query(1, raw_live[0])))
+            before = self._read_binary_grid(session)
+            self._check_scpi_errors(session, "before binary trace transfer")
+            transfer_format = session.query("FORM?").strip().upper(), None
+        self._prepare_binary_transfer(session, *transfer_format)
         raw_values = session.query_binary_values(
             f"TRAC? {trace}", datatype="f", is_big_endian=False
         )
-        self._check_scpi_errors(session, "binary TRAC? " + trace)
-        points_after = self._parse_integer(session.query("SWE:POIN?"), "sweep point count", minimum=2)
-        start_after = float(session.query("FREQ:STAR?"))
-        stop_after = float(session.query("FREQ:STOP?"))
-        if (points_after, start_after, stop_after) != (points, start_hz, stop_hz):
+        if grouped:
+            after, confirmed_format = self._read_grouped_live_state(session, f"binary TRAC? {trace}")
+            if confirmed_format != _BINARY_TRACE_FORMAT:
+                raise DeviceError("Anritsu transfer format changed during binary trace acquisition.")
+        else:
+            self._check_scpi_errors(session, f"binary TRAC? {trace}")
+            after = self._read_binary_grid(session)
+            if raw_live is not None:
+                self._assert_live_storage_off(session.query(self._trace_storage_query(1, raw_live[0])))
+        if before != after:
             self._cached_grid = None
             raise DeviceError("Anritsu frequency grid changed during binary trace acquisition.")
+        return self._decode_binary_trace(trace, raw_values, before)
+
+    def _read_binary_grid(self, session: InstrumentSession) -> tuple[int, float, float]:
+        points = self._parse_integer(session.query("SWE:POIN?"), "sweep point count", minimum=2)
+        return points, float(session.query("FREQ:STAR?")), float(session.query("FREQ:STOP?"))
+
+    def _read_grouped_live_state(
+        self, session: InstrumentSession, context: str
+    ) -> tuple[tuple[int, float, float], tuple[str, str]]:
+        response = session.query(_LIVE_BINARY_READBACK)
+        try:
+            # Error text can contain semicolons. Keep it as the last response unit.
+            points, start, stop, data_format, byte_order, storage, error = response.split(";", 6)
+            grid = self._parse_integer(points, "sweep point count", minimum=2), float(start), float(stop)
+        except ValueError as exc:
+            raise DeviceError(f"Anritsu returned invalid grouped Live readback: {response!r}.") from exc
+        self._check_scpi_errors(session, context, first_response=error)
+        self._assert_live_storage_off(storage)
+        return grid, (data_format.strip().upper(), byte_order.strip().upper())
+
+    @staticmethod
+    def _assert_live_storage_off(mode: str) -> None:
+        if mode.strip().upper() != "OFF":
+            raise DeviceError(f"Anritsu Trace A storage mode changed during Live: {mode!r}, expected OFF.")
+
+    def _prepare_binary_transfer(
+        self, session: InstrumentSession, current_format: str, current_byte_order: str | None
+    ) -> None:
+        data_format, byte_order = _BINARY_TRACE_FORMAT
+        format_changed = current_format != data_format
+        if format_changed:
+            session.write(f"FORM {data_format}")
+        grouped = current_byte_order is not None
+        if current_byte_order is None:
+            current_byte_order = session.query("FORM:BORD?").strip().upper()
+        border_changed = current_byte_order != byte_order
+        if border_changed:
+            session.write(f"FORM:BORD {byte_order}")
+        if not grouped or format_changed or border_changed:
+            self._check_scpi_errors(session, "binary transfer setup (FORM / FORM:BORD)")
+        if format_changed and session.query("FORM?").strip().upper() != data_format:
+            raise DeviceError("Anritsu did not confirm REAL,32 transfer format.")
+        if border_changed and session.query("FORM:BORD?").strip().upper() != byte_order:
+            raise DeviceError("Anritsu did not confirm SWAP transfer byte order.")
+
+    def _decode_binary_trace(
+        self, trace: str, raw_values: list[float], grid: tuple[int, float, float]
+    ) -> SpectrumTrace:
+        points, start_hz, stop_hz = grid
         values = tuple(float(v) for v in raw_values)
         if len(values) != points:
             raise DeviceError(
@@ -1492,7 +1879,7 @@ class AnritsuAdapter(DeviceAdapter):
         invalid_points = sum(value <= -998.0 for value in values)
         if invalid_points:
             raise DeviceError(
-                "Anritsu returned the unmeasured/error sentinel "
+                "Anritsu returned the documented -999.0 unmeasured/error sentinel "
                 f"for {invalid_points} of {points} trace points."
             )
         if (

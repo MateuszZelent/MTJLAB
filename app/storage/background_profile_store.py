@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 
 from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
-from app.domain.errors import ExecutionError
+from app.domain.errors import ExecutionError, ProcessingCancelled
 from app.domain.models import MeasurementPoint
 from app.domain.spectrum_correction import BackgroundProfile, SpectrumAcquisitionContext
 from .hdf5_writer import Hdf5RunWriter
@@ -21,32 +21,47 @@ class BackgroundProfileHdf5Store:
 
     @classmethod
     def save(
-        cls, path: str | Path, context: SpectrumAcquisitionContext, profile: BackgroundProfile
+        cls, path: str | Path, context: SpectrumAcquisitionContext, profile: BackgroundProfile, *,
+        settings_source: str | None = None, device_idn: str = "",
+        simulation_mode: bool | None = None, cancellation_check=None,
     ) -> None:
-        if profile.context_id != context.context_id or np.any(profile.mean_w <= 0):
+        if (profile.context_id != context.context_id or profile.mean_w.shape != context.frequencies_hz.shape
+                or np.any(profile.mean_w <= 0)):
             raise ExecutionError("Export profile requires matching context and positive mean power.")
+        if cancellation_check is not None:
+            cancellation_check()
         trace = SpectrumTrace(
             tuple(context.frequencies_hz), tuple(10 * np.log10(profile.mean_w) + 30),
             datetime.fromtimestamp(profile.completed_at_s, timezone.utc), "BACKGROUND_MEAN",
         )
+        metadata = {"background_profile_id": profile.profile_id}
+        if profile.averaging_source == "instrument":
+            metadata.update(background_averaging_source="instrument", background_sweep_count=profile.sweep_count,
+                            nominal_sweep_time_s=profile.nominal_sweep_time_s)
+        # An export without a source run cannot infer the original backend.
+        if simulation_mode is None:
+            simulation_metadata = {"enabled": None, "mode": "unknown",
+                                   "mode_source": "profile_export_without_source_archive"}
+        else:
+            simulation_metadata = {"enabled": simulation_mode,
+                                   "mode": "simulation" if simulation_mode else "hardware",
+                                   "mode_source": "application_runtime"}
         writer = Hdf5RunWriter(
             path, recipe_source="schema_version: 1\nname: Background profile\nsteps: []\n",
-            settings_source=f"background_schema: {cls.SCHEMA}\n",
-            plan_hash=profile.content_hash, device_idn={"anritsu": "ANRITSU,UNKNOWN"},
-            expected_points=1,
-            # A portable aggregate has no source-run backend provenance in
-            # this schema. Exporting it is not evidence of hardware acquisition.
-            simulation_metadata={"enabled": None, "mode": "unknown",
-                                 "mode_source": "profile_export_without_source_archive"},
+            settings_source=settings_source or f"background_schema: {cls.SCHEMA}\n",
+            plan_hash=profile.content_hash, device_idn={"anritsu": device_idn or "ANRITSU,UNKNOWN"},
+            expected_points=1, simulation_metadata=simulation_metadata,
             run_attributes={"background_schema": cls.SCHEMA, "profile_id": profile.profile_id},
         )
         try:
             writer.store_background_profile(context, profile)
-            writer.append(
-                MeasurementPoint(0, {}, {}, metadata={"background_profile_id": profile.profile_id}),
-                trace,
-            )
+            writer.append(MeasurementPoint(0, {}, {}, metadata=metadata), trace)
+            if cancellation_check is not None:
+                cancellation_check()
             writer.close("completed")
+        except ProcessingCancelled:
+            writer.close("aborted")
+            raise
         except Exception as exc:
             try:
                 writer.close("faulted")

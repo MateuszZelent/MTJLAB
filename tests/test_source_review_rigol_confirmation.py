@@ -61,22 +61,6 @@ def test_quick_field_routing_preserves_other_voltage_components():
     )
 
 
-def test_held_arrow_does_not_postpone_every_offset_update():
-    timer = Mock()
-    timer.isActive.side_effect = [False, True, True]
-    editor = Mock()
-    editor.property.return_value = True
-    page = SimpleNamespace(
-        _live_rigol_timers={"offset": timer},
-        live_control_switch=SimpleNamespace(isChecked=lambda: True),
-        _is_device_connected=lambda: True,
-    )
-    for _ in range(3):
-        RigolPage._submit_active_voltage(page, "offset", editor)
-    timer.start.assert_called_once_with(60)
-    timer.stop.assert_not_called()
-
-
 def test_partial_readback_cannot_invent_full_configuration():
     page = SimpleNamespace(_confirmed_carrier_configs={1: None, 2: None})
     RigolPage._record_confirmed_quick_readback(page, 1, "frequency", 2000)

@@ -300,6 +300,37 @@ def test_zero_button_cancels_pending_live_target_and_keeps_confirmed_zero(worksp
     assert {value.key: value.value_si for value in page.manual_metadata_values()}["moke_box.vout.2_v"] == 0
 
 
+@pytest.mark.parametrize("valid_draft", [True, False])
+def test_live_switch_click_recovers_after_recipe_releases_moke(workspace, application, valid_draft):
+    _, page, controllers, _ = workspace
+    workflow = page.field_workflow
+    page.views.setCurrentIndex(2)
+    if not valid_draft:
+        workflow.target.setText("2 V")
+    authorization = []
+    workflow._authorize = lambda operation, _request: authorization.append(operation)
+    window = SimpleNamespace(_device_pages={"moke_box": page}, _run_read_only_controls={})
+    lock_controls = MainWindow._set_device_pages_execution_read_only
+
+    lock_controls(window, True)
+    assert not workflow.live_control_switch.indicator.isEnabled()
+    assert not workflow.set_button.isEnabled()
+    lock_controls(window, False)
+    if not valid_draft:
+        assert not workflow.live_control_switch.indicator.isEnabled()
+        workflow.target.setText("0 mV")
+    application.processEvents()
+
+    assert workflow.set_button.isEnabled()
+    assert workflow.live_control_switch.indicator.isEnabled()
+    QTest.mouseClick(workflow.live_control_switch.indicator, Qt.MouseButton.LeftButton)
+    assert workflow.live_control_switch.isChecked()
+    assert authorization == ["arm_voltage_plan"]
+    QTest.qWait(550)
+    assert not workflow._test_voltage_completions
+    assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == 0
+
+
 def test_live_voltage_debounces_edits_and_applies_slider_without_apply(workspace, application):
     _, page, controllers, _ = workspace
     workflow = page.field_workflow

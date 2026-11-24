@@ -108,6 +108,7 @@ from app.recipes import (
     wrap_recipe_nodes_in_repeat,
     unwrap_recipe_repeat,
 )
+from app.recipes.block_registry import ANRITSU_ACQUISITION_OPTION_FIELDS, ANRITSU_HARDWARE_AVERAGE_FIELDS
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS as _SWEEPABLE_PARAMETERS
 from app.recipes.parameter_registry import sweep_default as _sweep_default
@@ -142,6 +143,7 @@ from app.ui.recipes.device_extensions import (
     KeithleyPage,
     RigolConfigurationSnapshot,
     RigolNodeEditorDialog,
+    RigolOutputNodeEditorDialog,
     RigolPage,
     SignalGeneratorSnapshot,
     _keithley_roi_definition,
@@ -3313,7 +3315,7 @@ class RecipePage(QWidget):
             f"Uncompressed data upper estimate: {_human_bytes(estimate.total_upper_bytes)} • "
             f"spectrum values: {estimate.spectrum_values:,}\n"
             + (
-                "Warnings: " + " | ".join(estimate.warnings) + "\n"
+                "Warnings\n" + "\n".join(f"• {warning}" for warning in estimate.warnings) + "\n"
                 if estimate.warnings
                 else "Warnings: none from static preflight\n"
             )
@@ -5010,14 +5012,17 @@ class RecipePage(QWidget):
             source = replace_recipe_node(self._builder_source(), node_id=node.id, node=replacement)
             self._apply_builder_source(source, "Updated MOKE operating point", selected_node_id=node.id)
             return
-        dialog = ActionNodeEditorDialog(
-            node,
-            self,
-            in_finally=bool(
-                (location := self._recipe_node_locations().get(node.id))
-                and location[4]
-            ),
-        )
+        if node.type == "configure_rigol_output":
+            dialog = RigolOutputNodeEditorDialog(node, self)
+        else:
+            dialog = ActionNodeEditorDialog(
+                node,
+                self,
+                in_finally=bool(
+                    (location := self._recipe_node_locations().get(node.id))
+                    and location[4]
+                ),
+            )
         device = next((name for name in ("keithley", "rigol", "anritsu_sg", "anritsu", "moke_box")
                        if name in node.type), None)
         if device is not None and node.type.startswith(("configure_", "update_", "set_", "enable_", "ramp_", "stop_")):
@@ -6615,10 +6620,12 @@ class RecipePage(QWidget):
             managed_id = managed_id or f"anritsu-acquire-{uuid4().hex[:8]}"
             previous = next((child for child in node.children if child.id == managed_id), None)
             options = (acquisition_options if acquisition_options is not None else previous.data if previous else {})
-            option_keys = ("source_file", "file_kind", "minimum_duration", "purpose", "inter_sweep_delay") if role == "acquire_reference" else ("processing", "inter_sweep_delay")
+            option_keys = ANRITSU_ACQUISITION_OPTION_FIELDS[role]
+            if any(field in options for field in ANRITSU_HARDWARE_AVERAGE_FIELDS):
+                acquisition_average_count = 1
             acquisition: dict[str, object] = {
                 **({"disabled": previous.data["disabled"]} if previous and "disabled" in previous.data else {}),
-                **{key: options[key] for key in option_keys if key in options},
+                **{key: value for key, value in options.items() if key in option_keys},
                 "id": managed_id,
                 "type": role,
                 "trace": trace,
@@ -6803,19 +6810,9 @@ class RecipePage(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         replacement = self._node_to_mapping(node)
-        for field in (
-            "trace",
-            "average_count",
-            "reference_operation",
-            "store_raw",
-            "store_processed",
-            "processing",
-            "source_file",
-            "file_kind",
-            "minimum_duration",
-            "purpose",
-            "inter_sweep_delay",
-        ):
+        for field in ANRITSU_ACQUISITION_OPTION_FIELDS[node.type] | {
+            "trace", "average_count", "reference_operation", "store_raw", "store_processed",
+        }:
             replacement.pop(field, None)
         replacement.update(dialog.node_fields())
         try:

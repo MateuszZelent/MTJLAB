@@ -99,7 +99,12 @@ def test_rigol_review_distinguishes_configuration_from_selected_updates(app, car
                                      "Require" if policy == "continue" else "Set")
             assert "during configuration" not in str(output.planned)
             assert dialog.output_policy.itemText(0) == "Leave OUTPUT unchanged"
-        for widget in (dialog.review, dialog.content_splitter, dialog.apply_button):
+        if carrier_only:
+            assert not dialog.content_splitter.isVisibleTo(dialog)
+            dialog.controls_scroll.ensureWidgetVisible(dialog.review)
+            app.processEvents()
+        content = dialog.controls_scroll if carrier_only else dialog.content_splitter
+        for widget in (dialog.review, content, dialog.apply_button):
             rect = widget.rect().translated(widget.mapTo(dialog, QPoint()))
             assert dialog.rect().contains(rect)
             assert widget.isVisibleTo(dialog)

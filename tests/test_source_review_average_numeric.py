@@ -5,6 +5,7 @@ import math
 import pytest
 
 from app.spectrum.processing import LinearPowerAverager
+from app.spectrum.streaming_statistics import RollingPowerAverage
 
 
 @pytest.mark.parametrize(
@@ -49,3 +50,24 @@ def test_representable_small_power_is_not_clamped():
     average.add([-3100.0, -3100.0])
     average.add([-3100.0, -3100.0])
     assert average.result() == pytest.approx([-3100.0, -3100.0])
+
+
+def test_rolling_eviction_recovers_quiet_power_after_a_loud_read():
+    rolling = RollingPowerAverage(frames=2, seconds=None)
+    rolling.add([10., 10.], 0.)
+    rolling.add([-180., -95.], 1.)
+    result = rolling.add([-180., -95.], 2.)
+    assert rolling.count == 2
+    assert result == pytest.approx([-180., -95.])
+
+
+def test_rolling_reports_capacity_instead_of_silently_shortening_window(monkeypatch):
+    monkeypatch.setattr(RollingPowerAverage, "MEMORY_LIMIT_BYTES", 48)
+    rolling = RollingPowerAverage(frames=0, seconds=30.)
+    rolling.add([-90., -90.], 0.)
+    rolling.add([-60., -60.], 1.)
+    with pytest.raises(ValueError, match="Choose a shorter duration"):
+        rolling.add([-50., -50.], 2.)
+    assert rolling.count == 2
+    result = rolling.add([-70., -70.], 31.)
+    assert result == pytest.approx([-70., -70.])

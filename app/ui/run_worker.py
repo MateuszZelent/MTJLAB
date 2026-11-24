@@ -416,6 +416,10 @@ class RunWorker(QObject):
         failure: str | None = None
         bundle = None
         try:
+            if "anritsu" in self._run_leases:
+                # The recipe inherits the page's VISA session. Restore the
+                # temporary Live trace setting before its first read or sweep.
+                anritsu.stop_live()
             required_by_plan = set(
                 self._plan.required_devices
                 | required_devices_for_actions(self._plan.actions)
@@ -581,6 +585,11 @@ class RunWorker(QObject):
                 )
             if bundle is not None:
                 bundle.mark_running()
+            if self._plan.total_spectra:
+                self.event.emit("spectrum_archive_ready", {
+                    "path": str(writer.path),
+                    "stored_points": writer.point_count,
+                })
             self._runner = RecipeRunner(
                 rigol=rigol,
                 keithley=keithley,

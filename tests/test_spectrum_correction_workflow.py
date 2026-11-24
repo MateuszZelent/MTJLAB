@@ -234,6 +234,56 @@ def test_save_cancel_does_not_claim_recording_and_preflight_failure_stays_visibl
         application.processEvents()
 
 
+def test_quantitative_record_background_uses_the_selected_instrument_target(tmp_path, monkeypatch):
+    application = QApplication.instance() or QApplication([])
+    workspace = SpectrumCorrectionWorkspace(simulation_settings(), single_sweep_available=True)
+    requests, errors = [], []
+    adapter = AnritsuAdapter(simulation_settings(), session_factory=SimulatedVisaFactory("anritsu"))
+    adapter.connect()
+    destination = tmp_path / "background.h5"
+
+    def request(operation, payload):
+        def deliver():
+            requests.append((operation, payload))
+            try:
+                assert workspace.handle_result(operation, MODULE.dispatch(adapter, operation, payload))
+            except Exception as exc:
+                errors.append(str(exc))
+                workspace.handle_error(operation, str(exc))
+        QTimer.singleShot(0, deliver)
+
+    workspace.request_device.connect(request)
+    workspace._cpu.failed.connect(lambda *args: errors.append(args))
+    monkeypatch.setattr(StationFileDialog, "getSaveFileName", lambda *_: (str(destination), ""))
+    try:
+        workspace.resize(1050, 790)
+        workspace.show()
+        workspace.set_available(True)
+        workspace.reference_state.setText("simulated background operating point")
+        controls = workspace.background_averaging
+        controls.backend.setCurrentIndex(controls.backend.findData("instrument"))
+        controls.target.frames.setValue(7)
+        application.processEvents()
+        assert controls.backend.isVisible() and controls.target.frames.isVisible()
+        assert controls.backend.parentWidget() is controls
+        assert workspace.rect().contains(controls.backend.mapTo(workspace, controls.backend.rect().bottomRight()))
+
+        workspace.acquire_reference.click()
+        wait_until(application, lambda: not workspace.running or bool(errors), timeout=15)
+        assert not errors, errors
+        assert [operation for operation, _ in requests] == ["read_acquisition_configuration", "instrument_average"]
+        assert requests[-1][1].frame_count == 7
+        assert workspace._profile.sweep_count == 7
+        assert "variance unavailable" in workspace.state_label.text()
+        assert workspace.acquire_signal.isEnabled()
+        assert not workspace.load_interference.isEnabled()
+    finally:
+        assert workspace.shutdown()
+        workspace.deleteLater()
+        adapter.disconnect()
+        application.processEvents()
+
+
 def test_shell_propagates_runtime_mode_to_correction_workspace_with_isolated_catalogue(tmp_path):
     from app.settings import SettingsRepository
     from app.ui.shell import MainWindow

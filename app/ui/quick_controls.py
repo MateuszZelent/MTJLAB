@@ -72,6 +72,7 @@ from app.settings.models import StationSettings
 from app.ui.dialogs import StationCardWidget, StationDialog, StationModalShell
 from app.ui.design_system.tokens import tokens_for
 from app.ui.widgets.quick_quantity_slider import QuickQuantitySlider
+from app.ui.widgets.quantity_editor import QuantityEditor
 from app.ui.widgets.quantity_step_selector import VoltageStepSelector
 from app.ui.workers import DeviceController
 
@@ -282,14 +283,14 @@ class QuickControlCoordinator(QObject):
         else:
             self._hardware_request_builders[device] = builder
 
-    def submit(self, target: str, text: str) -> None:
+    def submit(self, target: str, text: str, *, live_only: bool = False) -> None:
         descriptor = QUICK_CONTROLS_BY_TARGET[target]
         value_si = parse_quantity(text, descriptor.dimension).si_value
         _bounded, limited, detail = self.bound_value(target, value_si)
         if limited:
             self.state_changed.emit(target, "rejected", detail)
             return
-        self.publish_draft(target, text, source="quick_controls")
+        self.publish_draft(target, text, source="device_card" if live_only else "quick_controls")
         device = descriptor.device_module
         if device == "moke_box":
             if self._moke_workflow is None or self.bound(target) is None:
@@ -314,7 +315,7 @@ class QuickControlCoordinator(QObject):
             )
             return
         self._sequence += 1
-        request = QuickSetpoint(target, text, value_si, self._sequence)
+        request = QuickSetpoint(target, text, value_si, self._sequence, live_only=live_only)
         self._pending[device][target] = request
         self.state_changed.emit(target, "pending", "Waiting for device readback")
         self._send_next(device)
@@ -596,28 +597,27 @@ class QuickControlCoordinator(QObject):
 
     def _result(self, device: str, operation: str, result: object) -> None:
         if operation == "quick_readback" and isinstance(result, dict):
+            busy = set(self._pending.get(device, {}))
+            inflight = self._inflight.get(device)
+            if inflight is not None:
+                busy.add(inflight.target)
+            # A Rigol offset, amplitude or endpoint changes its coupled views.
+            # A readback queued before the edit must not update any of them.
+            busy_groups = {QUICK_CONTROLS_BY_TARGET[target].atomic_group for target in busy} if device == "rigol" else set()
             for target, value in result.items():
-                if str(target) in QUICK_CONTROLS_BY_TARGET:
-                    target = str(target)
-                    if (
-                        target in self._pending.get(device, {})
-                        or (
-                            self._inflight.get(device) is not None
-                            and self._inflight[device].target == target
-                        )
-                    ):
-                        continue
-                    adopt_draft = target in self._adopt_readback_targets[device]
-                    self.confirmed_snapshot(
-                        target, float(value), adopt_draft=adopt_draft
-                    )
-                    if adopt_draft:
-                        self._adopt_readback_targets[device].discard(target)
-                    self.value_read.emit(target, float(value))
-                    self.state_changed.emit(
-                        target, "ready", value.detail if isinstance(value, AcceptedSetpoint)
-                        else "Verified device configuration"
-                    )
+                target = str(target)
+                descriptor = QUICK_CONTROLS_BY_TARGET.get(target)
+                if descriptor is None or target in busy or descriptor.atomic_group in busy_groups:
+                    continue
+                adopt_draft = target in self._adopt_readback_targets[device]
+                self.confirmed_snapshot(target, float(value), adopt_draft=adopt_draft)
+                if adopt_draft:
+                    self._adopt_readback_targets[device].discard(target)
+                self.value_read.emit(target, float(value))
+                self.state_changed.emit(
+                    target, "ready", value.detail if isinstance(value, AcceptedSetpoint)
+                    else "Verified device configuration"
+                )
             return
         if operation != self._inflight_operations[device]:
             return
@@ -759,8 +759,12 @@ class QuickControlRow(StationCardWidget):
         layout.addLayout(header)
         controls = QHBoxLayout()
         self.decrease = PushButton("−", self)
-        self.value = QuantityStepEdit(self)
-        self.value.setText(descriptor.default_text)
+        if descriptor.device_module == "rigol":
+            units = ("Hz", "kHz", "MHz") if descriptor.dimension == "frequency" else ("uV", "mV", "V")
+            self.value = QuantityEditor(descriptor.default_text, descriptor.dimension, units, descriptor.label)
+        else:
+            self.value = QuantityStepEdit(self)
+            self.value.setText(descriptor.default_text)
         self.voltage_step = None
         if descriptor.device_module == "moke_box":
             self.voltage_step = VoltageStepSelector(self)
@@ -804,14 +808,19 @@ class QuickControlRow(StationCardWidget):
             if descriptor.target in coordinator._confirmed_values:
                 self.set_confirmed_dac(coordinator._confirmed_values[descriptor.target])
         self.refresh_limits()
-        self.status = CaptionLabel("Ready · draft stays synchronized with the device card", self)
+        self.status = CaptionLabel(
+            "Press Enter or Apply to send this value."
+            if isinstance(self.value, QuantityEditor) else
+            "Ready · draft stays synchronized with the device card", self
+        )
         self.status.setObjectName("muted")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.decrease.clicked.connect(lambda: self.step(-1, Decimal(1)))
         self.increase.clicked.connect(lambda: self.step(1, Decimal(1)))
-        self.value.step_requested.connect(self.step)
-        self.slider.draft_value_changed.connect(self._draft_changed)
+        if isinstance(self.value, QuantityStepEdit):
+            self.value.step_requested.connect(self.step)
+            self.slider.draft_value_changed.connect(self._draft_changed)
         self.slider.commit_requested.connect(self._commit_requested)
 
     def refresh_limits(self) -> None:
@@ -826,6 +835,10 @@ class QuickControlRow(StationCardWidget):
         )
 
     def set_value_text(self, text: str) -> None:
+        if isinstance(self.value, QuantityEditor):
+            if not self.value.is_draft:
+                self.slider.set_value_si(parse_quantity(text, self.descriptor.dimension).si_value)
+            return
         self.slider.set_value_text(text)
 
     def set_step_text(self, text: str) -> None:
@@ -834,6 +847,8 @@ class QuickControlRow(StationCardWidget):
             self.slider.set_step_text(text)
 
     def set_value_si(self, value_si: float) -> None:
+        if isinstance(self.value, QuantityEditor) and self.value.is_draft:
+            return
         self.slider.set_value_si(value_si)
 
     def set_confirmed_dac(self, value_si: float) -> None:
@@ -876,15 +891,20 @@ class QuickControlRow(StationCardWidget):
             self.set_state("limit", detail)
             if previous_si == bounded_si:
                 return
-        self.submit()
+        if isinstance(self.value, QuantityEditor):
+            self.value.mark_draft()
+        else:
+            self.submit()
 
     def submit(self) -> None:
         try:
-            text = self.value.text()
+            text = self.value.committed_text() if isinstance(self.value, QuantityEditor) else self.value.text()
             parse_quantity(text, self.descriptor.dimension)
         except ValueError as exc:
             self.set_state("rejected", str(exc))
             return
+        if isinstance(self.value, QuantityEditor):
+            self.slider.set_value_text(text)
         self.submit_requested.emit(self.descriptor.target, text)
 
     def set_state(self, state: str, detail: str) -> None:

@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -19,7 +19,72 @@ from qfluentwidgets import (
     SubtitleLabel,
 )
 
+from app.devices.anritsu_ms2830a import (
+    ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS,
+    ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS,
+    InstrumentAverageTarget,
+)
 from app.ui.dialogs import StationDialog, StationFileDialog
+
+from .spectrum_controls import AveragingTargetControls
+
+
+class BackgroundAveragingControls(QWidget):
+    """Choose a raw PC recording or the instrument's completed linear-power mean."""
+
+    def __init__(self, duration, parent=None, *, allow_instrument, minimum_sweeps):
+        super().__init__(parent)
+        layout = QGridLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.setColumnStretch(1, 1)
+        self.backend = ComboBox(self)
+        self.backend.setAccessibleName("Background averaging source")
+        self.backend.addItem("PC · record individual sweeps", userData="pc")
+        self.target = None
+        if allow_instrument:
+            self.backend.addItem("Instrument · save mean only", userData="instrument")
+            layout.addWidget(BodyLabel("Averaging source", self), 0, 0)
+            layout.addWidget(self.backend, 0, 1)
+            self.target = AveragingTargetControls(self, initial_frames=minimum_sweeps)
+            self.target.frames.setRange(ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS, ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS)
+            self.target.setToolTip("A duration is converted to a whole sweep count using the analyzer sweep time.")
+            self.target_label = BodyLabel("Averaging target", self)
+            layout.addWidget(self.target_label, 1, 0)
+            layout.addWidget(self.target, 1, 1)
+        else:
+            self.backend.hide()
+        self.duration = duration
+        self.duration.setAccessibleName("Minimum background collection time")
+        self.duration_label = BodyLabel("Minimum duration", self)
+        layout.addWidget(self.duration_label, 2, 0)
+        layout.addWidget(self.duration, 2, 1)
+        self.minimum_sweeps = minimum_sweeps
+        self.detail = CaptionLabel(self)
+        self.detail.setWordWrap(True)
+        layout.addWidget(self.detail, 3, 0, 1, 2)
+        self.backend.currentIndexChanged.connect(self._update_fields)
+        self._update_fields()
+
+    @property
+    def uses_instrument(self):
+        return self.backend.currentData() == "instrument"
+
+    def instrument_target(self) -> InstrumentAverageTarget | None:
+        if not self.uses_instrument:
+            return None
+        frames, seconds = self.target.target()
+        return InstrumentAverageTarget(frame_count=frames) if seconds is None else InstrumentAverageTarget(duration_s=seconds)
+
+    def _update_fields(self):
+        instrument = self.uses_instrument
+        self.duration.setVisible(not instrument)
+        self.duration_label.setVisible(not instrument)
+        if self.target is not None:
+            self.target.setVisible(instrument)
+            self.target_label.setVisible(instrument)
+        self.detail.setText("Saves the linear-power mean. Individual sweeps and variance are unavailable." if instrument else
+                            f"Collects at least {self.minimum_sweeps} complete sweeps. Slow sweeps can extend the recording.")
 
 
 class BackgroundCorrectionAssistant(StationDialog):
@@ -28,20 +93,21 @@ class BackgroundCorrectionAssistant(StationDialog):
     prepare_requested = Signal()
     filter_ready = Signal()
 
-    def __init__(self, workspace, directory: Path, parent=None, *, record_available=True):
+    def __init__(self, workspace, directory: Path, parent=None, *, record_available=True, for_stripes=False):
         super().__init__(parent, resizable=True)
-        self.setWindowTitle("Configure background")
+        self.setWindowTitle("Stripes background" if for_stripes else "Configure background")
         self.resize(620, 620)
         self.setMinimumSize(400, 380)
         self.workspace = workspace
         self.directory = directory
         self.record_available = record_available
+        self.for_stripes = for_stripes
         self.phase = "setup"
         self._owns_recording = False
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "_" + uuid4().hex[:8]
         self.reference_path = directory / f"background_{stamp}.h5"
         root = self.modal_content_layout(spacing=12)
-        self.heading = SubtitleLabel("1 · Prepare a background", self)
+        self.heading = SubtitleLabel("Choose a background for Stripes" if for_stripes else "1 · Prepare a background", self)
         root.addWidget(self.heading)
         scroll = ScrollArea(self)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -50,10 +116,7 @@ class BackgroundCorrectionAssistant(StationDialog):
         fields = QVBoxLayout(content)
         fields.setContentsMargins(4, 4, 4, 4)
         fields.setSpacing(10)
-        explanation = BodyLabel(
-            "Set the background operating point, for example a low Keithley current. "
-            "Keithley outputs may remain ON. Keep the same cables, frequency range and analyzer settings. "
-            "The assistant does not change source outputs or setpoints.", content)
+        explanation = BodyLabel(self._record_instructions(), content)
         explanation.setWordWrap(True)
         fields.addWidget(explanation)
         self.explanation = explanation
@@ -82,24 +145,26 @@ class BackgroundCorrectionAssistant(StationDialog):
         record_layout.setContentsMargins(0, 0, 0, 0)
         record_layout.setSpacing(10)
         fields.addWidget(self.record_fields)
-        record_layout.addWidget(BodyLabel("Minimum background collection time", self.record_fields))
-        self.duration = ComboBox(content)
+        self.duration = ComboBox(self.record_fields)
         default = workspace.duration.text()
         for value in dict.fromkeys((default, "10 s", "30 s", "60 s", "120 s", "300 s")):
             self.duration.addItem(value, userData=value)
-        record_layout.addWidget(self.duration)
-        minimum = workspace._settings.anritsu.spectrum_correction.calibration_min_sweeps
-        minimum_note = CaptionLabel(f"At least {minimum} complete sweeps are required; collection can take longer with slow sweeps.", content)
-        minimum_note.setWordWrap(True)
-        record_layout.addWidget(minimum_note)
+        self.background_averaging = BackgroundAveragingControls(
+            self.duration, self.record_fields, allow_instrument=record_available and not for_stripes,
+            minimum_sweeps=workspace._settings.anritsu.spectrum_correction.calibration_min_sweeps,
+        )
+        record_layout.addWidget(self.background_averaging)
         note = CaptionLabel(
-            "When the background is ready, this window closes and Background correction is enabled. "
-            "Restore your measurement operating point, then press Start Live in the main window. "
-            "Use Avg: 16 or 32 for the measurement as well. Longer background collection reduces "
-            "background uncertainty, but cannot remove noise in a single measurement frame. "
-            "Averaging does not remove drifting interference lines.", content)
+            ("Automatic Stripes finds the affected frequencies in this background. "
+             "After recording, restore your measurement operating point and press Start Live."
+             if for_stripes else
+             "When the background is ready, this window closes and Background correction is enabled. "
+             "Restore your measurement operating point, then press Start Live in the main window. "
+             "Use Avg: 16 or 32 for the measurement as well. Longer background collection reduces "
+             "background uncertainty, but cannot remove noise in a single measurement frame. "
+             "Averaging does not remove drifting interference lines."), self.record_fields)
         note.setWordWrap(True)
-        fields.addWidget(note)
+        record_layout.addWidget(note)
         archive_note = CaptionLabel(f"Raw spectra and background will be saved automatically in:\n{directory}", content)
         archive_note.setWordWrap(True)
         fields.addWidget(archive_note)
@@ -123,6 +188,7 @@ class BackgroundCorrectionAssistant(StationDialog):
         self.cancel.clicked.connect(self.reject)
         self.next.clicked.connect(self._advance)
         self.background_source.currentIndexChanged.connect(self._source_changed)
+        self.background_averaging.backend.currentIndexChanged.connect(self._source_changed)
         self.choose_profile.clicked.connect(self._choose_profile)
         self.profile_path.textChanged.connect(self._source_changed)
         self._ready_timer = QTimer(self)
@@ -137,7 +203,7 @@ class BackgroundCorrectionAssistant(StationDialog):
         self._prepare_timeout.setSingleShot(True)
         self._prepare_timeout.setInterval(30_000)
         self._prepare_timeout.timeout.connect(lambda: self._fail("Analyzer did not become ready. Check its connection and status."))
-        if not record_available:
+        if for_stripes or not record_available:
             self.background_source.setCurrentIndex(self.background_source.findData("load"))
 
     def _advance(self):
@@ -180,9 +246,13 @@ class BackgroundCorrectionAssistant(StationDialog):
             "Operator-selected background operating point; source output states not checked. "
             "Input path and analyzer settings retained."
         )
-        self.workspace.duration.setText(self.duration.currentData())
+        target = self.background_averaging.instrument_target()
+        if target is None:
+            self.workspace.duration.setText(self.duration.currentData())
         self.workspace.freeze.setChecked(False)
-        self.workspace.start_acquisition("reference", self.reference_path)
+        self.workspace.start_acquisition("reference", self.reference_path, instrument_target=target)
+        if self.phase == "collecting" and not self.workspace.running:
+            self._fail(self.workspace.state_label.text())
 
     def _availability_changed(self):
         # Device readiness can change inside the page's state update. Start on
@@ -198,6 +268,14 @@ class BackgroundCorrectionAssistant(StationDialog):
         elif kind == "reference" and self.phase == "collecting":
             self._background_ready()
 
+    def _record_instructions(self) -> str:
+        if self.for_stripes:
+            return ("Use a background operating point where the signal of interest is absent. "
+                    "Keep the same cables, frequency range and analyzer settings.")
+        return ("Set the background operating point, for example a low Keithley current. "
+                "Keithley outputs may remain ON. Keep the same cables, frequency range and analyzer settings. "
+                "The assistant does not change source outputs or setpoints.")
+
     def _source_changed(self, *_args):
         if self.phase != "setup":
             return
@@ -205,18 +283,23 @@ class BackgroundCorrectionAssistant(StationDialog):
         self.load_fields.setVisible(loading)
         self.record_fields.setVisible(not loading)
         self.explanation.setText(
-            "Load a background acquired with the same cables, frequency range and analyzer settings. "
-            "The saved file is read without changing it. Sources and setpoints remain under your control."
+            ("Choose a saved background acquired without the signal of interest, with the same cables, "
+             "frequency range and analyzer settings. Stripes uses it to find interference bands. "
+             "Reference sets the dB baseline." if self.for_stripes else
+             "Load a background acquired with the same cables, frequency range and analyzer settings. "
+             "The saved file is read without changing it. Sources and setpoints remain under your control.")
             if loading else
-            "Set the background operating point, for example a low Keithley current. "
-            "Keithley outputs may remain ON. Keep the same cables, frequency range and analyzer settings. "
-            "The assistant does not change source outputs or setpoints.")
-        self.archive_note.setText(
-            "The saved background is used as a display filter. Start Live from the main window." if loading else
-            f"Raw spectra and background will be saved automatically in:\n{self.directory}")
+            self._record_instructions())
+        if loading:
+            archive_note = ("Stripes applies the saved background once the analyzer settings match." if self.for_stripes
+                            else "The saved background is used as a display filter. Start Live from the main window.")
+        else:
+            contents = "The instrument mean" if self.background_averaging.uses_instrument else "Raw spectra and background"
+            archive_note = f"{contents} will be saved automatically in:\n{self.directory}"
+        self.archive_note.setText(archive_note)
         self.next.setText("Load background" if loading else "Record background")
         self.next.setEnabled(bool(self.profile_path.text().strip()) if loading else self.record_available)
-        self.status.setText("Choose a saved background. Analyzer settings and reference age are checked before correction."
+        self.status.setText("Choose a saved background. Its age and analyzer settings are checked before correction."
                             if loading else "Ready to record background at your selected operating point." if self.record_available
                             else "Connect the analyzer and qualify acquisition to record a new background.")
 
@@ -236,9 +319,10 @@ class BackgroundCorrectionAssistant(StationDialog):
         self.activity.show()
         self.activity.start()
         self.status.setText("Loading and validating the saved background…")
-        self.prepare_requested.emit()
+        if not self.for_stripes:
+            self.prepare_requested.emit()
         try:
-            self.workspace.load_background_profile(Path(path))
+            self.workspace.load_background_profile(Path(path), require_raw_sweeps=self.for_stripes)
         except (RuntimeError, ValueError, OSError) as exc:
             self._profile_loaded(False, str(exc))
 

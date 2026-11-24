@@ -19,6 +19,7 @@ from app.domain.quick_controls import (
 from app.domain.quantities import format_quantity_auto, parse_quantity
 from app.recipes.parameter_registry import QuickControlDescriptor
 from app.safety.quick_controls import QuickControlSafetyBound
+from app.ui.widgets.quantity_editor import QuantityEditor
 
 
 _MAX_SLIDER_POSITIONS = 2_000_000_000
@@ -131,7 +132,7 @@ class QuickQuantitySlider(QWidget):
         *,
         target: str,
         descriptor: QuickControlDescriptor,
-        editor: LineEdit | None = None,
+        editor: LineEdit | QuantityEditor | None = None,
         show_title: bool = True,
         editor_accessory: QWidget | None = None,
         parent: QWidget | None = None,
@@ -171,6 +172,8 @@ class QuickQuantitySlider(QWidget):
         self.slider.setOrientation(Qt.Orientation.Horizontal)
         self.slider.setAccessibleName(f"{descriptor.label} slider")
         self.slider.setToolTip(
+            "Drag to adjust the draft, then press Apply."
+            if isinstance(self.value, QuantityEditor) else
             "Drag to change the draft. The card and Quick Controls stay synchronized."
         )
         self.slider.installEventFilter(self)
@@ -188,9 +191,12 @@ class QuickQuantitySlider(QWidget):
         layout.addLayout(bounds_row)
 
         self.value.textChanged.connect(self._text_changed)
-        self.value.editingFinished.connect(self._commit)
         self.slider.valueChanged.connect(self._slider_changed)
-        self.slider.sliderReleased.connect(self._commit)
+        if isinstance(self.value, QuantityEditor):
+            self.value.commit_requested.connect(self._commit)
+        else:
+            self.value.editingFinished.connect(self._commit)
+            self.slider.sliderReleased.connect(self._commit)
         self.set_value_text(descriptor.default_text)
 
     @property
@@ -207,17 +213,18 @@ class QuickQuantitySlider(QWidget):
         self._bound = bound
         self.minimum_label.setText(f"MIN  {bound.minimum_text}")
         self.maximum_label.setText(f"MAX  {bound.maximum_text}")
-        self._rebuild_mapping()
-        if self._mapping is not None:
-            try:
-                value_si = self.value_si()
-            except ValueError:
-                return
-            self._syncing = True
-            try:
+        self._syncing = True
+        try:
+            self._rebuild_mapping()
+            if self._mapping is not None:
+                try:
+                    value_si = self.value_si()
+                except ValueError:
+                    self.slider.setEnabled(False)
+                    return
                 self.slider.setValue(self._mapping.position_for_value(value_si))
-            finally:
-                self._syncing = False
+        finally:
+            self._syncing = False
 
     def clear_bounds(self) -> None:
         self._bound = None
@@ -257,6 +264,9 @@ class QuickQuantitySlider(QWidget):
             self._syncing = False
 
     def set_value_si(self, value_si: float) -> None:
+        if isinstance(self.value, QuantityEditor):
+            self.value.set_value_si(value_si)
+            return
         preferred_unit: str | None = None
         match = _QUANTITY.fullmatch(self.value.text())
         if match is not None:
@@ -292,13 +302,13 @@ class QuickQuantitySlider(QWidget):
         except ValueError:
             self.slider.setEnabled(False)
             return
-        self._rebuild_mapping()
-        if self._mapping is not None:
-            self._syncing = True
-            try:
+        self._syncing = True
+        try:
+            self._rebuild_mapping()
+            if self._mapping is not None:
                 self.slider.setValue(self._mapping.position_for_value(parsed.si_value))
-            finally:
-                self._syncing = False
+        finally:
+            self._syncing = False
         self.draft_value_changed.emit(self.target, text)
 
     def _rebuild_mapping(self) -> None:
@@ -346,6 +356,14 @@ class QuickQuantitySlider(QWidget):
         value_si = self._mapping.value_for_position(position)
         if self._display_extent_si is not None and self._bound is not None:
             value_si = min(max(value_si, self._bound.minimum_si), self._bound.maximum_si)
+        if isinstance(self.value, QuantityEditor):
+            self._syncing = True
+            try:
+                self.value.set_value_si(value_si)
+                self.value.mark_draft()
+            finally:
+                self._syncing = False
+            return
         try:
             text = render_quantity_si_like(
                 self.value.text(), self.descriptor.dimension, value_si
@@ -378,6 +396,9 @@ class QuickQuantitySlider(QWidget):
         return super().eventFilter(watched, event)
 
     def _commit(self) -> None:
+        if isinstance(self.value, QuantityEditor):
+            self.commit_requested.emit(self.target, self.value.text())
+            return
         focus = QApplication.focusWidget()
         if self._editor_accessory is not None and focus is not None and (
             focus is self._editor_accessory or self._editor_accessory.isAncestorOf(focus)

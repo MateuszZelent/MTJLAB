@@ -80,9 +80,11 @@ class RecipeSpectrumOptions(QWidget):
         self.filters_row.setVisible(not self._reference_only)
         self.parameters.setVisible(not self._reference_only)
         self.note.setText(
-            "Reference/background is taken at this point in the recipe. Set the source operating point in earlier steps; outputs need not be OFF. Imported files must match analyzer settings."
+            "Set the source operating point before acquiring a reference or background. "
+            "Imported files must match analyzer settings."
             if self._reference_only
-            else "Add Acquire reference before this step to record or load background/reference after configuring the analyzer. Each point averages its own sweeps, then applies correction and filters. RAW remains archived. EMI needs enough sweeps within this point; settings are independent of manual Live."
+            else "Add Acquire reference after configuring the analyzer to use reference processing. "
+            "The unprocessed spectrum is saved with any processed result."
         )
 
     def node_fields(self):

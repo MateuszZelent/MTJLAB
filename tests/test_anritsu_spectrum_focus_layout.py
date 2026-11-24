@@ -30,6 +30,7 @@ def test_spectrum_is_primary_and_controls_remain_reachable(shell_qt_application,
     window._set_theme_mode(theme, persist=False)
     window.show()
     window._navigate_to("anritsu")
+    shell_qt_application.processEvents()
     page = window.anritsu_page
     page._show_trace(synthetic_anritsu_peaks(), update_controls=False)
     QTest.qWait(80)

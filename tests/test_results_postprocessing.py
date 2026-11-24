@@ -357,7 +357,11 @@ def test_rendered_controls_sync_between_1d_and_heatmap_and_reset(
         page.result_tabs.setCurrentIndex(page._heatmap_index)
         _wait(app, lambda: page.heatmap_tab.heatmap._data is not None and not page.heatmap_tab._read_tasks)
         np.testing.assert_allclose(page.heatmap_tab.heatmap._data[0], spectrum_values)
-        assert "(W)" in page.heatmap_tab.heatmap.color_bar.getAxis("right").label.toPlainText()
+        power_axis = page.heatmap_tab.heatmap.color_bar.getAxis("right")
+        # Display prefixes follow the data magnitude (e.g. nW); persisted
+        # values and the canonical axis unit must remain watts.
+        assert power_axis.labelUnits == "W"
+        assert power_axis.labelText == "Power difference"
         assert not page.heatmap_tab.heatmap.color_bar.getAxis("left").label.toPlainText()
         page.result_tabs.setCurrentIndex(page._spectrum_index)
         app.processEvents()

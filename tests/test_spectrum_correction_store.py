@@ -96,6 +96,25 @@ def test_profile_round_trip_remains_readable_by_pythat(tmp_path, known_variance)
         assert group["sample_variance_w2"].attrs["unit"] == "W^2"
 
 
+def test_instrument_profile_round_trips_without_empirical_variance(tmp_path):
+    ctx, pc_profile = fixture_profile()
+    instrument_profile = replace(
+        pc_profile, sample_variance_w2=None, mean_variance_w2=None,
+        signal_free_qualified=False, averaging_source="instrument", nominal_sweep_time_s=0.06,
+    )
+    path = tmp_path / "instrument-background.h5"
+    BackgroundProfileHdf5Store.save(path, ctx, instrument_profile)
+    _, restored = BackgroundProfileHdf5Store.load(path)
+    assert restored.content_hash == instrument_profile.content_hash
+    assert restored.averaging_source == "instrument"
+    assert restored.sweep_count == pc_profile.sweep_count
+    assert restored.nominal_sweep_time_s == 0.06
+    with h5py.File(path, "r") as archive:
+        group = archive[f"spectrum_processing_v1/profiles/{restored.profile_id}"]
+        assert "sample_variance_w2" not in group and "mean_variance_w2" not in group
+    assert ThatecCompatibilityValidator().validate(path, require_pythat=True).valid
+
+
 @pytest.mark.parametrize("array_input", [False, True])
 def test_signed_result_and_envelope_commit_with_raw(tmp_path, array_input):
     ctx, bg = fixture_profile()

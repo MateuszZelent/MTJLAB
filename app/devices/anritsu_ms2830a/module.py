@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.contracts import DeviceModule, RecipeExtension
-from app.devices.anritsu_ms2830a import AnritsuAdapter
+from app.devices.anritsu_ms2830a import AnritsuAdapter, InstrumentAverageTarget
 from app.devices.anritsu_ms2830a.ui import AnritsuPage
 from app.devices.base import DeviceAdapter
 from app.devices.simulators import SimulatedVisaFactory
@@ -21,6 +21,10 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         raise TypeError("Anritsu module received an incompatible adapter.")
     if operation.startswith("read_background_filter_configuration:"):
         return adapter.read_acquisition_configuration()
+    if operation in {"instrument_average", "instrument_average_live"}:
+        if not isinstance(payload, InstrumentAverageTarget):
+            raise TypeError("Anritsu instrument averaging requires a sweep count or duration target.")
+        return adapter.acquire_manual_instrument_average(payload)
     actions = {
         "read_configuration": adapter.read_current_configuration,
         "read_advanced_spectrum": adapter.read_advanced_spectrum_configuration,
@@ -35,6 +39,7 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         "fetch_current_trace_fast": lambda: adapter.fetch_current_trace_fast(str(payload or "TRAC1")),
         "acquire_fresh_trace": lambda: adapter.acquire_fresh_trace(str(payload or "TRAC1")),
         "single_sweep": lambda: adapter.acquire_single_sweep(str(payload or "TRAC1"), restore_continuous=False),
+        "unaveraged_sweep": adapter.acquire_unaveraged_sweep,
         "read_signal_generator": adapter.read_signal_generator_configuration,
         "configure_signal_generator": lambda: adapter.configure_signal_generator(payload),
         "update_signal_generator": lambda: adapter.update_signal_generator(payload),
