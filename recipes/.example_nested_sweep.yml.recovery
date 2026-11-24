@@ -1,120 +1,30 @@
 schema_version: 1
-name: Keithley B current × Rigol CH1 high level × Anritsu spectrum
-
-# Safe, executable 100 × 20 example. It deliberately contains no OUTPUT ON
-# action, so compiling or simulating it cannot energise a source.
+name: baseline-authoring
 root:
-  id: sequence-main
+  id: root
   type: sequence
   children:
-  - id: anritsu-spectrum-setup
-    type: configure_anritsu
-    start_frequency: 1 MHz
-    stop_frequency: 10 MHz
-    reference_level: 0 dBm
-    points: 1001
-    block_type: recipe.configure_anritsu
-  - id: keithley-current-sweep
-    type: sweep
-    target: keithley.B.current
-    start: 1 mA
-    stop: 10 mA
-    points: 100
-    spacing: linear
-    children:
-    - id: keithley-b-config
-      type: configure_keithley
-      channel: B
-      mode: current
-      level: ${keithley.B.current}
-      compliance: 67 mV
-      nplc: 1.0
-      source_autorange: false
-      source_range: 1 A
-      block_type: recipe.configure_keithley
-    - id: rigol-high-level-sweep
-      type: sweep
-      target: rigol.1.high_level
-      start: 1 mV
-      stop: 3 mV
-      points: 20
-      spacing: linear
-      children:
-      - id: rigol-ch1-config
-        type: configure_rigol
-        channel: 1
-        waveform: SQU
-        frequency: 1 kHz
-        high_level: ${rigol.1.high_level}
-        low_level: -1 mV
-        output_load: HIGHZ
-        dut_min_impedance: 50 ohm
-        block_type: recipe.configure_rigol
-      - id: wait-for-settle
-        type: wait
-        duration: 100 ms
-        block_type: recipe.wait
-      - id: measure-keithley-b
-        type: measure_keithley
-        channel: B
-        block_type: recipe.measure_keithley
-      - id: acquire-spectrum
-        type: acquire_spectrum
-        trace: TRAC1
-
-        block_type: recipe.acquire_spectrum
-      block_type: recipe.sweep
-    block_type: recipe.sweep
-  - id: sweep-7610a1b8
-    type: sweep
-    target: keithley.B.current
-    segments:
-    - start: 0 A
-      stop: 1 mA
-      points: 5
-      spacing: linear
-    children:
-    - id: keithley-output-on-db0cc407
-      type: set_keithley_output
-      channel: B
-      enabled: true
-      block_type: recipe.set_keithley_output
-    - id: output-off-014b24e5
-      type: set_keithley_output
-      enabled: false
-      channel: B
-      block_type: recipe.set_keithley_output
-    - id: rigol-output-on-ad9946e3
-      type: enable_rigol_output
-      channel: 1
-      block_type: recipe.enable_rigol_output
-    - id: output-off-5dd58bc8
-      type: set_rigol_output
-      enabled: false
-      channel: 1
-      block_type: recipe.set_rigol_output
-    - id: anritsu-sg-output-on-6bb9583b
-      type: enable_anritsu_sg_output
-      block_type: recipe.enable_anritsu_sg_output
-    - id: output-off-6527ec20
-      type: set_anritsu_sg_output
-      enabled: false
-      block_type: recipe.set_anritsu_sg_output
-    block_type: recipe.sweep
+  - id: initial-settings-5c8fd6f5
+    type: configure_keithley
+    label: Initial keithley settings — review before running
+    channel: B
+    mode: current
+    level: 1 mA
+    compliance: 20 mV
+    nplc: 8.0
+    sense_mode: 2wire
+    source_range: 100 mA
+    block_type: recipe.configure_keithley
+  - id: selected-b
+    type: sequence
+    device_module: keithley
+    operation: configure_selected_parameters
+    channel: B
+    source_mode: current
+    output_policy: off
+    configuration: {channel: B, source_mode: current, source_level: 1 mA, 
+        compliance: 20 mV, source_range: 100 mA, nplc: '8', sense_mode: 2wire}
+    parameter_actions: [{parameter_id: source.level, mode: set, value: 1.2 mA}]
+    children: [{id: checkpoint, type: checkpoint, block_type: recipe.checkpoint}]
+    block_type: device.keithley
   block_type: recipe.sequence
-finally:
-- id: rigol-ch1-off-finally
-  type: set_rigol_output
-  channel: 1
-  enabled: false
-  block_type: recipe.set_rigol_output
-- id: keithley-b-ramp-zero-finally
-  type: ramp_keithley_to_zero
-  channel: B
-  deadline: 10 s
-  block_type: recipe.ramp_keithley_to_zero
-- id: keithley-b-off-finally
-  type: set_keithley_output
-  channel: B
-  enabled: false
-  block_type: recipe.set_keithley_output

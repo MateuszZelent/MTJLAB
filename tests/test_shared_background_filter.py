@@ -23,6 +23,7 @@ from app.devices.anritsu_ms2830a.ui.analysis_worker import (
 )
 from app.devices.anritsu_ms2830a.ui.page import AnritsuPage, AnritsuPageState
 from app.devices.simulators import SimulatedVisaFactory
+from app.domain.spectrum_averaging import InstrumentAverageProvenance
 from app.domain.spectrum_correction import BackgroundProfile, SpectrumAcquisitionContext
 from app.spectrum.analysis import SpectrumAnalysisParameters, clean_spectrum_pipeline
 from app.spectrum.display_processing import clean_display_spectrum
@@ -80,6 +81,30 @@ def shared_page(shell_qt_application):
     page.deleteLater()
     shell_qt_application.processEvents()
     adapter.disconnect()
+
+
+def test_background_subtraction_uses_the_completed_anritsu_block(shared_page):
+    from app.devices.anritsu_ms2830a import InstrumentAverageResult
+
+    app, page, _, profile, raw, _, _, _ = shared_page
+    read = page._controller.call.side_effect
+    page._controller.call.side_effect = lambda operation, payload=None: (
+        None if operation == "instrument_average_live" else read(operation, payload)
+    )
+    page.cleanup_filters["background"].setChecked(True)
+    page._set_page_state(AnritsuPageState.LIVE)
+    page._timer.start(10_000)
+    target = page.live_average_target
+    target.backend.setCurrentIndex(target.backend.findData("instrument"))
+    target.frames.setValue(50)
+    page.start_live_average.click()
+    mean = replace(raw, powers_dbm=tuple(value + .1 for value in raw.powers_dbm), trace_name="TRAC1_ANRITSU_LAV50",
+                   instrument_average=InstrumentAverageProvenance(50, .006, requested_sweep_count=50))
+    page._result("instrument_average_live", InstrumentAverageResult(mean, 50, .006))
+    wait_until(app, lambda: page._cleanup_result is not None and page._analysis_raw_snapshot is mean)
+    np.testing.assert_allclose(page._cleanup_result.values, dbm_to_w(mean.powers_dbm) - profile.mean_w,
+                               rtol=1e-9, atol=1e-23)
+    assert page._display_state.selected.unit == "W"
 
 
 def test_common_pipeline_subtracts_linear_power_before_cleanup_and_preserves_inputs(shared_page):

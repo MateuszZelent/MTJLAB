@@ -2,41 +2,55 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, replace
-from datetime import datetime, timezone
 import hashlib
 import math
 import time
+from dataclasses import dataclass, fields, replace
+from datetime import UTC, datetime
 
-from app.devices.base import DeviceAdapter, InstrumentSession, SessionFactory, parse_identity, validate_identity
 from app.devices.anritsu_ms2830a.hardware import (
     ANRITSU_PREAMPLIFIER_OPTIONS,
     ANRITSU_SIGNAL_GENERATOR_OPTIONS,
     parse_anritsu_hardware_catalog,
 )
+from app.devices.base import (
+    DeviceAdapter,
+    InstrumentSession,
+    SessionFactory,
+    parse_identity,
+    validate_identity,
+)
 from app.devices.visa import PyVisaSessionFactory
 from app.domain.errors import ConnectionError, DeviceError, SafetyViolation
 from app.domain.models import DeviceCapabilities, DeviceIdentity, DeviceState
-from app.domain.spectrum_correction import SweepEvidence
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
+from app.domain.spectrum_averaging import (
+    ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS,
+    ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS,
+    InstrumentAverageProvenance,
+)
+from app.domain.spectrum_correction import SweepEvidence
 from app.safety.anritsu import (
     ANRITSU_SWEEP_POINT_COUNTS,
     assert_anritsu_acquisition_allowed,
     normalize_anritsu_detector,
     validate_anritsu_advanced_spectrum,
-    validate_anritsu_spectrum,
     validate_anritsu_signal_generator,
+    validate_anritsu_spectrum,
     validate_anritsu_trace_name,
 )
 from app.settings.models import AnritsuSettings, StationSettings
+
+from .averaging import instrument_average_count_for_duration
 from .configuration import SignalGeneratorConfig, SpectrumConfig
 
-
-_LIVE_BINARY_READBACK = "SWE:POIN?;FREQ:STAR?;FREQ:STOP?;FORM?;FORM:BORD?;TRAC:STOR:MODE? 1;SYST:ERR?"
+_VERTICAL_SCALE_QUERY = "DISP:WIND:TRAC:Y:SPAC?"
+_LIVE_BINARY_READBACK = (
+    f"SWE:POIN?;FREQ:STAR?;FREQ:STOP?;FORM?;FORM:BORD?;TRAC:STOR:MODE? 1;{_VERTICAL_SCALE_QUERY};SYST:ERR?"
+)
 _TRACE_STORAGE_MODES = frozenset({"OFF", "AVER", "LAV", "MAXH", "MINH"})
 _BINARY_TRACE_FORMAT = ("REAL,32", "SWAP")
-ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS = 2
-ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS = 9999
+_SWEEP_STATUS_TIMEOUT_MS = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +138,7 @@ class SpectrumTrace:
     acquisition_started_at_utc: datetime | None = None
     acquisition_completed_at_utc: datetime | None = None
     configuration_generation: int = 0
+    instrument_average: InstrumentAverageProvenance | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +169,7 @@ class InstrumentAverageResult:
     trace: SpectrumTrace
     count: int
     nominal_sweep_time_s: float
+    configuration: tuple[AnritsuFullConfigurationReadback, AdvancedSpectrumSnapshot] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +217,8 @@ class ReferenceSpectrum:
             raise ValueError(f"Unsupported reference kind {self.kind!r}.")
         if self.average_count < 1:
             raise ValueError("Reference average_count must be positive.")
+        if self.instrument_average is not None and self.instrument_average.sweep_count != self.average_count:
+            raise ValueError("Reference count differs from its Anritsu average.")
         if len(self.trace.frequencies_hz) != len(self.trace.powers_dbm) or len(self.trace.frequencies_hz) < 2:
             raise ValueError("Reference trace must contain matching frequency and power arrays.")
         if not all(math.isfinite(value) for value in (*self.trace.frequencies_hz, *self.trace.powers_dbm)):
@@ -238,6 +256,10 @@ class ReferenceSpectrum:
             raise ValueError("Reference grid hash does not match its frequency data.")
         if not self.grid_hash:
             object.__setattr__(self, "grid_hash", expected_hash)
+
+    @property
+    def instrument_average(self) -> InstrumentAverageProvenance | None:
+        return self.trace.instrument_average
 
     @staticmethod
     def hash_grid(frequencies_hz: tuple[float, ...]) -> str:
@@ -1375,13 +1397,8 @@ class AnritsuAdapter(DeviceAdapter):
     def live(self) -> bool:
         return self._live
 
-    def start_single_sweep(self) -> None:
-        """Start one qualified SCPI sweep for a recipe checkpoint.
-
-        This command family is intentionally unavailable until the current
-        Anritsu firmware has been qualified in the station profile.  It is not
-        used for the user-facing Live polling loop.
-        """
+    def start_single_sweep(self, *, queue_wait: bool = True) -> None:
+        """Start one qualified Single measurement, optionally queuing a SCPI barrier."""
 
         self._assert_acquisition_allowed()
         if not self._single_sweep_supported:
@@ -1401,18 +1418,17 @@ class AnritsuAdapter(DeviceAdapter):
         # buffer without changing the operator's RF/bandwidth settings.
         self._prepare_trace_a()
         # MS2830A Spectrum Analyzer Remote Control, section 2.7 documents this
-        # exact pair for a single measurement. INIT:MODE:SING both selects
-        # Single and starts the sweep; *WAI holds the following command until
-        # the sweep is complete. Generic INIT:IMM + *OPC? is deliberately not
-        # used because it did not produce a valid trace on the target firmware.
+        # command for Single measurement. *WAI holds the following command,
+        # including status queries, until the measurement is complete.
         session.write("INIT:MODE:SING")
-        session.write("*WAI")
+        if queue_wait:
+            session.write("*WAI")
         # DeviceState represents the connection/output safety state, not the
         # transient acquisition state; the analyser has no energy output here.
         self._state = DeviceState.VERIFIED
 
-    def wait_complete(self, *, deadline_s: float | None = None) -> None:
-        """Confirm completion after the queued ``*WAI`` with a hard deadline."""
+    def wait_complete(self, *, deadline_s: float | None = None, poll_after_s: float | None = None) -> None:
+        """Confirm completion within the deadline using the selected synchronization path."""
 
         if not self._single_sweep_supported:
             raise SafetyViolation("No qualified Anritsu single-sweep protocol is configured.")
@@ -1425,18 +1441,23 @@ class AnritsuAdapter(DeviceAdapter):
         deadline = time.monotonic() + timeout
         original_timeout_ms = session.timeout
         try:
+            if poll_after_s is not None:
+                # During a Live average, leave GPIB idle while the analyzer accumulates.
+                # INIT:SWP? can then report busy without waiting behind a queued *WAI.
+                time.sleep(min(poll_after_s, max(0.0, timeout - 0.1)))
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise DeviceError("Timed out waiting for the Anritsu single sweep to complete.")
                 # The VISA call itself must not outlive the application-level
                 # deadline. Some backends reject a zero-millisecond timeout.
-                # *WAI queues this query behind the entire sweep. Its response
-                # needs the acquisition budget, not the shorter ordinary I/O budget.
-                session.timeout = max(1, int(remaining * 1000))
+                timeout_ms = max(1, int(remaining * 1000))
+                if poll_after_s is not None:
+                    timeout_ms = min(timeout_ms, original_timeout_ms, _SWEEP_STATUS_TIMEOUT_MS)
+                session.timeout = timeout_ms
                 response = session.query("INIT:SWP?").strip()
                 if response in {"0", "+0"}:
-                    self._check_scpi_errors(session, "INIT:MODE:SING / *WAI / INIT:SWP?")
+                    self._check_scpi_errors(session, "confirming Single measurement completion")
                     self._state = DeviceState.VERIFIED
                     return
                 if response not in {"1", "+1"}:
@@ -1445,10 +1466,11 @@ class AnritsuAdapter(DeviceAdapter):
                     )
                 time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
         except Exception as exc:
-            session.timeout = original_timeout_ms
             try:
+                session.timeout = original_timeout_ms
                 self.abort_acquisition()
             except Exception as abort_error:
+                self._state = DeviceState.UNKNOWN
                 exc.add_note(f"Anritsu acquisition abort also failed: {abort_error}")
             raise
         finally:
@@ -1468,7 +1490,7 @@ class AnritsuAdapter(DeviceAdapter):
             type(timeout_s) not in (int, float) or not math.isfinite(timeout_s) or timeout_s <= 0
         ):
             raise SafetyViolation("Anritsu acquisition timeout must be finite and positive.")
-        started = datetime.now(timezone.utc)
+        started = datetime.now(UTC)
         session = self._require_session()
         if type(restore_continuous) is not bool:
             raise SafetyViolation("Anritsu restore_continuous must be a boolean.")
@@ -1478,7 +1500,7 @@ class AnritsuAdapter(DeviceAdapter):
         )
         self.start_single_sweep()
         self.wait_complete(deadline_s=timeout_s)
-        completed = datetime.now(timezone.utc)
+        completed = datetime.now(UTC)
         result = self.fetch_trace(trace)
         if continuous_before:
             session.write("INIT:MODE:CONT")
@@ -1506,9 +1528,10 @@ class AnritsuAdapter(DeviceAdapter):
         session = self._require_session()
         return self._read_ascii_trace(session, trace, prepare_ascii=True)
 
-    def acquire_unaveraged_sweep(self) -> SpectrumTrace:
-        """Acquire one Trace A sweep for application-side averaging."""
+    def acquire_unaveraged_sweep(self, trace: str = "TRAC1") -> SpectrumTrace:
+        """Acquire one sweep with instrument trace storage temporarily off."""
 
+        trace = validate_anritsu_trace_name(trace)
         self._assert_acquisition_allowed()
         if not self._single_sweep_supported:
             raise SafetyViolation("Application averaging requires the qualified Anritsu single-sweep protocol.")
@@ -1531,7 +1554,7 @@ class AnritsuAdapter(DeviceAdapter):
                 self._check_scpi_errors(session, "disabling trace storage")
                 if any(mode != "OFF" for mode in self._read_trace_storage_modes(session, native)):
                     raise DeviceError("Anritsu did not confirm trace storage OFF before starting the sweep.")
-            result = self.acquire_single_sweep(restore_continuous=False)
+            result = self.acquire_single_sweep(trace, restore_continuous=False)
             if any(mode != "OFF" for mode in self._read_trace_storage_modes(session, native)):
                 raise DeviceError("Anritsu trace storage mode changed during acquisition.")
             return result
@@ -1550,18 +1573,35 @@ class AnritsuAdapter(DeviceAdapter):
             restore_continuous=self._live,
         )
 
-    def acquire_manual_instrument_average(self, target: InstrumentAverageTarget) -> InstrumentAverageResult:
+    def acquire_manual_instrument_average(
+        self, target: InstrumentAverageTarget, *, live: bool = False,
+    ) -> InstrumentAverageResult:
         """Acquire one mean for the manual worker and restore the operating state."""
 
+        configuration = None
+        if not live and self._single_sweep_supported:
+            self._assert_acquisition_allowed()
+            configuration = self.read_acquisition_configuration()
         timeout_s = parse_quantity(self._settings.acquisition.operation_complete_timeout, DIMENSION_TIME).si_value
         trace, count, sweep_time_s = self._acquire_instrument_average(
-            target, acquisition_timeout_s=timeout_s, restore_continuous=True,
+            target, acquisition_timeout_s=timeout_s, restore_continuous=True, live=live,
         )
-        return InstrumentAverageResult(replace(trace, trace_name=f"TRAC1_ANRITSU_LAV{count}"), count, sweep_time_s)
+        if configuration is not None:
+            full, _advanced = configuration
+            if (self.read_acquisition_configuration() != configuration
+                    or len(trace.frequencies_hz) != full.points
+                    or not math.isclose(trace.frequencies_hz[0], full.start_hz, rel_tol=1e-9, abs_tol=1.0)
+                    or not math.isclose(trace.frequencies_hz[-1], full.stop_hz, rel_tol=1e-9, abs_tol=1.0)):
+                raise DeviceError("Analyzer settings changed during manual averaging.")
+        return InstrumentAverageResult(
+            replace(trace, trace_name=f"TRAC1_ANRITSU_LAV{count}"), count, sweep_time_s, configuration,
+        )
 
     def _acquire_instrument_average(
         self, target: InstrumentAverageTarget, *, acquisition_timeout_s: float, restore_continuous: bool,
+        live: bool = False,
     ) -> tuple[SpectrumTrace, int, float]:
+        operation_started = time.monotonic()
         self._assert_acquisition_allowed()
         if not self._single_sweep_supported:
             raise SafetyViolation("Instrument averaging requires the qualified Anritsu single-sweep protocol.")
@@ -1579,15 +1619,10 @@ class AnritsuAdapter(DeviceAdapter):
             raise DeviceError("Anritsu returned an invalid sweep time for instrument averaging.") from exc
         if not math.isfinite(sweep_time_s) or sweep_time_s <= 0:
             raise DeviceError("Anritsu returned a non-positive or non-finite sweep time.")
-        count = target.frame_count
-        if target.duration_s is not None:
-            if target.duration_s > ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS * sweep_time_s:
-                raise SafetyViolation("Instrument averaging target exceeds the Anritsu limit of 9999 sweeps.")
-            # Compare in seconds to avoid rounding an exact multiple one sweep higher.
-            count = max(ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS, math.floor(target.duration_s / sweep_time_s))
-            if count * sweep_time_s < target.duration_s:
-                count += 1
-        if count * sweep_time_s >= acquisition_timeout_s:
+        count = (target.frame_count if target.frame_count is not None
+                 else instrument_average_count_for_duration(target.duration_s, sweep_time_s))
+        nominal_duration_s = count * sweep_time_s
+        if nominal_duration_s >= acquisition_timeout_s:
             raise SafetyViolation("Required instrument sweeps exceed the acquisition deadline.")
 
         self._ensure_acquisition_remote()
@@ -1622,9 +1657,9 @@ class AnritsuAdapter(DeviceAdapter):
                 restore.append(trace_type)
 
             acquisition_attempted = True
-            started_at = datetime.now(timezone.utc)
+            started_at = datetime.now(UTC)
             try:
-                self.start_single_sweep()
+                self.start_single_sweep(queue_wait=not live)
             except Exception as exc:
                 # The VISA write may have reached the analyser before reporting an error.
                 try:
@@ -1632,8 +1667,10 @@ class AnritsuAdapter(DeviceAdapter):
                 except Exception as abort_error:  # noqa: BLE001 - retain the acquisition failure
                     exc.add_note(f"Anritsu instrument averaging abort also failed: {abort_error}")
                 raise
-            self.wait_complete(deadline_s=acquisition_timeout_s)
-            completed_at = datetime.now(timezone.utc)
+            self.wait_complete(
+                deadline_s=acquisition_timeout_s, poll_after_s=nominal_duration_s if live else None,
+            )
+            completed_at = datetime.now(UTC)
             count_query = "SWEEPCOUNT?" if native else "TRAC:SWE:COUN?"
             completed_count = self._parse_integer(session.query(count_query), "completed sweep count", minimum=0)
             self._check_scpi_errors(session, "instrument average completion")
@@ -1646,7 +1683,7 @@ class AnritsuAdapter(DeviceAdapter):
             self._confirm_instrument_average(session, mode_query, "LAV", count)
             if write_mode != "WRIT":
                 raise DeviceError("Anritsu Trace A write mode changed during instrument averaging.")
-            return self._stamp_single_sweep(trace, started_at, completed_at), completed_count, sweep_time_s
+            trace = self._stamp_single_sweep(trace, started_at, completed_at)
         except Exception as exc:
             failure = exc
             raise
@@ -1666,6 +1703,13 @@ class AnritsuAdapter(DeviceAdapter):
                 self._live_storage_before = raw_live
             if self._state != DeviceState.UNKNOWN:
                 self._live, self._group_live_queries = live_before, grouped_before
+        evidence = InstrumentAverageProvenance(
+            completed_count, sweep_time_s,
+            requested_sweep_count=target.frame_count,
+            target_duration_s=target.duration_s,
+            elapsed_s=time.monotonic() - operation_started,
+        )
+        return replace(trace, instrument_average=evidence), completed_count, sweep_time_s
 
     @staticmethod
     def _trace_write_mode_query(native: bool) -> str:
@@ -1819,6 +1863,7 @@ class AnritsuAdapter(DeviceAdapter):
         return self._decode_binary_trace(trace, raw_values, before)
 
     def _read_binary_grid(self, session: InstrumentSession) -> tuple[int, float, float]:
+        self._assert_log_trace_scale(session.query(_VERTICAL_SCALE_QUERY))
         points = self._parse_integer(session.query("SWE:POIN?"), "sweep point count", minimum=2)
         return points, float(session.query("FREQ:STAR?")), float(session.query("FREQ:STOP?"))
 
@@ -1828,13 +1873,20 @@ class AnritsuAdapter(DeviceAdapter):
         response = session.query(_LIVE_BINARY_READBACK)
         try:
             # Error text can contain semicolons. Keep it as the last response unit.
-            points, start, stop, data_format, byte_order, storage, error = response.split(";", 6)
+            points, start, stop, data_format, byte_order, storage, scale, error = response.split(";", 7)
             grid = self._parse_integer(points, "sweep point count", minimum=2), float(start), float(stop)
         except ValueError as exc:
             raise DeviceError(f"Anritsu returned invalid grouped Live readback: {response!r}.") from exc
         self._check_scpi_errors(session, context, first_response=error)
         self._assert_live_storage_off(storage)
+        self._assert_log_trace_scale(scale)
         return grid, (data_format.strip().upper(), byte_order.strip().upper())
+
+    @staticmethod
+    def _assert_log_trace_scale(scale: str) -> None:
+        # TRAC? returns dBm in Log scale and normalized voltage in Linear scale.
+        if scale.strip().upper() != "LOG":
+            raise DeviceError(f"Set the Anritsu amplitude axis to Log scale for dBm spectra (read {scale.strip()!r}).")
 
     @staticmethod
     def _assert_live_storage_off(mode: str) -> None:
@@ -1897,7 +1949,7 @@ class AnritsuAdapter(DeviceAdapter):
         return SpectrumTrace(
             frequencies_hz=frequencies,
             powers_dbm=values,
-            acquired_at_utc=datetime.now(timezone.utc),
+            acquired_at_utc=datetime.now(UTC),
             trace_name=trace,
             configuration_generation=self._configuration_generation,
         )
@@ -1921,6 +1973,7 @@ class AnritsuAdapter(DeviceAdapter):
         prepare_ascii: bool = False,
     ) -> SpectrumTrace:
         try:
+            AnritsuAdapter._assert_log_trace_scale(session.query(_VERTICAL_SCALE_QUERY))
             start_before = float(session.query("FREQ:STAR?"))
             stop_before = float(session.query("FREQ:STOP?"))
             points = AnritsuAdapter._parse_integer(session.query("SWE:POIN?"), "sweep point count", minimum=2)
@@ -1936,6 +1989,7 @@ class AnritsuAdapter(DeviceAdapter):
             AnritsuAdapter._check_scpi_errors(session, "ASCII FORM ASC / TRAC? " + trace)
             values = tuple(float(item) for item in raw.split(",") if item.strip())
             # Read the axis again after the trace transfer to guarantee temporal coherence
+            AnritsuAdapter._assert_log_trace_scale(session.query(_VERTICAL_SCALE_QUERY))
             start_after = float(session.query("FREQ:STAR?"))
             stop_after = float(session.query("FREQ:STOP?"))
             points_after = AnritsuAdapter._parse_integer(session.query("SWE:POIN?"), "sweep point count", minimum=2)
@@ -1972,6 +2026,6 @@ class AnritsuAdapter(DeviceAdapter):
         return SpectrumTrace(
             frequencies_hz=tuple(start + index * step for index in range(points)),
             powers_dbm=values,
-            acquired_at_utc=datetime.now(timezone.utc),
+            acquired_at_utc=datetime.now(UTC),
             trace_name=trace,
         )

@@ -556,6 +556,7 @@ class _CorrectionWorker(QObject):
             sweep_count=average.count, started_at_s=started.timestamp(), completed_at_s=completed.timestamp(),
             reference_state=request.reference_state, averaging_source="instrument",
             nominal_sweep_time_s=average.nominal_sweep_time_s,
+            instrument_average=trace.instrument_average,
         )
         profile = replace(profile, profile_id=profile.content_hash)
         BackgroundProfileHdf5Store.save(

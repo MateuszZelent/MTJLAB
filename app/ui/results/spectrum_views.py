@@ -12,7 +12,14 @@ from app.spectrum.display_model import SpectrumDisplayTrace
 from app.spectrum.processing import REFERENCE_OPERATIONS
 
 from .baseline_controls import BaselineSampleCombo, baseline_sample_label
-from .processing import RecordedBaselineEvidence, ResultProcessing, ResultSpectrumProcessor
+from .processing import (
+    ANRITSU_MEAN_HISTORY_MESSAGE,
+    RecordedBaselineEvidence,
+    ResultProcessing,
+    ResultSpectrumProcessor,
+    recorded_spectrum_label,
+    recorded_spectrum_provenance,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,28 +68,32 @@ class SpectrumViewPayload:
     baselines: tuple = ()
 
 
-def _build_view(session, checkpoint, frequencies, values, unit, points, processing, view, cancelled):
+def _build_view(session, checkpoint, frequencies, values, unit, points, processing, view, cancelled, *, trace_name=""):
     def check():
         if cancelled is not None and cancelled():
             raise InterruptedError("Result comparison cancelled.")
     check()
     traces, notes, baselines = [], [], []
+    point = next((item for item in points if item.index == checkpoint), None)
+    recorded_label = recorded_spectrum_label(point, "Raw", trace_name=trace_name)
+    recorded_provenance = recorded_spectrum_provenance(point, trace_name=trace_name)
+
     def add(key, label, result, operation):
         baselines.extend(baseline for baseline in result.baselines if baseline not in baselines)
         notes.extend(note for note in result.notes if note not in notes)
         if key in {"background_difference", "reference_difference"}:
             notes.append(result.method)
         traces.append(SpectrumDisplayTrace(key, label, result.frequencies_hz, result.values,
-                                          result.unit, checkpoint, (result.method, operation)))
+                                          result.unit, checkpoint, (*recorded_provenance, result.method, operation)))
     if view.show_analysis and not view.quick_comparison:
         processor = ResultSpectrumProcessor(session.path, processing, points, reader=session, cancelled=cancelled)
-        add("analysis", "Analysis" if processing.active else "Raw",
-            processor.process(checkpoint, frequencies, values, unit), processing.math_operation)
+        add("analysis", "Analysis" if processing.active else recorded_label,
+            processor.process(checkpoint, frequencies, values, unit, trace_name=trace_name), processing.math_operation)
     if view.show_raw and not view.relative_reference:
-        traces.append(SpectrumDisplayTrace("raw", "Raw", tuple(frequencies), tuple(values), unit, checkpoint, ("recorded raw",)))
+        traces.append(SpectrumDisplayTrace("raw", recorded_label, tuple(frequencies), tuple(values), unit, checkpoint, recorded_provenance))
     for enabled, key, index, sweep, operation, label in (
-        (view.show_background and not view.relative_reference, "background_difference", view.background_index, view.background_sweep, "subtract_power_signed", "Raw − background"),
-        (view.show_reference, "reference_difference", view.reference_index, view.reference_sweep, view.reference_operation, "Raw − reference"),
+        (view.show_background and not view.relative_reference, "background_difference", view.background_index, view.background_sweep, "subtract_power_signed", f"{recorded_label} − background"),
+        (view.show_reference, "reference_difference", view.reference_index, view.reference_sweep, view.reference_operation, f"{recorded_label} − reference"),
     ):
         if not enabled:
             continue
@@ -92,7 +103,7 @@ def _build_view(session, checkpoint, frequencies, values, unit, points, processi
                  else ResultProcessing(operation, index, reference_sweep=sweep))
         processor = ResultSpectrumProcessor(session.path, state, points,
                                             reader=session, cancelled=cancelled)
-        add(key, label, processor.process(checkpoint, frequencies, values, unit), state.math_operation)
+        add(key, label, processor.process(checkpoint, frequencies, values, unit, trace_name=trace_name), state.math_operation)
     for purpose, enabled, index, sweep, operation in (
         ("background", view.show_background_spectrum, view.background_index, view.background_sweep, "subtract_power_signed"),
         ("reference", view.show_reference_spectrum, view.reference_index, view.reference_sweep, "subtract_reference_signed"),
@@ -112,7 +123,7 @@ def _build_view(session, checkpoint, frequencies, values, unit, points, processi
             reference.frequencies_hz, reference.powers_dbm, "dBm", checkpoint,
             (f"Recorded {purpose} {reference.index} · {baseline_sample_label(reference)}",)))
     if not traces:
-        traces.append(SpectrumDisplayTrace("raw", "Raw", tuple(frequencies), tuple(values), unit, checkpoint, ("recorded raw",)))
+        traces.append(SpectrumDisplayTrace("raw", recorded_label, tuple(frequencies), tuple(values), unit, checkpoint, recorded_provenance))
     units = {trace.unit for trace in traces}
     target_unit = view.unit
     if view.relative_reference:
@@ -136,10 +147,12 @@ def read_private_view(session, point, processing, view, *, cancelled=None):
     if trace is None:
         raise ValueError("No raw spectrum at this checkpoint.")
     return _build_view(session, point.index, trace.frequencies_hz, trace.powers_dbm, "dBm",
-                       (point,), processing, view, cancelled)
+                       (point,), processing, view, cancelled, trace_name=trace.trace_name)
 
 
 def read_public_view(session, spectrum, trace_index, points, processing, view, *, cancelled=None):
+    if spectrum.role == "spectrum_processed":
+        raise ValueError("Choose the recorded spectrum row for comparisons. This row already contains derived values.")
     return _build_view(session, spectrum.checkpoint, spectrum.x_values,
                        spectrum.traces[trace_index].values, spectrum.y_unit, points,
                        processing, view, cancelled)
@@ -153,6 +166,8 @@ def read_baseline_view(reference, processing, view, *, cancelled=None):
         raise ValueError("Choose a measurement checkpoint for background/reference correction and comparisons.")
     if processing.parameters.temporal_average_frames > 1:
         raise ValueError("This is an already averaged recorded baseline. Same-point power averaging needs a measurement checkpoint's individual source sweeps.")
+    if "emi_reject" in processing.modes and getattr(reference, "averaging_source", None) == "instrument":
+        raise ValueError(ANRITSU_MEAN_HISTORY_MESSAGE)
     if cancelled is not None and cancelled():
         raise InterruptedError("Baseline view cancelled.")
     cleaned, _ = SpectrumPreviewProcessor().process(reference.powers_dbm,

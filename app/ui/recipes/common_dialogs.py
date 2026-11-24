@@ -15,6 +15,10 @@ from qfluentwidgets import (
     PrimaryPushButton, PushButton, SpinBox, StrongBodyLabel, ScrollArea,
 )
 
+from app.devices.anritsu_ms2830a import (
+    ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS,
+    ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS,
+)
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import (
     DIMENSION_CURRENT,
@@ -743,6 +747,18 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         node: RecipeNode,
         parent: QWidget | None = None,
     ) -> None:
+        instrument_targets = [field for field in ANRITSU_HARDWARE_AVERAGE_FIELDS if field in node.data]
+        if len(instrument_targets) > 1:
+            raise ConfigurationError("Choose one Anritsu averaging target in the recipe YAML.")
+        instrument_count = node.data.get("instrument_average_count", 50)
+        if type(instrument_count) is not int or not (
+            ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS <= instrument_count <= ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS
+        ):
+            raise ConfigurationError(
+                f"Anritsu sweep count {instrument_count!r} must be an integer from "
+                f"{ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS} to {ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS}. "
+                "Correct the count in the recipe YAML."
+            )
         super().__init__(parent)
         self.setProperty("stationSurface", "page")
         self._reference_only = node.type == "acquire_reference"
@@ -773,7 +789,7 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         self.acquisition_mode.addItem("PyLab triggered sweeps", userData="single_sweep")
         self.acquisition_mode.setAccessibleName("Averaging method")
         mode = node.data.get("acquisition_mode", "single_sweep")
-        if any(field in node.data for field in ANRITSU_HARDWARE_AVERAGE_FIELDS):
+        if instrument_targets:
             mode = "instrument_average"
         mode_index = self.acquisition_mode.findData(mode)
         self.acquisition_mode.setCurrentIndex(
@@ -791,8 +807,10 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         )
         form.addRow("Averaging target", self.instrument_average_target)
         self.instrument_average_count = SpinBox(surface)
-        self.instrument_average_count.setRange(2, 9999)
-        self.instrument_average_count.setValue(int(node.data.get("instrument_average_count", 50)))
+        self.instrument_average_count.setRange(
+            ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS, ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS,
+        )
+        self.instrument_average_count.setValue(instrument_count)
         self.instrument_average_count.setAccessibleName("Anritsu device sweep count")
         self.instrument_average_count.setToolTip("Number of complete sweeps averaged by the analyzer.")
         form.addRow("Device sweeps", self.instrument_average_count)
@@ -817,9 +835,8 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         self.spectrum_storage = ComboBox(surface)
         self.spectrum_storage.addItem("Average + all RAW frames", userData=True)
         self.spectrum_storage.addItem("Average only", userData=False)
-        self.spectrum_storage.setCurrentIndex(
-            self.spectrum_storage.findData(node.data.get("store_source_spectra", True))
-        )
+        retain_sources = True if mode == "instrument_average" else node.data.get("store_source_spectra", True)
+        self.spectrum_storage.setCurrentIndex(self.spectrum_storage.findData(retain_sources))
         self.spectrum_storage.setAccessibleName("Spectrum storage policy")
         self.spectrum_storage.setToolTip("Choose whether to retain the individual input frames alongside the mean in HDF5.")
         form.addRow("Save to HDF5", self.spectrum_storage)
@@ -829,7 +846,8 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         self.reference_purpose = ComboBox(surface)
         self.reference_purpose.addItem("Reference", userData="reference")
         self.reference_purpose.addItem("Background", userData="background")
-        self.reference_purpose.setCurrentIndex(1 if node.data.get("purpose") == "background" else 0)
+        purpose = node.data.get("purpose", node.data.get("file_kind", "reference"))
+        self.reference_purpose.setCurrentIndex(1 if purpose == "background" else 0)
         if self._reference_only:
             form.addRow("Minimum collection time", self.minimum_duration)
             form.addRow("Saved role", self.reference_purpose)
@@ -879,13 +897,11 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         self.cancel_button.clicked.connect(self.reject)
         layout.addLayout(footer)
         self.reference_operation.currentIndexChanged.connect(
-            self._operation_changed
+            self._reference_operation_changed
         )
         self.acquisition_mode.currentIndexChanged.connect(self._operation_changed)
         self.instrument_average_target.currentIndexChanged.connect(self._update_acquisition_controls)
         self._operation_changed()
-        if operation != "none" and not any(box.isChecked() for box in self.processing_options.filters.values()):
-            self.store_processed.setChecked(bool(node.data.get("store_processed", True)))
 
     def _update_acquisition_controls(self) -> None:
         acquiring = not self._reference_only or self.processing_options.source.currentData() == "acquire"
@@ -924,16 +940,21 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             if hardware_average else "EMI lines requires dB/dBm and 3 to 24 sweeps within this point."
         )
         filters = any(box.isChecked() for box in self.processing_options.filters.values())
-        processed = self.reference_operation.currentData() != "none" or filters
-        self.store_processed.setEnabled(processed)
-        if processed:
-            self.store_processed.setChecked(True)
+        operation_selected = operation != "none"
+        self.store_processed.setEnabled(operation_selected and not filters)
         if filters:
-            self.store_processed.setEnabled(False)
-        if not processed:
+            self.store_processed.setChecked(True)
+        elif not operation_selected:
             self.store_processed.setChecked(False)
 
+    def _reference_operation_changed(self) -> None:
+        self.store_processed.setChecked(self.reference_operation.currentData() != "none")
+        self._operation_changed()
+
     def node_fields(self) -> dict[str, object]:
+        options = self.processing_options.node_fields()
+        if options.get("source_file"):
+            return {**options, "purpose": self.reference_purpose.currentData()}
         instrument_average = self.acquisition_mode.currentData() == "instrument_average"
         delay_text = "0 s" if instrument_average else self.inter_sweep_delay.text().strip()
         delay = parse_quantity(delay_text, DIMENSION_TIME).si_value
@@ -944,12 +965,12 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             "average_count": 1 if instrument_average else self.average_count.value(),
             "inter_sweep_delay": delay_text,
         }
-        fields.update(self.processing_options.node_fields())
-        if self.acquisition_mode.currentData() == "continuous_live" and not fields.get("source_file"):
+        fields.update(options)
+        if self.acquisition_mode.currentData() == "continuous_live":
             fields["acquisition_mode"] = "continuous_live"
-        if self.spectrum_storage.currentData() is False and not fields.get("source_file"):
+        if self.spectrum_storage.currentData() is False:
             fields["store_source_spectra"] = False
-        if instrument_average and not fields.get("source_file"):
+        if instrument_average:
             if self.instrument_average_target.currentData() == "count":
                 fields["instrument_average_count"] = self.instrument_average_count.value()
             else:
@@ -960,13 +981,13 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             fields["store_source_spectra"] = False
         if self._reference_only:
             fields["purpose"] = self.reference_purpose.currentData()
-            duration = 0.0 if instrument_average else parse_quantity(self.minimum_duration.text().strip(), DIMENSION_TIME).si_value
-            if not 0 <= duration <= 3600:
-                raise ValueError("Minimum collection time must be in 0..3600 s.")
-            if duration:
-                if fields.get("source_file"):
-                    raise ValueError("Minimum collection time requires acquisition, not a file import.")
-                fields["minimum_duration"] = self.minimum_duration.text().strip()
+            if not instrument_average:
+                duration_text = self.minimum_duration.text().strip()
+                duration = parse_quantity(duration_text, DIMENSION_TIME).si_value
+                if not 0 <= duration <= 3600:
+                    raise ValueError("Minimum collection time must be in 0..3600 s.")
+                if duration:
+                    fields["minimum_duration"] = duration_text
         if not self._reference_only:
             if self.processing_options.filters["emi_reject"].isChecked():
                 if instrument_average:

@@ -100,7 +100,8 @@ def test_shipped_moke_analyzer_recipe(tmp_path, monkeypatch):
     enable_waits = [elapsed for duration, elapsed in waits if duration == 5]
     assert len(enable_waits) == 1 and enable_waits[0] >= 5
     assert output_events[-1][0:2] == ("A", False)
-    path, = tmp_path.glob("*.h5")
+    path = Path(finished[0]["path"])
+    assert path.is_relative_to(tmp_path)
     with h5py.File(path, "r") as file:
         assert file["run"].attrs["status"] == "completed"
         assert len(file["spectra"]) == 10

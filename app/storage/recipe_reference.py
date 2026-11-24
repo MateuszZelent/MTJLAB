@@ -2,6 +2,7 @@
 
 import hashlib
 import math
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import numpy as np
 
 from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
 from app.domain.errors import ExecutionError
+from app.domain.spectrum_averaging import InstrumentAverageProvenance, legacy_instrument_average_count
 from app.spectrum.processing import frequency_grids_match
 
 from .background_profile_store import BackgroundProfileHdf5Store
@@ -32,6 +34,7 @@ def load_recipe_reference(path, kind):
             tuple(10 * np.log10(profile.mean_w) + 30),
             datetime.fromtimestamp(profile.completed_at_s, UTC),
             "TRAC1",
+            instrument_average=profile.instrument_average,
         )
         return trace, profile.sweep_count, (context, profile)
     if kind == "reference":
@@ -42,8 +45,27 @@ def load_recipe_reference(path, kind):
             )
         if reference.vbw_filter_mode is None:
             raise ExecutionError("Imported reference lacks verified VID/POW metadata; acquire a new reference.")
-        return reference.trace, reference.average_count, reference
+        trace = reference.trace
+        # Early manual Lin Average files embedded the count in an otherwise
+        # qualified Trace A name. Do not infer nominal timing from that label.
+        if legacy_instrument_average_count(trace.trace_name) == reference.average_count:
+            trace = replace(trace, trace_name="TRAC1")
+        return trace, reference.average_count, reference
     raise ExecutionError("Reference file kind must be reference or background.")
+
+
+def recipe_reference_averaging(evidence) -> InstrumentAverageProvenance | None:
+    if isinstance(evidence, tuple):
+        _context, profile = evidence
+        return profile.instrument_average
+    return evidence.instrument_average
+
+
+def recipe_reference_uses_instrument_average(evidence) -> bool:
+    if recipe_reference_averaging(evidence) is not None:
+        return True
+    return (not isinstance(evidence, tuple)
+            and legacy_instrument_average_count(evidence.trace.trace_name) == evidence.average_count)
 
 
 def verify_recipe_reference(evidence, full, advanced, device_idn, fingerprint):

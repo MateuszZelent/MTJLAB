@@ -15,9 +15,12 @@ from PySide6.QtWidgets import QApplication, QDialog
 
 from app.devices.anritsu_ms2830a.ui.analysis_settings_dialog import SpectrumAnalysisSettingsDialog
 from app.devices.anritsu_ms2830a.ui.recipe_dialog import AnritsuNodeEditorDialog
+from app.domain.errors import ConfigurationError
 from app.recipes import RecipeNode, parse_recipe_text
+from app.recipes.semantic_tree import normalize_recipe_tree
 from app.ui.design_system import apply_application_theme
 from app.ui.execution.page import RunMonitorPage
+from app.ui.measurement_tree.model import MeasurementTreeModel
 from app.ui.recipes.common_dialogs import AnritsuAcquisitionEditorDialog
 from app.ui.recipes.page import RecipePage
 from tests.helpers import simulation_settings
@@ -100,6 +103,13 @@ def test_rendered_sweep_editor_selects_and_preserves_hardware_average(
         assert "instrument_average_duration" not in count_fields
         if kind == "acquire_reference":
             assert count_fields["purpose"] == "background"
+        recipe = parse_recipe_text(yaml.safe_dump({
+            "schema_version": 1, "name": "count-average",
+            "root": {"id": "capture", "type": kind, **count_fields},
+        }))
+        tree = normalize_recipe_tree(recipe, {})
+        model = MeasurementTreeModel(tree)
+        assert "64 sweeps" in model.value_for("capture")
 
         managed.node_role.setCurrentIndex(managed.node_role.findData(kind))
         managed.load_acquisition_options(count_fields)
@@ -173,9 +183,19 @@ def test_storage_choice_round_trips_independently_of_average_count(application, 
         application.processEvents()
 
 
+@pytest.mark.parametrize("fields", [
+    {"instrument_average_count": 2.5},
+    {"instrument_average_count": 10000},
+    {"instrument_average_count": 5, "instrument_average_duration": "1 s"},
+])
+def test_editor_rejects_invalid_saved_hardware_targets_instead_of_replacing_them(application, fields):
+    with pytest.raises(ConfigurationError, match="sweep count|averaging target"):
+        AnritsuAcquisitionEditorDialog(RecipeNode("acquisition", "acquire_spectrum", fields))
+
+
 @pytest.mark.parametrize("theme", ["light", "dark"])
 @pytest.mark.parametrize("reference", [False, True])
-def test_shown_editor_geometry_and_roundtrip(application, theme, reference):
+def test_shown_editor_geometry_and_roundtrip(application, tmp_path, theme, reference):
     apply_application_theme(application, theme)
     fields = (
         {"source_file": "measurements/background.h5", "file_kind": "background"}
@@ -206,10 +226,8 @@ def test_shown_editor_geometry_and_roundtrip(application, theme, reference):
                 contained(dialog, options.filters_row)
                 assert not options.filters["emi_reject"].isEnabled()
                 assert dialog.store_processed.isChecked()
-            folder = Path("artifacts/sweeps-spectrum")
-            folder.mkdir(parents=True, exist_ok=True)
             assert dialog.grab().save(
-                str(folder / f"{'reference' if reference else 'spectrum'}-{theme}-{width}.png")
+                str(tmp_path / f"{'reference' if reference else 'spectrum'}-{theme}-{width}.png")
             )
         saved = dialog.node_fields()
         second = AnritsuAcquisitionEditorDialog(RecipeNode(node.id, node.type, saved))
@@ -229,7 +247,7 @@ def test_shown_editor_geometry_and_roundtrip(application, theme, reference):
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
-def test_timed_background_editor_preserves_duration_and_purpose(application, theme):
+def test_timed_background_editor_preserves_duration_and_purpose(application, tmp_path, theme):
     apply_application_theme(application, theme)
     fields = {"average_count": 30, "minimum_duration": "30 s", "purpose": "background"}
     dialog = AnritsuAcquisitionEditorDialog(RecipeNode("bg", "acquire_reference", fields))
@@ -242,9 +260,7 @@ def test_timed_background_editor_preserves_duration_and_purpose(application, the
         values = dialog.node_fields()
         assert values["minimum_duration"] == "30 s" and values["purpose"] == "background"
         assert values["average_count"] == 30
-        directory = Path("docs/audits/2026-10-05-requested-sweep")
-        directory.mkdir(parents=True, exist_ok=True)
-        assert dialog.grab().save(str(directory / f"background-editor-{theme}.png"))
+        assert dialog.grab().save(str(tmp_path / f"background-editor-{theme}.png"))
         managed = AnritsuNodeEditorDialog(simulation_settings())
         try:
             managed.node_role.setCurrentIndex(managed.node_role.findData("acquire_reference"))
@@ -260,7 +276,42 @@ def test_timed_background_editor_preserves_duration_and_purpose(application, the
         application.processEvents()
 
 
-def test_managed_editor_opens_shared_options_and_rebuild_preserves_them(application):
+def test_import_replaces_hidden_acquisition_settings_and_retains_the_local_draft(application):
+    node = RecipeNode("reference", "acquire_reference", {
+        "acquisition_mode": "continuous_live",
+        "average_count": 24,
+        "minimum_duration": "500 ms",
+        "inter_sweep_delay": "250 ms",
+        "store_source_spectra": False,
+        "purpose": "background",
+    })
+    dialog = AnritsuAcquisitionEditorDialog(node)
+    try:
+        dialog.resize(760, 640)
+        dialog.show()
+        source = dialog.processing_options.source
+        source.setCurrentIndex(source.findData("background"))
+        dialog.processing_options.path.setText("background.h5")
+        application.processEvents()
+        contained(dialog, dialog.processing_options.path)
+        contained(dialog, dialog.apply_button)
+        assert not dialog.minimum_duration.isVisible()
+        assert not dialog.inter_sweep_delay.isVisible()
+        assert dialog.node_fields() == {
+            "purpose": "background", "source_file": "background.h5", "file_kind": "background",
+        }
+        source.setCurrentIndex(source.findData("acquire"))
+        application.processEvents()
+        contained(dialog, dialog.minimum_duration)
+        fields = dialog.node_fields()
+        assert fields == {**node.data, "trace": "TRAC1"}
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        application.processEvents()
+
+
+def test_managed_editor_opens_shared_options_and_rebuild_preserves_them(application, tmp_path):
     dialog = AnritsuNodeEditorDialog(simulation_settings())
     try:
         dialog.node_role.setCurrentIndex(dialog.node_role.findData("acquire_spectrum"))
@@ -284,7 +335,7 @@ def test_managed_editor_opens_shared_options_and_rebuild_preserves_them(applicat
         dialog.show()
         application.processEvents()
         contained(dialog, dialog.acquisition_options_button)
-        assert dialog.grab().save("artifacts/sweeps-spectrum/managed-analyzer.png")
+        assert dialog.grab().save(str(tmp_path / "managed-analyzer.png"))
         node = RecipeNode("anritsu", "sequence", {"device_module": "anritsu"})
         kwargs = {
             "parameter_actions": [],
@@ -306,6 +357,46 @@ def test_managed_editor_opens_shared_options_and_rebuild_preserves_them(applicat
     finally:
         dialog.close()
         dialog.deleteLater()
+
+
+def test_managed_reopen_keeps_legacy_acquisition_id_order_and_storage_choice():
+    recipe = parse_recipe_text("""
+schema_version: 1
+name: managed-roundtrip
+root:
+  id: analyzer
+  type: sequence
+  device_module: anritsu
+  post_configuration_operation: acquire_spectrum
+  children:
+    - {id: capture, type: acquire_spectrum, instrument_average_count: 64, reference_operation: difference_db, store_processed: false}
+    - {id: settle, type: wait, duration: '250 ms'}
+""")
+    updated = RecipePage._configured_anritsu_node(
+        recipe.root, parameter_actions=[], acquire_single=False, trace="TRAC1",
+        post_configuration_operation="acquire_spectrum", acquisition_reference_operation="difference_db",
+    )
+    assert updated["managed_acquisition_id"] == "capture"
+    assert [child["id"] for child in updated["children"]] == ["capture", "settle"]
+    capture = updated["children"][0]
+    assert capture["instrument_average_count"] == 64
+    assert capture["store_processed"] is False
+
+
+def test_sweep_tree_names_pylab_triggering_and_saved_sources():
+    recipe = parse_recipe_text("""
+schema_version: 1
+name: acquisition-labels
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: load, type: acquire_reference, source_file: background.h5, file_kind: background}
+    - {id: pylab, type: acquire_spectrum, average_count: 3}
+""")
+    tree = normalize_recipe_tree(recipe, {})
+    assert tree.by_id["load"].label == "Load saved background"
+    assert tree.by_id["pylab"].label == "Acquire spectrum · PyLab triggered sweeps"
 
 
 def test_recipe_parameters_do_not_mix_average_across_points(application):
@@ -347,6 +438,31 @@ def test_execution_preview_prefers_raw_minus_reference_and_falls_back_to_current
         page.update_spectrum_preview({**source, "preview_kind": "reference"})
         assert page.spectrum_preview._y_unit == "dBm"
         assert list(page.spectrum_preview._traces) == ["Stored reference"]
+    finally:
+        page.close()
+        page.deleteLater()
+        application.processEvents()
+
+
+def test_execution_preview_identifies_the_anritsu_mean_and_count(application):
+    page = RunMonitorPage()
+    try:
+        page.resize(1280, 800)
+        page.show()
+        application.processEvents()
+        preview = {
+            "frequency_hz": (1e6, 2e6, 3e6),
+            "power_dbm": (-60.0, -50.0, -40.0),
+            "raw_minus_reference_db": (-2.0, 0.0, 3.0),
+            "instrument_average": {"sweep_count": 50},
+        }
+        page.update_spectrum_preview(preview)
+        contained(page, page.spectrum_preview)
+        assert "Anritsu average − Reference" in page.spectrum_preview._traces
+        assert "50 sweeps" in page.spectrum_preview.plot.plotItem.titleLabel.text
+        page.update_spectrum_preview({**preview, "preview_kind": "reference"})
+        assert "Anritsu reference average" in page.spectrum_preview._traces
+        assert "50 sweeps" in page.spectrum_preview.plot.plotItem.titleLabel.text
     finally:
         page.close()
         page.deleteLater()
@@ -661,7 +777,6 @@ root:
 def test_sweeps_page_shows_processing_recipe_at_desktop_and_narrow_sizes(
     application, tmp_path, monkeypatch
 ):
-    artifact_dir = Path("artifacts/sweeps-spectrum").resolve()
     source = Path("recipes/example_spectrum_background_filters.yml").read_text(encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     page = RecipePage(simulation_settings())
@@ -678,7 +793,7 @@ def test_sweeps_page_shows_processing_recipe_at_desktop_and_narrow_sizes(
                 application.processEvents()
             assert page.workspace_splitter.width() > 400
             assert page.workspace_splitter.height() > 180
-            assert page.grab().save(str(artifact_dir / f"sweeps-{theme}-{width}.png"))
+            assert page.grab().save(str(tmp_path / f"sweeps-{theme}-{width}.png"))
     finally:
         page.close()
         page.deleteLater()

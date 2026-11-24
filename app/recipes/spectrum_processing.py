@@ -8,7 +8,7 @@ from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto, par
 from app.spectrum.analysis import SpectrumAnalysisParameters
 
 REFERENCE_OPERATIONS = (
-    ("None — raw spectrum", "none"),
+    ("None — unprocessed spectrum", "none"),
     ("Remove background — signed W", "subtract_power_signed"),
     ("Difference in dB", "difference_db"),
     ("Linear ratio", "ratio_linear"),
@@ -41,7 +41,17 @@ def acquisition_summary(fields, *, reference_only=False):
         return (
             f"Load {fields.get('file_kind', 'reference')} · {Path(str(fields['source_file'])).name}"
         )
-    stages = [f"{fields.get('average_count', 1)} complete sweeps"]
+    if "instrument_average_count" in fields:
+        averaging = f"{fields['instrument_average_count']} sweeps"
+    elif "instrument_average_duration" in fields:
+        averaging = f"~{fields['instrument_average_duration']}"
+    else:
+        count = fields.get("average_count", 1)
+        if fields.get("acquisition_mode") == "continuous_live":
+            averaging = f"{count} Live {'frame' if count == 1 else 'frames'}"
+        else:
+            averaging = f"{count} complete {'sweep' if count == 1 else 'sweeps'}"
+    stages = [averaging]
     if not reference_only:
         operation = str(fields.get("reference_operation", "none"))
         if operation != "none":

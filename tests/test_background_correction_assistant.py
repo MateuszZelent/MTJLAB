@@ -4,6 +4,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -134,17 +135,21 @@ def test_cancelled_background_does_not_start_corrected_live(setup):
     assert not page.correction_workspace.acquire_signal.isEnabled()
 
 
-@pytest.mark.parametrize("target_mode", ["frames", "seconds"])
-def test_instrument_background_saves_one_mean_and_enables_static_filter(setup, target_mode):
+@pytest.mark.parametrize("target_mode, theme, size", [
+    ("frames", "light", (620, 620)), ("seconds", "dark", (440, 420)),
+])
+def test_instrument_background_saves_one_mean_and_enables_static_filter(setup, tmp_path, target_mode, theme, size):
+    from app.spectrum.streaming_statistics import dbm_to_w
     from app.storage.background_profile_store import BackgroundProfileHdf5Store
     from app.storage.hdf5_reader import Hdf5RunReader
-    from app.spectrum.streaming_statistics import dbm_to_w
 
     app, page, requests, errors = setup
+    apply_application_theme(app, theme)
     page.resize(1280, 860)
     page.show()
     page.correction_controls.configure_background.click()
     dialog = page._background_assistant
+    dialog.resize(*size)
     controls = dialog.background_averaging
     controls.backend.setCurrentIndex(controls.backend.findData("instrument"))
     controls.target.mode.setCurrentIndex(controls.target.mode.findData(target_mode))
@@ -154,9 +159,14 @@ def test_instrument_background_saves_one_mean_and_enables_static_filter(setup, t
     assert controls.backend.isVisible()
     assert controls.target.isVisible() and not dialog.duration.isVisible()
     editor = controls.target.frames if target_mode == "frames" else controls.target.seconds
-    for widget in (controls.backend, editor, dialog.next):
+    viewport = dialog.form.parentWidget()
+    assert dialog.form.width() <= viewport.width()
+    for widget in (controls.backend, editor):
         assert widget.isVisible() and widget.height() >= 30
-        assert dialog.rect().contains(widget.mapTo(dialog, widget.rect().bottomRight()))
+        assert viewport.rect().contains(widget.mapTo(viewport, widget.rect().bottomRight()))
+    assert dialog.next.isVisible() and dialog.next.height() >= 30
+    assert dialog.rect().contains(dialog.next.mapTo(dialog, dialog.next.rect().bottomRight()))
+    assert dialog.grab().save(str(tmp_path / f"instrument-background-{theme}.png"))
 
     destination = dialog.reference_path
     dialog.next.click()
@@ -169,8 +179,13 @@ def test_instrument_background_saves_one_mean_and_enables_static_filter(setup, t
 
     _, profile = BackgroundProfileHdf5Store.load(destination)
     assert profile.averaging_source == "instrument"
-    assert profile.sweep_count == 6 if target_mode == "frames" else profile.sweep_count >= 2
     assert profile.nominal_sweep_time_s > 0
+    if target_mode == "frames":
+        assert profile.sweep_count == 6
+        assert profile.instrument_average.requested_sweep_count == 6
+    else:
+        assert profile.sweep_count * profile.nominal_sweep_time_s >= 1
+        assert profile.instrument_average.target_duration_s == 1
     assert profile.sample_variance_w2 is None and profile.mean_variance_w2 is None
     assert not profile.signal_free_qualified
     assert page.correction_workspace._profile.content_hash == profile.content_hash
@@ -183,7 +198,8 @@ def test_instrument_background_saves_one_mean_and_enables_static_filter(setup, t
     np.testing.assert_allclose(dbm_to_w(Hdf5RunReader.spectrum(destination, 0).powers_dbm), profile.mean_w)
 
 
-def test_late_instrument_background_is_discarded_after_cancel(setup):
+@pytest.mark.parametrize("stop", ["cancel", "abort"])
+def test_late_instrument_background_is_discarded_after_cancel(setup, stop):
     app, page, requests, errors = setup
     original_request = page._controller.call.side_effect
     held = []
@@ -203,7 +219,10 @@ def test_late_instrument_background_is_discarded_after_cancel(setup):
     dialog.next.click()
     wait_until(app, lambda: bool(held) or bool(errors))
     assert not errors, errors
-    dialog.reject()
+    if stop == "cancel":
+        dialog.reject()
+    else:
+        page.abort_button.click()
     assert page.correction_workspace.running
     assert not page.live.isEnabled()
 
@@ -214,6 +233,33 @@ def test_late_instrument_background_is_discarded_after_cancel(setup):
     assert page.correction_workspace._profile is None
     assert not page.cleanup_filters["background"].isChecked()
     assert "start_live" not in requests
+    if stop == "abort":
+        assert "abort_acquisition" in requests
+
+
+def test_stripes_requires_a_background_with_individual_sweeps(setup, tmp_path):
+    from app.storage.background_profile_store import BackgroundProfileHdf5Store
+    from tests.test_spectrum_correction_store import fixture_profile
+
+    app, page, requests, _errors = setup
+    context, pc_profile = fixture_profile()
+    mean = replace(pc_profile, sample_variance_w2=None, mean_variance_w2=None, signal_free_qualified=False,
+                   averaging_source="instrument", nominal_sweep_time_s=.1)
+    path = tmp_path / "instrument-mean.h5"
+    BackgroundProfileHdf5Store.save(path, context, mean)
+    page._open_background_setup(for_stripes=True)
+    dialog = page._background_assistant
+    dialog.background_source.setCurrentIndex(dialog.background_source.findData("record"))
+    app.processEvents()
+    assert not dialog.background_averaging.backend.isVisible()
+    assert dialog.duration.isVisible()
+    dialog.background_source.setCurrentIndex(dialog.background_source.findData("load"))
+    dialog.profile_path.setText(str(path))
+    dialog.next.click()
+    wait_until(app, lambda: dialog.phase == "setup")
+    assert "requires a background recorded with individual sweeps" in dialog.status.text()
+    assert page.correction_workspace._profile is None
+    assert not requests
 
 
 def test_fault_holds_workflow_until_archive_close_and_does_not_retry_failed_close(setup, monkeypatch):

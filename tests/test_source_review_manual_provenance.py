@@ -7,11 +7,12 @@ import pytest
 import h5py
 from PySide6.QtWidgets import QApplication
 
-from app.devices.anritsu_ms2830a import ReferenceSpectrum, SpectrumTrace
+from app.devices.anritsu_ms2830a import InstrumentAverageResult, ReferenceSpectrum, SpectrumTrace
 from app.devices.anritsu_ms2830a.ui.manual_save import ManualSpectrumSaveOptions
-from app.devices.anritsu_ms2830a.ui.page import AnritsuPage
+from app.devices.anritsu_ms2830a.ui.page import AnritsuPage, AnritsuPageState
 from app.domain.errors import ExecutionError
 from app.domain.manual_metadata import ManualMetadataValue
+from app.domain.spectrum_averaging import InstrumentAverageProvenance
 from app.storage import Hdf5RunReader, ManualSpectrumArchive, ManualSpectrumSaveMode
 from app.ui.results.page import ResultsPage
 from tests.helpers import loaded_settings
@@ -122,6 +123,47 @@ def test_each_capture_records_current_settings_identity_and_operator(page, tmp_p
     assert second["device_idn"]["anritsu"] == "SIM-TWO"
     assert second["operator_context"] == {"name": "second"}
     assert second["simulation"] is True
+
+
+def test_stopped_anritsu_average_saves_capture_and_reference_evidence(page, tmp_path):
+    page._set_page_state(AnritsuPageState.LIVE)
+    page._timer.start(10_000)
+    page.set_manual_archive_context(simulation=True)
+    path = tmp_path / "instrument-mean.h5"
+    page._apply_manual_save_options(ManualSpectrumSaveOptions(
+        path, ManualSpectrumSaveMode.APPEND, "none", (), "averaged"))
+    controls = page.live_average_target
+    controls.backend.setCurrentIndex(controls.backend.findData("instrument"))
+    controls.mode.setCurrentIndex(controls.mode.findData("seconds"))
+    controls.seconds.setValue(1)
+    page.start_live_average.click()
+    op, target = page._controller.call.call_args.args
+    assert op == "instrument_average_live" and target.duration_s == 1
+    evidence = InstrumentAverageProvenance(5, .2, target_duration_s=1, elapsed_s=1.15)
+    mean = SpectrumTrace((1e6, 2e6, 3e6), (-71., -67., -66.), datetime.now(timezone.utc),
+                         "TRAC1_ANRITSU_LAV5", instrument_average=evidence)
+    page._result(op, InstrumentAverageResult(mean, 5, .2))
+    page.toggle_live()
+    page._result("stop_live", None)
+    page.capture_current_reference()
+
+    assert page.save_manual_spectrum.isEnabled()
+    page.save_manual_spectrum.click()
+    assert wait_for_ui(lambda: page._manual_archive_thread is None, timeout_ms=30_000)
+    point, = Hdf5RunReader.points(path)
+    assert point.metadata["instrument_average"] == {
+        "trace_storage_mode": "LAV",
+        "sweep_count": 5,
+        "sweep_time_s": .2,
+        "nominal_duration_s": 1.,
+        "target_duration_s": 1,
+        "elapsed_s": 1.15,
+    }
+    saved = Hdf5RunReader.spectrum(path, 0)
+    assert saved.powers_dbm == mean.powers_dbm
+    assert "Anritsu average" in saved.saved_display.traces[0].label
+    reference, = Hdf5RunReader.references(path)
+    assert reference.instrument_average == evidence
 
 
 @pytest.mark.parametrize("view", ["overlay", "hidden", "absolute"])

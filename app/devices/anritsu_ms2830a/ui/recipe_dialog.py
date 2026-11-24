@@ -194,6 +194,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         note.setWordWrap(True)
         right_layout.addWidget(note, operation_row + 3, 0, 1, 2)
         self._acquisition_options = {}
+        self.reference_operation.currentIndexChanged.connect(self._clear_processed_storage_choice)
         self.acquisition_options_button = PushButton("Acquisition options…", right)
         self.acquisition_options_button.clicked.connect(self._edit_acquisition_options)
         right_layout.addWidget(self.acquisition_options_button, 5, 0, 1, 2)
@@ -255,12 +256,13 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         self.acquisition_options_button.setText(
             "Spectrum acquisition options…" if spectrum else "Reference / background acquisition…"
         )
-        for widget in (self.acquisition_hint, self.trace_label, self.trace):
-            widget.setVisible(acquisition)
         self.reference_operation_label.setVisible(spectrum)
         self.reference_operation.setVisible(spectrum)
         options = self.acquisition_options()
         imported = bool(options.get("source_file"))
+        self.acquisition_hint.setVisible(acquisition)
+        self.trace_label.setVisible(acquisition and not imported)
+        self.trace.setVisible(acquisition and not imported)
         hardware_average = any(field in options for field in ANRITSU_HARDWARE_AVERAGE_FIELDS)
         pylab_average = acquisition and not imported and not hardware_average
         self.average_count.setVisible(pylab_average)
@@ -303,17 +305,28 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         keys = ANRITSU_ACQUISITION_OPTION_FIELDS.get(self.selected_node_role(), ())
         return {key: value for key, value in self._acquisition_options.items() if key in keys}
 
+    def _clear_processed_storage_choice(self) -> None:
+        self._acquisition_options.pop("store_processed", None)
+
     def _edit_acquisition_options(self):
         from app.ui.recipes.common_dialogs import AnritsuAcquisitionEditorDialog
 
         fields = {**self.acquisition_options(), "trace": self.trace.currentText(),
                   "average_count": self.average_count.value(), "reference_operation": self.reference_operation.currentData()}
-        dialog = AnritsuAcquisitionEditorDialog(RecipeNode("acquisition-options", self.selected_node_role(), fields), self)
+        try:
+            dialog = AnritsuAcquisitionEditorDialog(
+                RecipeNode("acquisition-options", self.selected_node_role(), fields), self,
+            )
+        except (ConfigurationError, TypeError, ValueError) as exc:
+            QMessageBox.warning(self, "Spectrum acquisition", str(exc))
+            return
         if dialog.exec() == QDialog.DialogCode.Accepted:
             values = dialog.node_fields()
+            if "average_count" in values:
+                self.average_count.setValue(values["average_count"])
+            if "reference_operation" in values:
+                self.reference_operation.setCurrentIndex(self.reference_operation.findData(values["reference_operation"]))
             self.load_acquisition_options(values)
-            self.average_count.setValue(values["average_count"])
-            self.reference_operation.setCurrentIndex(self.reference_operation.findData(values.get("reference_operation", "none")))
         dialog.deleteLater()
 
     def resizeEvent(self, event: object) -> None:

@@ -6,7 +6,7 @@ import csv
 import json
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -65,7 +65,7 @@ from app.ui.results.heatmap_coordinates import (
 from app.ui.results.heatmap_ranges import HeatmapRangeDialog
 from app.ui.results.map_controls import MapProcessingControls
 from app.ui.results.map_processing import MapProcessing, analyse_map
-from app.ui.results.processing import ResultSpectrumProcessor
+from app.ui.results.processing import ResultSpectrumProcessor, recorded_instrument_average
 from app.ui.results.processing_controls import ResultProcessingControls
 from app.ui.results.processing_overlay import ResultProcessingOverlay
 from app.ui.results.state_card import ResultsStateCard
@@ -180,6 +180,7 @@ class _HeatmapPayload:
     line_input_dbm: np.ndarray | None = None
     line_input_is_raw: bool = True
     corrected_frequencies_hz: tuple[float, ...] = ()
+    instrument_averages: dict[int, dict] = field(default_factory=dict)
 
 
 def _process_map_payload(payload, state, frequency_axis, *, cancelled=None):
@@ -225,11 +226,22 @@ def _read_heatmap_payload(
 ) -> _HeatmapPayload:
     """Read the exact requested physical-coordinate plane."""
 
+    processed_row = dict(row.definition).get("lab control role") == "spectrum_processed"
+    if processing and processing.active and processed_row:
+        raise ValueError("Choose the recorded spectrum row for post-processing. This row already contains derived values.")
     processor = ResultSpectrumProcessor(path, processing, points, cancelled=cancelled, reader=source_cache) if processing and processing.active else None
     matrix = read_heatmap_matrix(path, row, coordinates, request, cancelled=cancelled, processor=processor,
                                 capture_input=processor is not None,
                                 spectrum_reader=source_cache.spectrum_slice if source_cache else None,
                                 checkpoint_indices=checkpoint_indices)
+    instrument_averages = {}
+    if points:
+        checkpoints = set(np.unique(matrix.cell_checkpoints))
+        for point in points:
+            if point.index in checkpoints:
+                average = recorded_instrument_average(point)
+                if average is not None:
+                    instrument_averages[point.index] = average
     return _HeatmapPayload(
         matrix=matrix.values,
         x_values=matrix.x_values,
@@ -246,7 +258,8 @@ def _read_heatmap_payload(
         processing_notes=tuple(processor.notes) if processor else (),
         baselines=processor.baselines if processor else (),
         line_input_dbm=matrix.input_values if matrix.input_unit == "dBm" else None,
-        line_input_is_raw=dict(row.definition).get("lab control role") != "spectrum_processed",
+        line_input_is_raw=not processed_row,
+        instrument_averages=instrument_averages,
     )
 
 
@@ -1255,7 +1268,7 @@ class HeatmapResultsTab(QWidget):
             "spectrum_processing": processing_manifest(self.processing_controls.state),
             "recorded_baselines": [processing_manifest(r) for r in payload.baselines],
             "map_processing": processing_manifest(self.map_controls.state),
-            "line_classification_source": "Recorded raw dBm, same selected coordinate plane" if state.mask_lines else None,
+            "line_classification_source": "Recorded dBm, same selected coordinate plane" if state.mask_lines else None,
             "coordinate_selection": processing_manifest(self._request()),
             "axes": {"x": {"label": payload.x_label, "unit": payload.x_unit},
                      "y": {"label": payload.y_label, "unit": payload.y_unit}},
@@ -1264,6 +1277,8 @@ class HeatmapResultsTab(QWidget):
             "display_transform": "absolute_difference" if absolute else "none",
             "signed_difference": signed,
         }
+        if payload.instrument_averages:
+            self.heatmap.export_metadata["instrument_averages_by_checkpoint"] = payload.instrument_averages
         unit = f" {payload.z_unit}" if payload.z_unit else ""
         missing = (
             f" {payload.missing_checkpoints} unreadable checkpoint(s) are shown as gaps."
@@ -1277,6 +1292,10 @@ class HeatmapResultsTab(QWidget):
         )
         checkpoint_count = len(checkpoints)
         message += f" {checkpoint_count} recorded checkpoint(s) selected."
+        if payload.instrument_averages:
+            counts = {average["sweep_count"] for average in payload.instrument_averages.values()}
+            sweeps = f"{min(counts)}–{max(counts)} sweeps" if len(counts) > 1 else f"{min(counts)} sweeps each"
+            message += f" {len(payload.instrument_averages)} Anritsu averages ({sweeps})."
         if checkpoint_count == 1:
             message += " Only one checkpoint is selected; this map does not show a sweep."
         if payload.processing_notes:

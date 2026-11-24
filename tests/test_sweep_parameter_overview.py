@@ -683,6 +683,22 @@ def test_omitted_reference_options_use_execution_defaults_and_reference_card_rol
     assert average.card_value == 4 and entry_comparison(average) == "different"
 
 
+@pytest.mark.parametrize(("kind", "target", "value"), [
+    ("acquire_spectrum", "instrument_average_count", 50),
+    ("acquire_reference", "instrument_average_duration", "5 s"),
+])
+def test_hardware_average_overview_shows_mean_only_storage(kind, target, value):
+    rows = build(
+        recipe(node("hardware-mean", kind, **{target: value})),
+        {("anritsu", None): {"average_count": 8, "reference_average_count": 12}},
+    )
+    assert row(rows, "hardware-mean", target).sweep_value == value
+    assert row(rows, "hardware-mean", "store_source_spectra").sweep_value is False
+    transfer = row(rows, "hardware-mean", "average_count")
+    assert transfer.sweep_value == 1 and transfer.card_value is None
+    assert "mean" in transfer.label
+
+
 @pytest.mark.parametrize(
     "options,expected",
     [

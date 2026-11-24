@@ -59,7 +59,12 @@ from app.ui.results.data_classifier import find_scalar_rows, find_spectrum_rows
 from app.ui.results.filter_choices import FilterComboBox
 from app.ui.results.filter_index import FILTER_ABS_TOL, FILTER_REL_TOL, unique_signatures
 from app.ui.results.peak_tools import ResultPeakTools
-from app.ui.results.processing import ProcessedResultSpectrum, RecordedBaselineEvidence
+from app.ui.results.processing import (
+    ProcessedResultSpectrum,
+    RecordedBaselineEvidence,
+    recorded_instrument_average,
+    recorded_spectrum_label,
+)
 from app.ui.results.processing_controls import ResultProcessingControls
 from app.ui.results.processing_overlay import ResultProcessingOverlay
 from app.ui.results.read_session import ResultReadSession
@@ -644,6 +649,7 @@ class SpectrumResultsTab(QWidget):
         self._selected_private_point = None
         self._selected_private_spectrum = None
         self._selected_reference = reference
+        self.processing_controls.set_instrument_average(reference.averaging_source == "instrument")
         self._reset_variant_selector()
         self.device_state_changed.emit({})
         self.position_label.setText(f"{reference.purpose.title()} {reference.index} · {baseline_sample_label(reference)}")
@@ -1039,7 +1045,7 @@ class SpectrumResultsTab(QWidget):
                 checkpoints = row.shape[0] if row.shape else 0
                 sample_shape = " x ".join(str(size) for size in row.shape[1:])
                 role = dict(row.definition).get("lab control role", "spectrum")
-                variant = "processed" if role == "spectrum_processed" else "raw"
+                variant = "processed" if role == "spectrum_processed" else "recorded"
                 self.thatec_row_combo.addItem(
                     f"{label} · {variant} ({checkpoints} checkpoints x {sample_shape})",
                     userData=row.id,
@@ -1112,6 +1118,9 @@ class SpectrumResultsTab(QWidget):
             trace = spectrum.traces[int(trace_index)]
         except (IndexError, ValueError):
             return
+        point = self._public_point()
+        processed_row = spectrum.role == "spectrum_processed"
+        self.processing_controls.set_instrument_average(recorded_instrument_average(point) is not None)
         if self.view_controls.state.active:
             row = self._run.rows.get(spectrum.row_id) if self._run else None
             if row and dict(row.definition).get("lab control role") == "spectrum_processed":
@@ -1134,7 +1143,8 @@ class SpectrumResultsTab(QWidget):
                              self._selected_path, spectrum, int(trace_index),
                              self.processing_controls.state, self._stored_points)
             return
-        self.spectrum_plot.prepare_traces((trace.name,))
+        trace_label = trace.name if processed_row else recorded_spectrum_label(point, trace.name)
+        self.spectrum_plot.prepare_traces((trace_label,))
         self.spectrum_plot.set_labels(
             x=spectrum.x_label,
             x_unit=spectrum.x_unit,
@@ -1143,15 +1153,15 @@ class SpectrumResultsTab(QWidget):
         )
         row = self._run.rows.get(spectrum.row_id) if self._run is not None else None
         self.spectrum_plot.set_trace(
-            trace.name,
+            trace_label,
             spectrum.x_values,
             trace.values,
             primary=True,
-            signed_difference=row is not None and dict(row.definition).get("lab control role") == "spectrum_processed",
+            signed_difference=spectrum.y_unit == "dB" or processed_row and spectrum.y_unit == "W",
         )
         label = row.control_name if row is not None and row.control_name else spectrum.row_id
         self.spectrum_plot.set_title(
-            f"{label} - checkpoint {spectrum.checkpoint} - {trace.name}"
+            f"{label} - checkpoint {spectrum.checkpoint} - {trace_label}"
         )
         self.spectrum_plot.auto_range()
         self.spectrum_view.setCurrentWidget(self.spectrum_plot)
@@ -1166,10 +1176,18 @@ class SpectrumResultsTab(QWidget):
         self._update_nav_buttons()
         self.spectrum_info.setText(
             "Public THATEC/PyThat spectrum: "
-            f"{label}, checkpoint {spectrum.checkpoint}, {trace.name}, "
+            f"{label}, checkpoint {spectrum.checkpoint}, {trace_label}, "
             f"{len(spectrum.x_values)} samples from {spectrum.source_shape}."
         )
         self._publish_spectrum()
+
+    def _public_point(self) -> StoredPoint | None:
+        if self._public_spectrum is None:
+            return None
+        index = self._public_spectrum.checkpoint
+        if 0 <= index < len(self._stored_points) and self._stored_points[index].index == index:
+            return self._stored_points[index]
+        return next((point for point in self._stored_points if point.index == index), None)
 
     def _on_point_selected(
         self,
@@ -1229,6 +1247,9 @@ class SpectrumResultsTab(QWidget):
     ) -> None:
         self._selected_private_point = point
         self._selected_private_spectrum = trace
+        self.processing_controls.set_instrument_average(
+            recorded_instrument_average(point, trace_name=trace.trace_name) is not None
+        )
         self._update_variant_selector(trace)
         pending = getattr(self, "_pending_private_variant", None)
         self._pending_private_variant = None
@@ -1289,10 +1310,14 @@ class SpectrumResultsTab(QWidget):
                 )
                 return
 
+        raw_label = recorded_spectrum_label(point, "Stored spectrum", trace_name=trace.trace_name)
+        reference_label = (f"Reference · {baseline_sample_label(reference)}"
+                           if reference is not None and reference.averaging_source == "instrument"
+                           else "Reference spectrum")
         names = (["Processed spectrum"] if variant == "processed" else
-                 ["Reference spectrum"] if variant == "reference" else
-                 ["Stored spectrum", "Processed spectrum"] if variant == "raw_processed" else
-                 ["Stored spectrum", "Reference spectrum"] if variant == "raw_reference" else ["Stored spectrum"])
+                 [reference_label] if variant == "reference" else
+                 [raw_label, "Processed spectrum"] if variant == "raw_processed" else
+                 [raw_label, reference_label] if variant == "raw_reference" else [raw_label])
         self.spectrum_plot.prepare_traces(names)
         self.spectrum_plot.set_title("Select a stored or public spectrum")
         if variant == "processed":
@@ -1311,7 +1336,8 @@ class SpectrumResultsTab(QWidget):
                 trace.frequencies_hz,
                 trace.processed_values,
                 primary=True,
-                signed_difference=trace.processing_operation in {"subtract_power_signed", "subtract_reference_signed"},
+                signed_difference=trace.processed_unit == "dB" or trace.processing_operation in
+                {"subtract_power_signed", "subtract_reference_signed"},
             )
         elif variant == "reference":
             assert reference is not None
@@ -1319,7 +1345,7 @@ class SpectrumResultsTab(QWidget):
                 x="Frequency", x_unit="Hz", y="Power", y_unit="dBm"
             )
             self.spectrum_plot.set_trace(
-                "Reference spectrum",
+                reference_label,
                 reference.frequencies_hz,
                 reference.powers_dbm,
                 primary=True,
@@ -1336,7 +1362,7 @@ class SpectrumResultsTab(QWidget):
                 x="Frequency", x_unit="Hz", y=y_label, y_unit=y_unit
             )
             self.spectrum_plot.set_trace(
-                "Stored spectrum",
+                raw_label,
                 trace.frequencies_hz,
                 trace.powers_dbm,
                 primary=True,
@@ -1350,14 +1376,12 @@ class SpectrumResultsTab(QWidget):
                 )
             elif variant == "raw_reference" and reference is not None:
                 self.spectrum_plot.set_trace(
-                    "Reference spectrum",
+                    reference_label,
                     reference.frequencies_hz,
                     reference.powers_dbm,
                     primary=False,
                 )
-        self.spectrum_plot.set_title(
-            f"Spectrum at point {point.index} ({trace.trace_name})"
-        )
+        self.spectrum_plot.set_title(f"{raw_label} at point {point.index} ({trace.trace_name})")
         self.spectrum_plot.auto_range()
         self.spectrum_view.setCurrentWidget(self.spectrum_plot)
         processed_note = (
@@ -1366,9 +1390,9 @@ class SpectrumResultsTab(QWidget):
             else ""
         )
         self.spectrum_info.setText(
-            f"{trace.source_point_count} points in file (raw); view: {variant}; "
-            f"{trace.acquired_at_utc or 'missing time'}; "
-            f"raw peak {max(trace.powers_dbm):.4g} dBm{processed_note}"
+            f"{trace.source_point_count} recorded points · {raw_label} · "
+            f"{trace.acquired_at_utc or 'missing time'} · "
+            f"peak {max(trace.powers_dbm):.4g} dBm{processed_note}"
         )
         self._update_nav_buttons()
 
@@ -1408,7 +1432,8 @@ class SpectrumResultsTab(QWidget):
         self.spectrum_plot.prepare_traces(("Post-processed spectrum",))
         self.spectrum_plot.set_labels(x="Frequency", x_unit="Hz", y="Post-processed amplitude", y_unit=result.unit)
         self.spectrum_plot.set_trace("Post-processed spectrum", result.frequencies_hz, result.values, primary=True,
-                                     signed_difference=self.processing_controls.state.math_operation == "subtract_power_signed")
+                                     signed_difference=result.unit == "dB" or
+                                     self.processing_controls.state.math_operation == "subtract_power_signed")
         self.spectrum_plot.set_title("Recorded spectrum - post-processing")
         operation_label = self.processing_controls.operation.currentText().split(" — ")[0]
         if self._selected_private_point is not None:
@@ -1480,6 +1505,7 @@ class SpectrumResultsTab(QWidget):
             self.batch_requested.emit(self._batch_identity, items, state, self.spectrum_plot.plot.grab())
 
     def _publish_spectrum(self, extra=None):
+        average = recorded_instrument_average(self._selected_private_point or self._public_point())
         self.spectrum_plot.export_metadata = {
             "source_file": str(self._selected_path),
             "checkpoint": (self._selected_private_point.index if self._selected_private_point else
@@ -1489,6 +1515,8 @@ class SpectrumResultsTab(QWidget):
             "series_constraints": list(self.series_controls.constraints),
             "notes": self.spectrum_info.text(), **(extra or {}),
         }
+        if average is not None:
+            self.spectrum_plot.export_metadata["instrument_average"] = average
         if self.baseline_controls.viewing and self._selected_reference is not None:
             reference = self._selected_reference
             effective = replace(self.processing_controls.state, operation="none", reference_index=None,
@@ -1557,7 +1585,9 @@ class SpectrumResultsTab(QWidget):
             self.filter_summary.setToolTip(self._format_signature(tuple(values.items())))
 
     def _update_variant_selector(self, trace: StoredSpectrum | None) -> None:
-        options: list[tuple[str, str]] = [("Raw spectrum (dBm)", "raw")]
+        raw = recorded_spectrum_label(self._selected_private_point, "Raw spectrum",
+                                      trace_name=trace.trace_name if trace is not None else "")
+        options: list[tuple[str, str]] = [(f"{raw} (dBm)", "raw")]
         if trace is not None and trace.saved_display is not None:
             options.append(("As saved on Anritsu", "saved_view"))
         if trace is not None and trace.processed_values is not None:

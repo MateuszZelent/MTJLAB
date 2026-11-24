@@ -17,6 +17,8 @@ from typing import Literal
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from app.domain.spectrum_averaging import InstrumentAverageProvenance
+
 FloatVector = NDArray[np.float64]
 
 
@@ -169,6 +171,7 @@ class BackgroundProfile:
     schema_version: int = 1
     averaging_source: Literal["pc", "instrument"] = "pc"
     nominal_sweep_time_s: float | None = None
+    instrument_average: InstrumentAverageProvenance | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 1 or not self.profile_id or not self.context_id:
@@ -177,7 +180,7 @@ class BackgroundProfile:
         variance = self.sample_variance_w2
         mean_variance = self.mean_variance_w2
         if self.averaging_source == "pc":
-            if variance is None or self.nominal_sweep_time_s is not None:
+            if variance is None or self.nominal_sweep_time_s is not None or self.instrument_average is not None:
                 raise ValueError("PC backgrounds require sample variance from the recorded sweeps.")
             variance = immutable_vector(variance, name="sample_variance_w2", nonnegative=True)
         elif self.averaging_source == "instrument":
@@ -185,7 +188,13 @@ class BackgroundProfile:
                 raise ValueError("An instrument mean cannot establish variance or signal-free qualification.")
             if self.nominal_sweep_time_s is None:
                 raise ValueError("An instrument mean requires the nominal sweep time.")
-            positive_time(self.nominal_sweep_time_s, "Nominal sweep time")
+            average = self.instrument_average
+            if average is None:
+                average = InstrumentAverageProvenance(self.sweep_count, self.nominal_sweep_time_s)
+                object.__setattr__(self, "instrument_average", average)
+            elif (average.sweep_count != self.sweep_count
+                  or average.sweep_time_s != self.nominal_sweep_time_s):
+                raise ValueError("Background count or sweep time differs from its Anritsu average.")
         else:
             raise ValueError("Unknown background averaging source.")
         if mean_variance is not None:
@@ -225,6 +234,11 @@ class BackgroundProfile:
         if self.averaging_source == "instrument":
             metadata["averaging_source"] = self.averaging_source
             metadata["nominal_sweep_time_s"] = self.nominal_sweep_time_s
+            average = self.instrument_average
+            for key in ("requested_sweep_count", "target_duration_s", "elapsed_s"):
+                value = getattr(average, key)
+                if value is not None:
+                    metadata[key] = value
         digest = hashlib.sha256(json.dumps(metadata, sort_keys=True).encode())
         for values in (self.mean_w, self.sample_variance_w2, self.mean_variance_w2):
             if values is not None:

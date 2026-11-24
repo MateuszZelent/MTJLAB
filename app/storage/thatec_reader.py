@@ -84,6 +84,7 @@ class ThatecSpectrum:
     x_values: Sequence[float]
     traces: tuple[ThatecSpectrumTrace, ...]
     source_shape: tuple[int, ...]
+    role: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,6 +377,7 @@ class ThatecRunReader:
             x_values=x_values if compact else tuple(float(value) for value in x_values),
             traces=traces,
             source_shape=tuple(int(size) for size in values.shape),
+            role=dict(row.definition).get("lab control role"),
         )
 
     @staticmethod

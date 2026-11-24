@@ -1954,11 +1954,25 @@ class RunMonitorPage(QWidget):
                 indexes = np.linspace(0, source_point_count - 1, num=display_limit, dtype=np.intp)
             frequency_values = frequency_values[indexes]
             power_values = power_values[indexes]
-        trace_label = (
-            "Stored reference" if preview_kind == "reference" else "Stored spectrum"
-        )
-        if corrected:
-            trace_label = "Raw − Reference"
+        instrument_average = data.get("instrument_average")
+        native_count = instrument_average.get("sweep_count") if isinstance(instrument_average, dict) else None
+        instrument_averaged = (type(native_count) is int and native_count >= 2
+                               or data.get("averaging_source") == "instrument")
+        sweep_count = native_count if native_count is not None else data.get("average_count")
+        averaged = type(sweep_count) is int and sweep_count >= 2
+        if averaged:
+            method = "Anritsu" if instrument_averaged else {
+                "continuous_live": "PyLab Live",
+                "single_sweep": "PyLab triggered",
+            }.get(data.get("acquisition_mode"))
+            subject = "reference average" if preview_kind == "reference" else "average"
+            trace_label = f"{method} {subject}" if method else subject.capitalize()
+            if corrected:
+                trace_label += " − Reference"
+        elif preview_kind == "reference":
+            trace_label = "Stored reference"
+        else:
+            trace_label = "Raw − Reference" if corrected else "Stored spectrum"
         identity = (trace_label, unit)
         if getattr(self, "_spectrum_preview_identity", None) != identity:
             self.spectrum_preview.clear()
@@ -1972,11 +1986,11 @@ class RunMonitorPage(QWidget):
         )
         if self._follow_spectrum_axes:
             self.spectrum_preview.auto_range()
-        title = (
-            "Stored reference"
-            if preview_kind == "reference"
-            else f"{trace_label if corrected else 'Current spectrum'} · Point {data.get('point_index', '—')}"
-        )
+        title = trace_label if preview_kind == "reference" or corrected or averaged else "Current spectrum"
+        if averaged:
+            title += f" · {sweep_count} sweeps"
+        if preview_kind != "reference":
+            title += f" · Point {data.get('point_index', '—')}"
         self.spectrum_preview.set_title(
             title + f" • {data.get('source_points', source_point_count)} source values"
         )

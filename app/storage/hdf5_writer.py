@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
 from app.domain.errors import ExecutionError
 from app.domain.models import MeasurementPoint
+from app.domain.spectrum_averaging import InstrumentAverageProvenance, instrument_average_metadata
 from app.domain.spectrum_correction import (
     BackgroundProfile,
     CorrectedSpectrumFrame,
@@ -212,6 +213,7 @@ class Hdf5RunWriter:
         settings_source: str,
         plan_hash: str,
         checkpoint_count: int,
+        reference_index: int | None = None,
         expected_points: int | None = None,
         csv_summary_path: str | Path | None = None,
         operator_context: dict[str, object] | None = None,
@@ -221,6 +223,8 @@ class Hdf5RunWriter:
 
         if type(checkpoint_count) is not int or checkpoint_count < 0:
             raise ExecutionError("Recovery checkpoint count must be an exact nonnegative integer.")
+        if reference_index is not None and (type(reference_index) is not int or reference_index < 0):
+            raise ExecutionError("Recovery reference index must be an exact nonnegative integer.")
 
         try:
             import h5py
@@ -249,6 +253,13 @@ class Hdf5RunWriter:
             self._references = self._file.require_group("references")
             if "reference" in self._file and "0" not in self._references:
                 self._references["0"] = self._file["reference"]
+            if reference_index is not None:
+                from .reference_transaction import require_committed_reference
+
+                reference = self._references.get(str(reference_index))
+                if reference is None:
+                    raise ExecutionError("Recovery boundary reference is missing from the archive.")
+                require_committed_reference(reference)
             self._pending = self._file["_pending"]
             events = self._file["events"]
             self._event_timestamps = events["timestamp"]
@@ -261,7 +272,7 @@ class Hdf5RunWriter:
                 events[column].resize((event_count,))
             events.attrs["committed_count"] = event_count
             self._file.flush()
-            self._truncate_to_checkpoint(checkpoint_count)
+            self._truncate_to_checkpoint(checkpoint_count, reference_index=reference_index)
             self._thatec = ThatecHdf5Writer.resume(
                 self._file,
                 checkpoint_count=checkpoint_count,
@@ -288,6 +299,7 @@ class Hdf5RunWriter:
                     "checkpoint_count": checkpoint_count,
                     "previous_status": previous_status,
                     "operator_context": self._serializable(operator_context or {}),
+                    **({"reference_index": reference_index} if reference_index is not None else {}),
                 },
             )
             self._file.flush()
@@ -332,7 +344,7 @@ class Hdf5RunWriter:
         if status == "completed":
             raise ExecutionError("A completed run cannot be resumed.")
 
-    def _truncate_to_checkpoint(self, checkpoint_count: int) -> None:
+    def _truncate_to_checkpoint(self, checkpoint_count: int, *, reference_index: int | None = None) -> None:
         if checkpoint_count < 0:
             raise ExecutionError("Recovery checkpoint count cannot be negative.")
         committed = sorted(
@@ -361,6 +373,8 @@ class Hdf5RunWriter:
             for name in self._spectra
             if "reference_index" in self._spectra[name].attrs
         }
+        if reference_index is not None:
+            referenced.add(reference_index)
         if referenced:
             last_reference = max(referenced)
             for name in tuple(self._references):
@@ -419,6 +433,7 @@ class Hdf5RunWriter:
             group = self._points[str(index)]
             spectrum = self._spectra.get(str(index))
             powers = spectrum["power_dbm"][:] if spectrum is not None else ()
+            metadata = json.loads(group["metadata_json"].asstr()[()]) if "metadata_json" in group else {}
             self._csv_writer.writerow(
                 {
                     "point_index": index,
@@ -429,6 +444,7 @@ class Hdf5RunWriter:
                     "trace_name": spectrum.attrs["trace_name"] if spectrum is not None else "",
                     "trace_points": len(powers),
                     "trace_peak_dbm": max(powers) if len(powers) else "",
+                    **self._csv_averaging_fields(metadata, has_spectrum=spectrum is not None),
                 }
             )
         self._csv_stream.flush()
@@ -449,6 +465,8 @@ class Hdf5RunWriter:
                     "trace_name",
                     "trace_points",
                     "trace_peak_dbm",
+                    "spectrum_average_count",
+                    "instrument_average_json",
                 ),
             )
             writer.writeheader()
@@ -545,6 +563,13 @@ class Hdf5RunWriter:
             raise ExecutionError("Reference requires every selected raw recipe source to be committed.")
         source_block_identity = None
         acquisition_metadata = dict(acquisition_metadata or {})
+        instrument_average = self._trace_instrument_average(trace, acquisition_metadata.get("instrument_average"))
+        if instrument_average is not None:
+            if instrument_average.sweep_count != average_count:
+                raise ExecutionError("Reference count differs from its Anritsu average.")
+            acquisition_metadata["instrument_average"] = instrument_average.metadata()
+        if source_sweep_indices and (instrument_average is not None or acquisition_metadata.get("averaging_source") == "instrument"):
+            raise ExecutionError("Anritsu average references cannot link individual source sweeps.")
         source_spectra_stored = acquisition_metadata.get("source_spectra_stored")
         if "source_spectra_stored" in acquisition_metadata and (
             type(source_spectra_stored) is not bool or source_spectra_stored != bool(source_sweep_indices)
@@ -803,6 +828,21 @@ class Hdf5RunWriter:
         self._validate_point(point)
         if trace is not None:
             self._validate_trace(trace)
+        evidence = instrument_average_metadata(point.metadata)
+        instrument_average = self._trace_instrument_average(trace, evidence)
+        if instrument_average is not None:
+            if trace is None:
+                raise ExecutionError("Anritsu average provenance requires a stored spectrum.")
+            if point.metadata.get("raw_recipe_sweep_indices"):
+                raise ExecutionError("Anritsu averages cannot link individual source sweeps.")
+            processing = point.metadata.get("spectrum_processing_v1")
+            if isinstance(processing, Mapping) and processing.get("source_spectra_stored", False) is not False:
+                raise ExecutionError("Anritsu averages cannot declare individual source sweeps.")
+            count = point.metadata.get("spectrum_average_count", instrument_average.sweep_count)
+            if type(count) is not int or count != instrument_average.sweep_count:
+                raise ExecutionError("Spectrum count differs from its Anritsu average.")
+            if evidence is None:
+                point = replace(point, metadata={**point.metadata, "instrument_average": instrument_average.metadata()})
         processed_values = self._validate_processed(
             trace,
             processed_values=processed_values,
@@ -1003,6 +1043,35 @@ class Hdf5RunWriter:
         return index
 
     @staticmethod
+    def _trace_instrument_average(trace, evidence) -> InstrumentAverageProvenance | None:
+        trace_average = trace.instrument_average if trace is not None else None
+        if trace_average is not None and not isinstance(trace_average, InstrumentAverageProvenance):
+            raise ExecutionError("Invalid Anritsu average provenance on the trace.")
+        if evidence is None:
+            return trace_average
+        try:
+            average = InstrumentAverageProvenance.from_metadata(evidence)
+        except ValueError as exc:
+            raise ExecutionError(f"Invalid Anritsu average provenance. {exc}") from exc
+        if trace_average is not None and average != trace_average:
+            raise ExecutionError("Anritsu average metadata differs from the recorded trace.")
+        return average
+
+    @staticmethod
+    def _csv_averaging_fields(metadata, *, has_spectrum: bool) -> dict:
+        if not has_spectrum:
+            return {"spectrum_average_count": "", "instrument_average_json": ""}
+        evidence = instrument_average_metadata(metadata)
+        count = metadata.get("spectrum_average_count", metadata.get("average_count"))
+        if isinstance(evidence, Mapping):
+            count = evidence.get("sweep_count", count)
+        return {
+            "spectrum_average_count": count if type(count) is int and count > 0 else "",
+            "instrument_average_json": json.dumps(Hdf5RunWriter._serializable(evidence), sort_keys=True)
+            if evidence is not None else "",
+        }
+
+    @staticmethod
     def _validate_processed(
         trace: SpectrumTrace | None,
         *,
@@ -1067,6 +1136,7 @@ class Hdf5RunWriter:
                 "trace_name": trace.trace_name if trace is not None else "",
                 "trace_points": len(trace.powers_dbm) if trace is not None else 0,
                 "trace_peak_dbm": max(trace.powers_dbm) if trace is not None else "",
+                **self._csv_averaging_fields(point.metadata, has_spectrum=trace is not None),
             }
         )
         self._csv_stream.flush()

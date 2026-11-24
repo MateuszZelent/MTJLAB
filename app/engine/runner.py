@@ -13,7 +13,12 @@ from typing import Callable
 from uuid import uuid4
 from enum import Enum
 
-from app.devices.anritsu_ms2830a.adapter import AnritsuAdapter, SpectrumTrace
+from app.devices.anritsu_ms2830a.adapter import (
+    ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS,
+    ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS,
+    AnritsuAdapter,
+    SpectrumTrace,
+)
 from app.devices.keithley_2600.adapter import KeithleyAdapter
 from app.devices.moke_box.adapter import MokeBoxAdapter
 from app.devices.moke_box.calibration import MokeCalibration
@@ -23,6 +28,7 @@ from app.devices.rigol_dg1000z.adapter import RigolAdapter
 from app.domain.errors import ConfigurationError, DeviceError, ExecutionError
 from app.domain.models import ApplicationState, DeviceState, MeasurementPoint
 from app.domain.recipe_spectrum import RecipeSpectrumSweep
+from app.domain.spectrum_averaging import InstrumentAverageProvenance
 from app.domain.spectrum_correction import SpectrumFrameRole
 from app.engine.compiler import ExecutionPlan, PlanAction, controlled_output_endpoints, required_devices_for_actions
 from app.engine.policy import ExecutionPolicy
@@ -291,6 +297,9 @@ class RecipeRunner:
                 self._reference_index = recovery_reference.index
                 self._reference_fingerprint = recovery_reference.fingerprint
                 self._reference_origin = dict(recovery_reference.origin)
+                if recovery_reference.instrument_average is not None:
+                    self._reference_origin["averaging_source"] = "instrument"
+                    self._reference_origin["instrument_average"] = recovery_reference.instrument_average.metadata()
                 self._emit("reference_recovered", {"reference_index": self._reference_index,
                     "configuration_fingerprint": self._reference_fingerprint})
             for action_index, action in enumerate(
@@ -592,7 +601,11 @@ class RecipeRunner:
                         self._setpoint_confirmed_at[target] = confirmed_at
                 return result
             except DeviceError as exc:
-                if self._watchdog_timed_out.is_set() or attempt >= retries:
+                analyzer_state_unknown = (
+                    action.kind in {"acquire_reference", "acquire_spectrum"}
+                    and self._anritsu.state == DeviceState.UNKNOWN
+                )
+                if self._stop_requested.is_set() or analyzer_state_unknown or attempt >= retries:
                     raise
                 self._emit(
                     "action_retry",
@@ -1075,15 +1088,20 @@ class RecipeRunner:
     ) -> None:
         from app.spectrum.processing import peak_preserving_indices
 
-        processed = acquisition.processed_values if acquisition is not None else None
+        measurement = acquisition if preview_kind == "measurement" else None
+        processed = measurement.processed_values if measurement is not None else None
+        metadata = (acquisition.processing_metadata or {}) if acquisition is not None else {}
+        instrument_average = metadata.get("instrument_average")
+        instrument_averaged = isinstance(instrument_average, dict) or metadata.get("averaging_source") == "instrument"
         difference_db = None
         reference = self._reference_trace
         if (
-            acquisition is not None
+            measurement is not None
             and reference is not None
+            and instrument_averaged == (self._reference_origin.get("averaging_source") == "instrument")
             and reference.trace_name == trace.trace_name
             and self._reference_fingerprint is not None
-            and self._reference_fingerprint == (acquisition.processing_metadata or {}).get("configuration_fingerprint")
+            and self._reference_fingerprint == metadata.get("configuration_fingerprint")
             and frequency_grids_match(trace.frequencies_hz, reference.frequencies_hz)
         ):
             try:
@@ -1102,9 +1120,13 @@ class RecipeRunner:
                 "power_dbm": tuple(trace.powers_dbm[index] for index in indices),
                 "raw_minus_reference_db": tuple(difference_db[index] for index in indices) if difference_db is not None else None,
                 "source_points": len(trace.powers_dbm),
+                "average_count": acquisition.average_count if acquisition is not None else 1,
+                "acquisition_mode": metadata.get("acquisition_mode"),
+                "averaging_source": "instrument" if instrument_averaged else None,
                 "processed_values": tuple(processed[index] for index in indices) if processed is not None else None,
-                "processed_unit": acquisition.processed_unit if acquisition is not None else None,
-                "processing_operation": acquisition.processing_operation if acquisition is not None else None,
+                "processed_unit": measurement.processed_unit if measurement is not None else None,
+                "processing_operation": measurement.processing_operation if measurement is not None else None,
+                **({"instrument_average": dict(instrument_average)} if isinstance(instrument_average, dict) else {}),
             },
         )
 
@@ -1658,11 +1680,12 @@ class RecipeRunner:
             )
         elif action.kind == "acquire_reference":
             average_count = payload.get("average_count", 1)
-            self._reference_origin = {}
+            reference_origin = {}
             if payload.get("source_file"):
                 from app.storage.recipe_reference import (
                     file_sha256,
                     load_recipe_reference,
+                    recipe_reference_averaging,
                     verify_recipe_reference,
                 )
 
@@ -1677,32 +1700,42 @@ class RecipeRunner:
                 verify_recipe_reference(evidence, full, advanced, idn, fingerprint)
                 if file_sha256(path) != payload["source_sha256"]:
                     raise ExecutionError("Reference file changed while loading.")
-                block = _AcquiredSpectrum(reference, average_count)
-                self._reference_fingerprint = fingerprint
-                self._reference_origin = {key: payload[key] for key in ("source_file", "source_sha256", "file_kind")}
+                native_average = recipe_reference_averaging(evidence)
+                block = _AcquiredSpectrum(reference, average_count, processing_metadata={
+                    "configuration_fingerprint": fingerprint,
+                    "source_spectra_stored": False,
+                    **({"averaging_source": "instrument"} if payload.get("reference_averaging_source") == "instrument" else {}),
+                    **({"instrument_average": native_average.metadata()} if native_average is not None else {}),
+                })
+                reference_origin = {key: payload[key] for key in ("source_file", "source_sha256", "file_kind")}
                 if payload["file_kind"] == "background":
                     context, profile = evidence
                     self._writer.store_background_profile(context, profile)
-                    self._reference_origin.update(profile_id=profile.profile_id, profile_hash=profile.content_hash)
+                    reference_origin.update(profile_id=profile.profile_id, profile_hash=profile.content_hash)
             else:
                 block = self._acquire_averaged_spectrum(
                     payload["trace"], average_count, action=action, role=SpectrumFrameRole.REFERENCE, measurements=measurements,
                 )
                 if block is None:
                     return None
-                self._reference_fingerprint = (block.processing_metadata or {}).get("configuration_fingerprint")
             reference = block.raw
             average_count = block.average_count
             acquisition_metadata = block.processing_metadata or {}
+            if "instrument_average" in acquisition_metadata:
+                reference_origin["instrument_average"] = acquisition_metadata["instrument_average"]
+            if "instrument_average" in acquisition_metadata or acquisition_metadata.get("averaging_source") == "instrument":
+                reference_origin["averaging_source"] = "instrument"
             reference_options = {}
-            if (payload.get("minimum_duration_s") or "purpose" in payload
+            if (payload.get("source_file") or "instrument_average" in acquisition_metadata
+                    or payload.get("minimum_duration_s") or "purpose" in payload
                     or not payload.get("store_source_spectra", True) or payload.get("acquisition_mode") == "continuous_live"):
                 reference_options["acquisition_metadata"] = {
                     **acquisition_metadata,
-                    "purpose": payload.get("purpose", "reference"),
+                    "purpose": payload.get("purpose", "background" if payload.get("file_kind") == "background" else "reference"),
                     "recipe_node_id": action.node_id,
                     "requested_minimum_sweeps": (
-                        average_count if "instrument_average" in acquisition_metadata else payload.get("average_count", 1)
+                        average_count if "instrument_average" in acquisition_metadata
+                        else payload.get("average_count", 1)
                     ),
                     "safety_context": self._safety_context_snapshot(),
                     "device_states": self._jsonable(self._device_states),
@@ -1716,6 +1749,8 @@ class RecipeRunner:
                 **reference_options,
             )
             self._reference_trace = reference
+            self._reference_fingerprint = acquisition_metadata.get("configuration_fingerprint")
+            self._reference_origin = reference_origin
             self._reference_index = (
                 stored_reference_index
                 if isinstance(stored_reference_index, int)
@@ -1739,6 +1774,7 @@ class RecipeRunner:
                 reference,
                 self._reference_index if self._reference_index is not None else -1,
                 preview_kind="reference",
+                acquisition=block,
             )
         elif action.kind == "acquire_spectrum":
             from app.recipes.spectrum_processing import parse_processing
@@ -1933,8 +1969,14 @@ class RecipeRunner:
         if instrument_average:
             if instrument_count is not None and instrument_duration_s is not None:
                 raise ExecutionError("Choose either an instrument sweep count or a target averaging time.")
-            if instrument_count is not None and (type(instrument_count) is not int or not 2 <= instrument_count <= 9999):
-                raise ExecutionError("The instrument average count must be an integer in 2..9999.")
+            if instrument_count is not None and (
+                type(instrument_count) is not int
+                or not ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS <= instrument_count <= ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS
+            ):
+                raise ExecutionError(
+                    "The instrument average count must be an integer in "
+                    f"{ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS}..{ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS}."
+                )
             if instrument_duration_s is not None and (
                 type(instrument_duration_s) not in (int, float) or not math.isfinite(instrument_duration_s)
                 or not 0 < instrument_duration_s < self._policy.acquisition_timeout_s
@@ -1943,6 +1985,10 @@ class RecipeRunner:
             if (live or trace_name != "TRAC1" or average_count != 1 or store_sources
                     or action.payload.get("inter_sweep_delay_s") or action.payload.get("minimum_duration_s")):
                 raise ExecutionError("Instrument averaging requires one triggered Trace A result and mean-only storage.")
+        if (role == SpectrumFrameRole.SIGNAL and self._reference_trace is not None
+                and action.payload.get("reference_operation", "none") != "none"
+                and instrument_average != (self._reference_origin.get("averaging_source") == "instrument")):
+            raise ExecutionError("Reference processing requires matching Anritsu/PyLab averaging sources.")
         before = self._read_spectrum_identity(sweep_method=acquisition_mode) if live else self._read_spectrum_identity()
         if before is not None:
             self._record_device_state("anritsu", "spectrum",
@@ -2071,20 +2117,16 @@ class RecipeRunner:
         after = self._read_spectrum_identity()
         if before is None or after is None or before[3] != after[3]:
             raise ExecutionError("Analyzer settings changed during instrument averaging.")
-        target = {"requested_sweep_count": sweep_count} if sweep_count is not None else {"target_duration_s": duration_s}
+        evidence = trace.instrument_average or InstrumentAverageProvenance(
+            count, sweep_time_s, requested_sweep_count=sweep_count,
+            target_duration_s=duration_s, elapsed_s=elapsed,
+        )
         return _AcquiredSpectrum(trace, count, processing_metadata={
             "configuration_fingerprint": before[3],
             "acquisition_mode": "single_sweep",
             "source_spectra_stored": False,
             "safety_sampling": "active_smu_iv_before_and_after_instrument_average",
-            "instrument_average": {
-                **target,
-                "trace_storage_mode": "LAV",
-                "sweep_time_s": sweep_time_s,
-                "nominal_duration_s": count * sweep_time_s,
-                "elapsed_s": elapsed,
-                "sweep_count": count,
-            },
+            "instrument_average": evidence.metadata(),
         })
 
     def _sample_spectrum_channels(self, measurements: dict[str, float]) -> list[str]:
@@ -2111,7 +2153,7 @@ class RecipeRunner:
                 return None, safety_channels, None
             sampled_at = datetime.now(timezone.utc).timestamp() if safety_channels else None
             if not live:
-                return self._anritsu.acquire_single_sweep(trace_name, restore_continuous=False), safety_channels, sampled_at
+                return self._anritsu.acquire_unaveraged_sweep(trace_name), safety_channels, sampled_at
             try:
                 trace = self._anritsu.fetch_current_trace_fast(trace_name)
             except DeviceError as exc:

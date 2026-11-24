@@ -3660,6 +3660,7 @@ root:
                 "SWE:TIME:AUTO?": "1", "SWE:TIME?": "0.1",
                 "POW:ATT:AUTO?": "0", "POW:ATT?": "10", "DET?": "RMS",
                 "INIT:CONT?": "0", "AVER:COUN?": "1",
+                **{f"TRAC{trace}:STOR:MODE?": "OFF" for trace in range(1, 7)},
             }
         )
         rigol = RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(rigol_session))
@@ -3689,7 +3690,7 @@ root:
         )
         writer = MemoryWriter()
         result = RecipeRunner(rigol=rigol, keithley=keithley, anritsu=anritsu, writer=writer).run(plan)  # type: ignore[arg-type]
-        self.assertEqual(result.stored_points, 1)
+        self.assertEqual(result.stored_points, 1, result.error)
         self.assertEqual(writer.status, "completed")
         self.assertEqual(len(writer.points), 1)
         stored_point, _stored_trace = writer.points[0]

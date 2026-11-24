@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import QuantityError, parse_quantity
-from app.recipes.block_registry import ACTION_FIELDS, block_for_node
+from app.recipes.block_registry import ACTION_FIELDS, ANRITSU_HARDWARE_AVERAGE_FIELDS, block_for_node
 from app.recipes.configuration_context import configuration_before
 from app.recipes.models import Recipe, RecipeNode
 from app.recipes.parameter_registry import PARAMETERS_BY_TARGET
@@ -82,6 +82,7 @@ _TIME_FIELDS = {
     "settling_time",
     "inter_sweep_delay",
     "minimum_duration",
+    "instrument_average_duration",
     "sweep_time",
     "pulse_width",
     "pulse_leading",
@@ -99,6 +100,8 @@ _LABELS = {
     "vbw": "Video bandwidth (VBW)",
     "output_policy": "Output policy",
     "acquisition": "Acquisition",
+    "instrument_average_count": "Anritsu device sweeps",
+    "instrument_average_duration": "Anritsu nominal averaging duration",
     "output": "Final output policy",
     "effective_measure_current_range": "Effective current measurement range",
     "effective_measure_voltage_range": "Effective voltage measurement range",
@@ -476,13 +479,20 @@ class _Overview:
         written: set[str] = set()
         planned_values: dict[str, object] = {}
         card_overrides: dict[str, object] = {}
+        hardware_average = node.type in {"acquire_spectrum", "acquire_reference"} and any(
+            field in data for field in ANRITSU_HARDWARE_AVERAGE_FIELDS
+        )
 
         def add(key: str, value: object, action: str, extra: str = "", *, validate: bool = True):
             key = _canonical(device, key)
             parts = [*base_detail, extra]
+            label = _LABELS.get(key, key.replace("_", " ").replace(".", " / ").capitalize())
             card_key = key
             if key == "average_count" and action == "acquire":
-                if node.type == "acquire_reference":
+                if hardware_average:
+                    label = "Analyzer means per acquisition"
+                    card_key = None
+                elif node.type == "acquire_reference":
                     card_key = "reference_average_count"
                     parts.append(
                         "Current device tab: reference_average_count (reference averaging)"
@@ -506,8 +516,8 @@ class _Overview:
                     device,
                     channel,
                     key,
-                    _LABELS.get(key, key.replace("_", " ").replace(".", " / ").capitalize()),
-                    deepcopy(card_overrides.get(key, card.get(card_key))),
+                    label,
+                    deepcopy(card_overrides.get(key, card.get(card_key) if card_key is not None else None)),
                     deepcopy(value),
                     action,
                     node.id,
@@ -646,7 +656,7 @@ class _Overview:
             }
             default_details = {}
             if not data.get("source_file"):
-                defaults["store_source_spectra"] = True
+                defaults["store_source_spectra"] = not hardware_average
             if node.type == "acquire_reference":
                 defaults["minimum_duration"] = "0 s"
                 if data.get("source_file"):

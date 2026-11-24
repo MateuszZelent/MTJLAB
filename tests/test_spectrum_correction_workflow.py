@@ -234,7 +234,8 @@ def test_save_cancel_does_not_claim_recording_and_preflight_failure_stays_visibl
         application.processEvents()
 
 
-def test_quantitative_record_background_uses_the_selected_instrument_target(tmp_path, monkeypatch):
+@pytest.mark.parametrize("change_settings", [False, True])
+def test_quantitative_record_background_uses_the_selected_instrument_target(tmp_path, monkeypatch, change_settings):
     application = QApplication.instance() or QApplication([])
     workspace = SpectrumCorrectionWorkspace(simulation_settings(), single_sweep_available=True)
     requests, errors = [], []
@@ -246,14 +247,20 @@ def test_quantitative_record_background_uses_the_selected_instrument_target(tmp_
         def deliver():
             requests.append((operation, payload))
             try:
-                assert workspace.handle_result(operation, MODULE.dispatch(adapter, operation, payload))
-            except Exception as exc:
+                if change_settings and operation == "instrument_average":
+                    adapter._require_session().write("DET POS")
+                result = MODULE.dispatch(adapter, operation, payload)
+            except (RuntimeError, ValueError) as exc:
                 errors.append(str(exc))
                 workspace.handle_error(operation, str(exc))
+            else:
+                if not workspace.handle_result(operation, result):
+                    errors.append(f"Unexpected device result: {operation}")
         QTimer.singleShot(0, deliver)
 
     workspace.request_device.connect(request)
     workspace._cpu.failed.connect(lambda *args: errors.append(args))
+    workspace.busy_changed.connect(lambda busy: workspace.set_available(not busy))
     monkeypatch.setattr(StationFileDialog, "getSaveFileName", lambda *_: (str(destination), ""))
     try:
         workspace.resize(1050, 790)
@@ -273,6 +280,10 @@ def test_quantitative_record_background_uses_the_selected_instrument_target(tmp_
         assert not errors, errors
         assert [operation for operation, _ in requests] == ["read_acquisition_configuration", "instrument_average"]
         assert requests[-1][1].frame_count == 7
+        if change_settings:
+            assert not destination.exists() and workspace._profile is None
+            assert "settings changed" in workspace.state_label.text()
+            return
         assert workspace._profile.sweep_count == 7
         assert "variance unavailable" in workspace.state_label.text()
         assert workspace.acquire_signal.isEnabled()

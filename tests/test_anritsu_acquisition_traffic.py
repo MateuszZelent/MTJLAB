@@ -85,7 +85,8 @@ def test_grouped_live_checks_both_sides_of_binary_read_in_three_transactions(nat
     assert binary == "TRAC? TRAC1"
     for group in (before, after):
         assert set(group.split(";")) == {
-            "SWE:POIN?", "FREQ:STAR?", "FREQ:STOP?", "FORM?", "FORM:BORD?", "TRAC:STOR:MODE? 1", "SYST:ERR?",
+            "SWE:POIN?", "FREQ:STAR?", "FREQ:STOP?", "FORM?", "FORM:BORD?",
+            "TRAC:STOR:MODE? 1", "DISP:WIND:TRAC:Y:SPAC?", "SYST:ERR?",
         }
 
     adapter.stop_live()
@@ -93,6 +94,31 @@ def test_grouped_live_checks_both_sides_of_binary_read_in_three_transactions(nat
     session.commands.clear()
     adapter.fetch_current_trace_fast()
     assert all(";" not in command for command in session.commands)
+
+
+@pytest.mark.parametrize("transfer", ["fetch_current_trace", "fetch_current_trace_fast"])
+def test_trace_requires_log_scale_for_dbm(connected, transfer):
+    adapter, session = connected
+    session.scale_mode = "LIN"
+
+    with pytest.raises(DeviceError, match="Log scale.*dBm"):
+        getattr(adapter, transfer)()
+    assert "TRAC? TRAC1" not in session.commands
+
+
+def test_grouped_live_rejects_linear_scale_changed_while_reading(native_gpib, monkeypatch):
+    adapter, session = native_gpib
+    adapter.start_live(True)
+    read = session.query_binary_values
+
+    def change_scale(command, **options):
+        values = read(command, **options)
+        session.scale_mode = "LIN"
+        return values
+
+    monkeypatch.setattr(session, "query_binary_values", change_scale)
+    with pytest.raises(DeviceError, match="Log scale.*dBm"):
+        adapter.fetch_current_trace_fast()
 
 
 @pytest.mark.parametrize("finish", ["abort_acquisition", "disconnect"])

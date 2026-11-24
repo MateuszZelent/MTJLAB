@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from app.domain.errors import ExecutionError
+from app.domain.spectrum_averaging import InstrumentAverageProvenance
 from app.engine.compiler import ExecutionPlan, PlanAction, action_produces_checkpoint, controlled_output_endpoints
 
 if TYPE_CHECKING:
@@ -22,6 +23,10 @@ class RecoveredReference:
     fingerprint: str
     origin: dict[str, Any]
     acquisition_mode: str = "single_sweep"
+
+    @property
+    def instrument_average(self) -> InstrumentAverageProvenance | None:
+        return self.trace.instrument_average
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,33 +164,36 @@ class RunRecoveryManager:
         if not state or state.get("index") is None:
             return None
         from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
+        from app.storage.hdf5_reader import Hdf5RunReader
         from app.storage.hdf5_writer import Hdf5RunWriter
 
         index = state["index"]
         fingerprint = state.get("fingerprint")
         if type(index) is not int or index < 0 or not isinstance(fingerprint, str) or not fingerprint:
             raise ExecutionError("Recovery reference lacks a qualified identity.")
-        key = f"references/{index}"
-        if key not in h5:
+        group = h5.get(f"references/{index}")
+        if group is None and index == 0:
+            group = h5.get("reference")
+        if group is None:
             raise ExecutionError("Recovery reference is missing from the archive.")
-        group = h5[key]
         from app.storage.reference_transaction import require_committed_reference
 
         require_committed_reference(group)
         try:
+            metadata, stored_fingerprint, instrument_average = Hdf5RunReader._reference_acquisition(group)
+            if stored_fingerprint is not None and stored_fingerprint != fingerprint:
+                raise ValueError("reference fingerprint differs from the confirmed boundary")
             trace = SpectrumTrace(tuple(group["frequency_hz"][:]), tuple(group["power_dbm"][:]),
-                datetime.fromisoformat(str(group.attrs["acquired_at_utc"])), str(group.attrs["trace_name"]))
+                datetime.fromisoformat(str(group.attrs["acquired_at_utc"])), str(group.attrs["trace_name"]),
+                instrument_average=instrument_average)
             Hdf5RunWriter._validate_trace(trace)
             origin = state.get("origin", {})
             if not isinstance(origin, dict):
                 raise ValueError("origin must be a mapping")
-            metadata = json.loads(group.attrs.get("acquisition_metadata_json", "{}"))
-            if not isinstance(metadata, dict):
-                raise ValueError("acquisition metadata must be a mapping")
             acquisition_mode = metadata.get("acquisition_mode", "single_sweep")
             if acquisition_mode not in ("single_sweep", "continuous_live"):
                 raise ValueError("unsupported reference acquisition mode")
-        except (KeyError, TypeError, ValueError) as exc:
+        except (ExecutionError, KeyError, TypeError, ValueError) as exc:
             raise ExecutionError("Recovery reference is malformed.") from exc
         return RecoveredReference(trace, index, fingerprint, origin, acquisition_mode)
 

@@ -185,6 +185,8 @@ class RunTelemetryCoalescer:
         now = time.monotonic()
         ready: tuple[str, object] | None = None
         with self._lock:
+            # Measurements and references share a plot. Replacement must also update delivery order.
+            self._pending.pop(name, None)
             self._pending[name] = (name, data)
             last = self._last_emit.get(name)
             if not self._pull_mode and (last is None or now - last >= self._interval_s):
@@ -575,6 +577,7 @@ class RunWorker(QObject):
                     settings_source=settings_source,
                     plan_hash=self._plan.sha256,
                     checkpoint_count=self._recovery.stored_points,
+                    reference_index=self._recovery.reference.index if self._recovery.reference else None,
                     expected_points=self._plan.total_points,
                     csv_summary_path=(
                         self._recovery.path.with_suffix(".csv")

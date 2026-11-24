@@ -1755,6 +1755,7 @@ class MainWindow(FluentWindow):
             "recover_from_compliance",
             "set_compliance_policy",
             "ramp_to_zero",
+            "abort_acquisition",
             "stop_live",
             "disconnect",
             "stop_vout",
@@ -2295,6 +2296,7 @@ class MainWindow(FluentWindow):
         # projection timer while the worker is active; the execution monitor
         # still receives every lifecycle event needed for progress and safety.
         if preview_event and self._run_controller.running:
+            self._pending_execution_previews.pop(name, None)
             self._pending_execution_previews[name] = dict(payload)
             if not self._execution_preview_timer.isActive():
                 self._execution_preview_timer.start()
@@ -2773,6 +2775,7 @@ class MainWindow(FluentWindow):
             self._settings,
             simulation=self._simulation,
         )
+        self.anritsu_page.prepare_acquisition_stop()
         for controller in self._controllers.values():
             controller.call("emergency_off")
         self._audit_record(

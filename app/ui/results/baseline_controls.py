@@ -5,12 +5,7 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from qfluentwidgets import CaptionLabel, CardWidget, ComboBox, FlowLayout, PushButton
 
 from .filter_choices import FilterComboBox
-
-
-def baseline_sample_label(reference):
-    if reference.selected_sweep is not None:
-        return f"repeat {reference.selected_sweep + 1}/{reference.collection_average_count}"
-    return f"stored mean · {reference.average_count} sweep(s)"
+from .processing import baseline_sample_label
 
 
 class BaselineSampleCombo(FilterComboBox):
@@ -25,7 +20,7 @@ class BaselineSampleCombo(FilterComboBox):
     def set_reference(self, reference, selected=None):
         blocked = self.blockSignals(True)
         count = len(reference.source_sweep_indices) if reference is not None else 0
-        mean_label = (f"Stored mean · {reference.average_count} sweep(s)" if reference is not None
+        mean_label = (baseline_sample_label(reference).capitalize() if reference is not None
                       else "Stored mean — choose collection")
         self.set_options((mean_label, None), tuple(range(count)),
                          lambda ordinal: f"Individual repeat {ordinal + 1} / {count}")

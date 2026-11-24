@@ -31,7 +31,13 @@ from .analysis_export import (
 from .heatmap_cache import HeatmapSourceCache
 from .heatmap_coordinates import HeatmapCoordinates, HeatmapRequest, _selected_checkpoints
 from .map_processing import MapProcessing
-from .processing import ResultProcessing
+from .processing import (
+    ResultProcessing,
+    baseline_sample_label,
+    recorded_instrument_average,
+    recorded_spectrum_label,
+    recorded_spectrum_provenance,
+)
 from .read_session import ResultReadSession
 from .spectrum_views import SpectrumView, read_private_view, read_public_view
 
@@ -171,9 +177,13 @@ def _spectrum_traces(session, state, checkpoint, point, cancelled):
                                       state.processing, state.view, cancelled=cancelled)
             return result.traces, result.baselines, spectrum.x_label, spectrum.x_unit
         trace = spectrum.traces[state.trace_index]
-        operation = ("subtract_power_signed",) if dict(state.row.definition).get("lab control role") == "spectrum_processed" else ()
-        return (SpectrumDisplayTrace("recorded", trace.name, spectrum.x_values, trace.values,
-                                     spectrum.y_unit, checkpoint, operation),), (), spectrum.x_label, spectrum.x_unit
+        if spectrum.role == "spectrum_processed":
+            label, provenance = trace.name, ("subtract_power_signed",)
+        else:
+            label = recorded_spectrum_label(point, trace.name)
+            provenance = recorded_spectrum_provenance(point)
+        return (SpectrumDisplayTrace("recorded", label, spectrum.x_values, trace.values,
+                                     spectrum.y_unit, checkpoint, provenance),), (), spectrum.x_label, spectrum.x_unit
     if state.processing.active or state.view.active:
         result = read_private_view(session, point, state.processing, state.view, cancelled=cancelled)
         return result.traces, result.baselines, "Frequency", "Hz"
@@ -186,8 +196,10 @@ def _spectrum_traces(session, state, checkpoint, point, cancelled):
         return raw.saved_display.traces, (), "Frequency", "Hz"
     traces, baselines = [], ()
     if state.variant in {"raw", "raw_processed", "raw_reference"}:
-        traces.append(SpectrumDisplayTrace("raw", "Stored spectrum", raw.frequencies_hz,
-                                           raw.powers_dbm, "dBm", checkpoint))
+        label = recorded_spectrum_label(point, "Stored spectrum", trace_name=raw.trace_name)
+        provenance = recorded_spectrum_provenance(point, trace_name=raw.trace_name)
+        traces.append(SpectrumDisplayTrace("raw", label, raw.frequencies_hz,
+                                           raw.powers_dbm, "dBm", checkpoint, provenance))
     if state.variant in {"processed", "raw_processed"}:
         if raw.processed_values is None or (traces and raw.processed_unit != "dBm"):
             raise ValueError("Stored processed spectrum is missing or uses incompatible overlay units.")
@@ -201,7 +213,9 @@ def _spectrum_traces(session, state, checkpoint, point, cancelled):
         reference = session.reference(session.path, raw.reference_index if raw.reference_index is not None else 0)
         if reference is None:
             raise ValueError("Linked reference is unavailable.")
-        traces.append(SpectrumDisplayTrace("reference", "Reference spectrum", reference.frequencies_hz,
+        label = (f"Reference · {baseline_sample_label(reference)}" if reference.averaging_source == "instrument"
+                 else "Reference spectrum")
+        traces.append(SpectrumDisplayTrace("reference", label, reference.frequencies_hz,
                                            reference.powers_dbm, "dBm", checkpoint))
         baselines = (RecordedBaselineEvidence.from_reference(reference),)
     return tuple(traces), baselines, "Frequency", "Hz"
@@ -260,8 +274,10 @@ def _export_heatmap(path, item, state, source, cache, metadata, cancelled):
                     palette=state.palette, colour_levels=levels,
                     missing_checkpoints=payload.missing_checkpoints,
                     signed_difference=signed, display_transform="absolute_difference" if absolute else "none",
-                    line_classification_source="Recorded raw dBm, same selected coordinate plane"
+                    line_classification_source="Recorded dBm, same selected coordinate plane"
                     if state.map_state.mask_lines else None)
+    if payload.instrument_averages:
+        metadata["instrument_averages_by_checkpoint"] = payload.instrument_averages
     canvas, ax = _figure(item.title)
     image = ax.pcolormesh(x_edges, y_edges, matrix, cmap=ListedColormap(state.colours),
                           vmin=levels[0], vmax=levels[1], shading="flat", rasterized=True)
@@ -276,7 +292,8 @@ def _export_heatmap(path, item, state, source, cache, metadata, cancelled):
 
 def _export_spectrum(path, item, state, session, points, metadata, cancelled):
     checkpoint = item.checkpoints[0]
-    traces, baselines, x_label, x_unit = _spectrum_traces(session, state, checkpoint, points.get(checkpoint), cancelled)
+    point = points.get(checkpoint)
+    traces, baselines, x_label, x_unit = _spectrum_traces(session, state, checkpoint, point, cancelled)
     if not traces:
         raise ValueError("No visible spectrum trace is available.")
     canvas, ax = _figure(item.title)
@@ -306,6 +323,9 @@ def _export_spectrum(path, item, state, session, points, metadata, cancelled):
     metadata.update(absolute_traces=absolute_traces, value_unit=traces[0].unit,
                     axes={"x": {"label": x_label, "unit": x_unit}},
                     recorded_baselines=[processing_manifest(ref) for ref in baselines])
+    average = recorded_instrument_average(point)
+    if average is not None:
+        metadata["instrument_average"] = average
     write_analysis_manifest(path, metadata)
 
 

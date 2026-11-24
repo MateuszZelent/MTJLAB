@@ -60,6 +60,20 @@ def test_coalesced_repeated_phases_keep_chronological_order():
     assert events[-1][1]["action_index"] == 2
 
 
+def test_coalesced_reference_does_not_replace_a_newer_measurement():
+    events = []
+    buffer = RunTelemetryCoalescer(lambda name, data: events.append((name, data)), pull_mode=True)
+    buffer.submit("spectrum_preview", {"point_index": 1})
+    buffer.submit("reference_preview", {"average_count": 32})
+    buffer.submit("spectrum_preview", {"point_index": 2})
+    buffer.flush()
+
+    assert events == [
+        ("reference_preview", {"average_count": 32}),
+        ("spectrum_preview", {"point_index": 2}),
+    ]
+
+
 def test_narrow_workspace_reserves_space_for_both_tree_and_plot():
     app = QApplication.instance() or QApplication([])
     page = RunMonitorPage()

@@ -132,21 +132,24 @@ def test_signed_background_filters_archive_raw_and_match_shared_pipeline(tmp_pat
     np.testing.assert_array_equal(preview["processed_values"], stored.processed_values)
 
 
-@pytest.mark.parametrize("compatible", [True, False])
-def test_raw_only_checkpoint_reports_matching_reference_difference_for_preview(tmp_path, compatible):
+@pytest.mark.parametrize("mismatch", [None, "settings", "averaging_source"])
+def test_raw_only_checkpoint_reports_matching_reference_difference_for_preview(tmp_path, mismatch):
     path = tmp_path / "raw-preview.h5"
     events = []
     recipe = yaml.safe_load(recipe_with(reference_operation="none", store_processed=False))
-    if not compatible:
-        children = recipe["root"]["children"]
+    children = recipe["root"]["children"]
+    if mismatch == "settings":
         children.insert(2, dict(children[0], id="reconfigure", reference_level="-10 dBm"))
+    elif mismatch == "averaging_source":
+        children[-1].pop("average_count", None)
+        children[-1]["instrument_average_count"] = 4
     result, _ = execute(path, events=events, source=yaml.safe_dump(recipe))
     assert result.error is None
     stored = Hdf5RunReader.spectrum(path, 0)
     baseline = Hdf5RunReader.reference(path, 0)
     preview = next(payload for name, payload in events if name == "spectrum_preview")
     assert stored.processed_values is None
-    if compatible:
+    if mismatch is None:
         np.testing.assert_allclose(
             preview["raw_minus_reference_db"],
             np.asarray(stored.powers_dbm) - baseline.powers_dbm,
@@ -155,14 +158,20 @@ def test_raw_only_checkpoint_reports_matching_reference_difference_for_preview(t
         assert preview["raw_minus_reference_db"] is None
 
 
-def saved_reference(tmp_path, kind, *, mismatch=False):
+def saved_reference(tmp_path, kind, *, mismatch=False, instrument_average=False):
     settings = simulation_settings()
     adapter = AnritsuAdapter(settings, session_factory=SimulatedVisaFactory("anritsu"))
     adapter.connect()
     try:
         plan = RecipeCompiler(settings).compile(parse_recipe_text(SOURCE))
         adapter.configure_spectrum(plan.actions[0].payload["config"])
-        trace = adapter.acquire_single_sweep("TRAC1")
+        if instrument_average:
+            from app.devices.anritsu_ms2830a import InstrumentAverageTarget
+
+            acquisition = adapter.acquire_manual_instrument_average(InstrumentAverageTarget(frame_count=8))
+            trace, count = acquisition.trace, acquisition.count
+        else:
+            trace, count = adapter.acquire_single_sweep("TRAC1"), 1
         full = adapter.read_full_configuration()
         advanced = adapter.read_advanced_spectrum_configuration()
         if mismatch:
@@ -171,8 +180,8 @@ def saved_reference(tmp_path, kind, *, mismatch=False):
         if kind == "reference":
             reference = ReferenceSpectrum(
                 trace,
-                "single",
-                1,
+                "averaged" if count > 1 else "single",
+                count,
                 trace.acquired_at_utc,
                 source_device_idn=adapter.identity.idn,
                 reference_level_dbm=full.reference_level_dbm,
@@ -239,6 +248,32 @@ def test_imported_reference_verified_against_instrument_and_archived(tmp_path, k
 
     attempts = 1 + ExecutionPolicy.from_settings(simulation_settings()).retry_count
     assert PlanEstimator(simulation_settings()).estimate(plan).spectrum_values == (2 * attempts + 2) * 101
+
+
+def test_imported_anritsu_average_retains_provenance_and_execute_correction(tmp_path):
+    source_path = saved_reference(tmp_path, "reference", instrument_average=True)
+    source = yaml.safe_load(source_with_file(source_path, "reference"))
+    _, reference, measurement = source["root"]["children"]
+    reference.pop("average_count", None)
+    measurement.pop("average_count", None)
+    measurement.update(instrument_average_count=4, reference_operation="difference_db")
+    archive = tmp_path / "imported-anritsu.h5"
+    events = []
+
+    result, _ = execute(archive, source=yaml.safe_dump(source), events=events)
+
+    assert result.error is None and result.stored_points == 1
+    original = ReferenceHdf5Store.load(source_path).instrument_average.metadata()
+    reference_preview = next(payload for name, payload in events if name == "reference_preview")
+    signal_preview = next(payload for name, payload in events if name == "spectrum_preview")
+    assert reference_preview["instrument_average"] == original
+    stored = Hdf5RunReader.spectrum(archive, 0)
+    baseline = Hdf5RunReader.reference(archive, 0)
+    np.testing.assert_allclose(signal_preview["raw_minus_reference_db"], np.asarray(stored.powers_dbm) - baseline.powers_dbm)
+    with h5py.File(archive) as file:
+        metadata = json.loads(file["references/0"].attrs["acquisition_metadata_json"])
+        assert metadata["instrument_average"] == original
+        assert "recipe_raw_sweeps_v1" not in file
 
 
 def test_changed_asset_fails_before_recipe_actions(tmp_path, monkeypatch):

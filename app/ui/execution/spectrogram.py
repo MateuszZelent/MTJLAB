@@ -54,7 +54,7 @@ class ExecutionSpectrogram(QWidget):
         self.plot.addItem(self.image)
         self.color_bar = pg.ColorBarItem(values=(-120.0, 0.0), colorMap=pg.colormap.get("viridis"), interactive=False)
         self.color_bar.setImageItem(self.image, insert_in=self.plot.getPlotItem())
-        self.color_bar.axis.setLabel("Raw power", units="dBm")
+        self.color_bar.axis.setLabel("Stored power", units="dBm")
         own_plot_item_menus(self.color_bar, self.plot)
         self.layout().addWidget(self.plot, 1)
         self._apply_theme()

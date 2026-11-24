@@ -16,6 +16,7 @@ from typing import Callable, Mapping, Protocol, Sequence
 
 from app.domain.errors import ConfigurationError, ExecutionError, SafetyViolation
 from app.domain.quantities import Quantity, QuantityError, parse_quantity
+from app.recipes.block_registry import ANRITSU_HARDWARE_AVERAGE_FIELDS
 from app.recipes.models import Recipe, RecipeNode
 from app.recipes.parameter_registry import parameter_descriptor
 from app.recipes.sweep_points import estimate_sweep_point_count, generate_sweep_stage_points
@@ -520,16 +521,16 @@ def _label(node: RecipeNode) -> str:
         ):
             return f"{device} · configuration"
     if node.type in {"acquire_spectrum", "acquire_reference"}:
+        if node.type == "acquire_reference" and node.data.get("source_file"):
+            return f"Load saved {node.data.get('file_kind', 'reference')}"
         label = "Acquire spectrum" if node.type == "acquire_spectrum" else "Acquire reference"
         if node.type == "acquire_reference" and node.data.get("purpose") == "background":
             label = "Acquire background"
-        if count := node.data.get("instrument_average_count"):
-            return f"{label} · Anritsu Lin Average · {count} sweeps"
-        if target := node.data.get("instrument_average_duration"):
-            return f"{label} · Anritsu Lin Average · ~{target}"
+        if any(field in node.data for field in ANRITSU_HARDWARE_AVERAGE_FIELDS):
+            return f"{label} · Anritsu Lin Average"
         if node.data.get("acquisition_mode") == "continuous_live":
             return f"{label} · PyLab Live averaging"
-        return f"{label} · Anritsu"
+        return f"{label} · PyLab triggered sweeps"
     if node.type == "wait":
         return f"Wait · {node.data.get('duration', 'timing')}"
     if node.type == "set_keithley_output":

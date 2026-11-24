@@ -1,8 +1,16 @@
 """Read-only post-acquisition processing shared by spectra and coordinate planes."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.domain.spectrum_averaging import (
+    ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS,
+    ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS,
+    InstrumentAverageProvenance,
+    instrument_average_metadata,
+    legacy_instrument_average_count,
+)
 from app.recipes.spectrum_processing import REFERENCE_UNITS
 from app.spectrum.analysis import SpectrumAnalysisParameters
 from app.spectrum.display_processing import clean_display_spectrum
@@ -10,6 +18,64 @@ from app.spectrum.preview_processing import SpectrumPreviewProcessor
 from app.spectrum.processing import apply_reference_operation, frequency_grids_match
 from app.storage import Hdf5RunReader
 from app.storage.hdf5_reader import iter_recipe_spectrum_sweeps
+
+
+ANRITSU_MEAN_HISTORY_MESSAGE = (
+    "Anritsu average stores one completed mean. Use recorded individual PyLab sweeps for same-point power averaging or EMI lines."
+)
+
+
+def recorded_instrument_average(point, *, trace_name: str = "") -> dict | None:
+    metadata = point.metadata if point is not None else {}
+    evidence = instrument_average_metadata(metadata)
+    if evidence is not None:
+        try:
+            return InstrumentAverageProvenance.from_metadata(evidence).metadata()
+        except ValueError:
+            pass
+        # Keep an explicit older count visible even if timing is unavailable.
+        if isinstance(evidence, Mapping) and set(evidence) == {"sweep_count"}:
+            count = evidence["sweep_count"]
+            if type(count) is int and ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS <= count <= ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS:
+                return {"sweep_count": count}
+    count = metadata.get("spectrum_average_count", metadata.get("average_count"))
+    if ("artifact_schema" in metadata and isinstance(metadata.get("acquisition_metadata"), Mapping)):
+        source = metadata["acquisition_metadata"].get("averaging_source")
+    else:
+        source = metadata.get("averaging_source")
+    if source == "instrument" and type(count) is int and ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS <= count <= ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS:
+        return {"sweep_count": count}
+    recoverable = legacy_instrument_average_count(trace_name or getattr(point, "recorded_trace_name", None) or "")
+    if recoverable is not None and (count is None or recoverable == count):
+        return {"sweep_count": recoverable}
+    return None
+
+
+def recorded_spectrum_label(point, default: str, *, trace_name: str = "") -> str:
+    average = recorded_instrument_average(point, trace_name=trace_name)
+    if average is not None:
+        return f"Anritsu average ({average['sweep_count']} sweeps)"
+    metadata = point.metadata if point is not None else {}
+    count = metadata.get("spectrum_average_count", metadata.get("average_count"))
+    return f"Stored mean ({count} sweeps)" if type(count) is int and count > 1 else default
+
+
+def recorded_spectrum_provenance(point, *, trace_name: str = "") -> tuple[str, ...]:
+    average = recorded_instrument_average(point, trace_name=trace_name)
+    if average:
+        provenance = ("Anritsu Lin Average", f"sweeps={average['sweep_count']}")
+        nominal = average.get("nominal_duration_s")
+        return provenance if nominal is None else (*provenance, f"nominal_duration_s={nominal:.9g}")
+    return ("recorded spectrum",)
+
+
+def baseline_sample_label(reference) -> str:
+    selected = getattr(reference, "selected_sweep", None)
+    if selected is not None:
+        return f"repeat {selected + 1}/{reference.collection_average_count}"
+    if getattr(reference, "averaging_source", None) == "instrument":
+        return f"Anritsu mean · {reference.average_count} sweeps"
+    return f"stored mean · {reference.average_count} sweep(s)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,12 +126,17 @@ class RecordedBaselineEvidence:
     selected_sweep: int | None = None
     source_sweep_indices: tuple[int, ...] = ()
     collection_average_count: int | None = None
+    averaging_source: str | None = None
+    instrument_average: dict | None = None
 
     @classmethod
     def from_reference(cls, reference):
+        average = getattr(reference, "instrument_average", None)
         return cls(reference.index, reference.purpose, reference.acquired_at_utc,
             reference.average_count, reference.configuration_fingerprint, reference.selected_sweep,
-            reference.source_sweep_indices, reference.collection_average_count)
+            reference.source_sweep_indices, reference.collection_average_count,
+            getattr(reference, "averaging_source", None),
+            average.metadata() if average is not None else None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,8 +205,8 @@ class ResultSpectrumProcessor:
             raise ValueError("Reference/background frequency grid differs from the raw spectrum.")
         point = self.points.get(checkpoint)
         notes = []
-        evidence = (point.metadata.get("spectrum_processing_v1") or {}) if point else {}
-        fingerprint = evidence.get("configuration_fingerprint")
+        evidence = point.metadata.get("spectrum_processing_v1") if point else None
+        fingerprint = evidence.get("configuration_fingerprint") if isinstance(evidence, Mapping) else None
         if fingerprint and reference.configuration_fingerprint:
             if fingerprint != reference.configuration_fingerprint:
                 raise ValueError("Reference/background analyzer settings differ from this checkpoint.")
@@ -144,14 +215,17 @@ class ResultSpectrumProcessor:
             notes.append(note)
         return reference, tuple(notes)
 
-    def process(self, checkpoint, frequencies_hz, values, unit="dBm"):
+    def process(self, checkpoint, frequencies_hz, values, unit="dBm", *, trace_name=""):
         state = self.state
         operation = state.math_operation
         params = state.parameters
         point = self.points.get(checkpoint)
+        average = recorded_instrument_average(point, trace_name=trace_name)
         history = ()
         times = ()
         if "emi_reject" in state.modes or params.temporal_average_frames > 1:
+            if average is not None or (point is not None and instrument_average_metadata(point.metadata) is not None):
+                raise ValueError(ANRITSU_MEAN_HISTORY_MESSAGE)
             indices = set(point.metadata.get("raw_recipe_sweep_indices", ())) if point else set()
             if indices:
                 records = []
@@ -226,10 +300,10 @@ class ResultSpectrumProcessor:
         notes = tuple(compatibility_notes) + result.notes
         self.notes.extend(note for note in notes if note not in self.notes)
         method = result.method
+        if average is not None:
+            method = f"Anritsu average ({average['sweep_count']} sweeps) → {method}"
         if state.operation != "none":
-            sample = (f"repeat {reference.selected_sweep + 1}/{reference.collection_average_count}"
-                      if reference.selected_sweep is not None else f"stored mean of {reference.average_count} sweep(s)")
-            method = f"Recorded {reference.purpose} {reference.index} · {sample} → {method}"
+            method = f"Recorded {reference.purpose} {reference.index} · {baseline_sample_label(reference)} → {method}"
         return ProcessedResultSpectrum(
             tuple(frequencies_hz), result.values, result.unit, method, notes, self.baselines
         )
@@ -244,11 +318,14 @@ def read_processed_private(path, point, state, *, reader=None):
         point.index,
         trace.frequencies_hz,
         trace.powers_dbm,
+        trace_name=trace.trace_name,
     )
 
 
 def read_processed_public(path, spectrum, trace_index, state, points=(), *, reader=None):
     # Public processed rows are never corrected a second time implicitly.
+    if state.active and spectrum.role == "spectrum_processed":
+        raise ValueError("Choose the recorded spectrum row for post-processing. This row already contains derived values.")
     trace = spectrum.traces[trace_index]
     return ResultSpectrumProcessor(path, state, points, reader=reader).process(
         spectrum.checkpoint,

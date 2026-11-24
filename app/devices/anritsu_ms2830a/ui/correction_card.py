@@ -208,6 +208,7 @@ class SpectrumCorrectionWorkspace(QWidget):
         self.background_averaging = BackgroundAveragingControls(
             self.duration, controls, allow_instrument=single_sweep_available,
             minimum_sweeps=settings.anritsu.spectrum_correction.calibration_min_sweeps,
+            instrument_timeout=settings.anritsu.acquisition.operation_complete_timeout,
         )
         self.tau = LineEdit(controls)
         self.tau.setText(settings.anritsu.spectrum_correction.temporal_average.time_constant)
@@ -617,7 +618,10 @@ class SpectrumCorrectionWorkspace(QWidget):
             self.archive_label.setText(f"Selected archive: {destination} · awaiting stable REF confirmation")
             self._await_cycle_state()
             return
-        self._message("Save accepted. Reading analyzer settings before recording the first sweep…")
+        self._message(
+            "Reading analyzer settings before collecting the instrument mean…" if instrument_target is not None
+            else "Save accepted. Reading analyzer settings before recording the first sweep…"
+        )
         self._request("read_acquisition_configuration")
 
     def _request(self, operation, payload=None):
@@ -630,6 +634,9 @@ class SpectrumCorrectionWorkspace(QWidget):
         if operation != self._expected_device or not self._running:
             return False
         self._expected_device = None
+        if self._instrument_target is not None and self._stopping:
+            self._finish_instrument_background()
+            return True
         try:
             if operation == "read_acquisition_configuration":
                 if (not isinstance(result, tuple) or len(result) != 2
@@ -646,8 +653,14 @@ class SpectrumCorrectionWorkspace(QWidget):
                     else:
                         self._cpu.stop_session("aborted")
                     return True
-                self._message("Starting recording: waiting for the first completed analyzer sweep…")
-                self._request("single_sweep")
+                if self._instrument_target is not None:
+                    self._message("Collecting the analyzer's linear-power average…")
+                    self._request("instrument_average", self._instrument_target)
+                else:
+                    self._message("Starting recording: waiting for the first completed analyzer sweep…")
+                    self._request("single_sweep")
+            elif operation == "instrument_average" and isinstance(result, InstrumentAverageResult):
+                self._save_instrument_background(result)
             elif operation == "single_sweep" and isinstance(result, SpectrumTrace):
                 if self._sweep_requested_at is not None:
                     self._live_timings_s["Sweep and transfer"] = time.perf_counter() - self._sweep_requested_at
@@ -671,16 +684,64 @@ class SpectrumCorrectionWorkspace(QWidget):
         self._failed(operation, error)
         return True
 
-    def _start_processor(self, first_trace):
-        assert self._full is not None and self._advanced is not None and self._archive_path is not None
-        fingerprint = self._configuration_fingerprint()
+    def _capture_context(self, trace):
         # Operator-provided state descriptions do not constitute experimental
         # qualification of detector statistics, trace mode, or signal absence.
-        self._context = SpectrumAcquisitionContext(
-            first_trace.frequencies_hz, fingerprint,
-            configuration_generation=first_trace.configuration_generation,
+        return SpectrumAcquisitionContext(
+            trace.frequencies_hz, self._configuration_fingerprint(),
+            configuration_generation=trace.configuration_generation,
             settings_verified=False, independent_sweeps_qualified=False,
         )
+
+    def _save_instrument_background(self, result: InstrumentAverageResult):
+        assert self._instrument_target is not None and self._archive_path is not None
+        assert self._full is not None
+        if (result.configuration is not None
+                and spectrum_configuration_fingerprint(*result.configuration, self._device_idn)
+                != self._configuration_fingerprint()):
+            raise ValueError("Analyzer settings changed after background preflight.")
+        trace = result.trace
+        if len(trace.frequencies_hz) != self._full.points:
+            raise ValueError("The analyzer average differs from the readback point count.")
+        if self._instrument_target.frame_count is not None and result.count != self._instrument_target.frame_count:
+            raise ValueError("The analyzer average differs from the requested sweep count.")
+        self._message("Analyzer mean received. Saving the background profile…")
+        self._cpu.save_instrument_background(InstrumentBackgroundRequest(
+            self._capture_context(trace), result, self._archive_path, self.reference_state.text().strip(),
+            self._settings.model_dump_json(), self._device_idn, self._simulation_mode,
+        ))
+
+    def _finish_instrument_background(self, result=None, *, error=None):
+        succeeded = result is not None and not self._stopping and error is None
+        self._instrument_target = None
+        self._running = self._stopping = False
+        self.recording_activity.stop()
+        self.recording_activity.hide()
+        self.archive_label.setText(f"Selected background profile: {self._archive_path}")
+        if succeeded:
+            self._context, self._profile, archive = result
+            self._clear_interference_calibrations()
+            self._dirty_view = self._reset_plot_on_render = True
+            self.recording_title.setText("Instrument background saved")
+            self.archive_label.setText(f"Background profile: {archive}")
+            detail = f"Instrument mean from {self._profile.sweep_count} sweeps. Empirical variance unavailable."
+        elif error is not None:
+            self.recording_title.setText("Instrument background failed")
+            detail = str(error)
+        else:
+            self.recording_title.setText("Instrument background canceled")
+            detail = "Background collection canceled."
+            if result is not None:
+                self.archive_label.setText(f"Completed mean saved: {result[2]}")
+        self.frame_label.setText(detail)
+        self._message(detail)
+        self.busy_changed.emit(False)
+        self.set_available(self._allowed)
+        self.recording_finished.emit("reference", succeeded)
+
+    def _start_processor(self, first_trace):
+        assert self._archive_path is not None
+        self._context = self._capture_context(first_trace)
         if self._kind == "signal" and self._profile.context_id != self._context.context_id:
             raise ValueError("Actual acquisition settings differ from the recorded background profile.")
         self._pending_raw = first_trace
@@ -729,7 +790,9 @@ class SpectrumCorrectionWorkspace(QWidget):
             # Drain the faulted session's close acknowledgement, but never
             # publish late results or schedule another instrument request.
             return
-        if operation == "start":
+        if operation == "save_instrument_background":
+            self._finish_instrument_background(result)
+        elif operation == "start":
             self._processor_active = True
             self.set_available(self._allowed)
             self._started_monotonic = time.monotonic()
@@ -878,7 +941,11 @@ class SpectrumCorrectionWorkspace(QWidget):
             self.reference_state.setText(self._profile.reference_state)
             self._dirty_view = True
             self.set_available(self._allowed)
-            self._message("Profile loaded; actual settings will be checked before signal acquisition.")
+            self._message(
+                "Instrument mean loaded. Empirical variance unavailable. Analyzer settings will be checked before acquisition."
+                if self._profile.averaging_source == "instrument"
+                else "Profile loaded; actual settings will be checked before signal acquisition."
+            )
             self.profile_load_finished.emit(True, "Background profile loaded.")
         elif operation == "export_profile":
             self._profile_io_busy = False
@@ -1051,10 +1118,19 @@ class SpectrumCorrectionWorkspace(QWidget):
             self.recording_title.setText("Canceling finalization…")
             self._message("Waiting for the current processing checkpoint to finish; sources remain unchanged.")
             return
-        if self._running:
+        if self._running and not self._stopping:
             self._stopping = True
             self.stop.setEnabled(False)
             self.new_signal_segment.setEnabled(False)
+            if self._instrument_target is not None:
+                self.recording_title.setText("Canceling instrument background…")
+                if self._expected_device is None:
+                    self._cpu.cancel_processing()
+                    self._message("Finishing the current archive checkpoint…")
+                else:
+                    self._message("Waiting for the analyzer to finish and restore its settings…")
+                self.set_available(self._allowed)
+                return
             self.recording_title.setText("Stopping recording…")
             self._message("Stopping after the pending sweep and its raw checkpoint…")
             self.set_available(self._allowed)
@@ -1065,6 +1141,9 @@ class SpectrumCorrectionWorkspace(QWidget):
                     self._cpu.stop_session("aborted")
 
     def _processing_cancelled(self, operation):
+        if operation == "save_instrument_background":
+            self._finish_instrument_background()
+            return
         if operation not in {"finalize", "finalize_batch", "resume_batch"}:
             return
         self._profile_io_busy = self._finalization_busy = False
@@ -1077,6 +1156,10 @@ class SpectrumCorrectionWorkspace(QWidget):
         self.set_available(self._allowed)
 
     def _failed(self, operation, error):
+        if self._instrument_target is not None:
+            self._expected_device = None
+            self._finish_instrument_background(error=error)
+            return
         if operation in {"import_profile", "export_profile", "finalize", "finalize_batch", "resume_batch", "import_interference"}:
             self._profile_io_busy = False
             self._finalization_busy = False
@@ -1237,6 +1320,9 @@ class SpectrumCorrectionWorkspace(QWidget):
     def _load_interference(self, dialog_parent=None):
         if self._running or self._profile_io_busy or self._profile is None or self._context is None:
             return
+        if self._profile.averaging_source == "instrument":
+            self._message("Choose a background recorded with individual sweeps before loading an interference model.")
+            return
         path, _ = StationFileDialog.getOpenFileName(
             dialog_parent or self, "Load interference calibrations from an archive", "", "HDF5 measurement (*.h5 *.hdf5)",
         )
@@ -1261,7 +1347,7 @@ class SpectrumCorrectionWorkspace(QWidget):
             return
         self.load_background_profile(Path(path))
 
-    def load_background_profile(self, path: Path):
+    def load_background_profile(self, path: Path, *, require_raw_sweeps=False):
         if self._running or self._profile_io_busy:
             raise RuntimeError("Stop recording and wait for the current profile operation before loading a background.")
         self._profile_io_busy = True
@@ -1271,7 +1357,7 @@ class SpectrumCorrectionWorkspace(QWidget):
         self._message(f"Reading background profile: {path}")
         self.set_available(self._allowed)
         try:
-            self._cpu.load_profile(Path(path))
+            self._cpu.load_profile(Path(path), require_raw_sweeps=require_raw_sweeps)
         except (ValueError, BufferError) as exc:
             self._failed("import_profile", str(exc))
 

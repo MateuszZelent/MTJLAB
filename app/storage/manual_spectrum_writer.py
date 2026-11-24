@@ -198,6 +198,8 @@ class ManualSpectrumArchive:
                 "metadata_sampled_at_utc": datetime.now(timezone.utc).isoformat(),
                 "metadata_snapshot_kind": "last_confirmed_at_save",
                 "capture_context_at_save": capture_context or {},
+                **({"instrument_average": capture_context["instrument_average"]}
+                   if capture_context is not None and "instrument_average" in capture_context else {}),
                 **({"saved_display_v1": True} if saved_display is not None else {}),
                 **reference_metadata,
             },

@@ -442,6 +442,37 @@ def test_large_spectrum_preview_is_decimated_before_plotting() -> None:
         app.processEvents()
 
 
+def test_execution_preview_labels_averaging_source_and_keeps_reference_difference() -> None:
+    app = QApplication.instance() or QApplication([])
+    page = RunMonitorPage()
+    try:
+        page.resize(1200, 760)
+        page.show()
+        app.processEvents()
+        preview = {
+            "point_index": 2,
+            "frequency_hz": (1.0e6, 2.0e6, 3.0e6),
+            "power_dbm": (-74.0, -78.0, -80.0),
+            "raw_minus_reference_db": (4.0, -1.0, 1.0),
+        }
+        for method, label in (
+            ({"acquisition_mode": "continuous_live", "average_count": 8}, "PyLab Live average"),
+            ({"acquisition_mode": "single_sweep", "average_count": 8}, "PyLab triggered average"),
+            ({"instrument_average": {"sweep_count": 8}}, "Anritsu average"),
+        ):
+            page.update_spectrum_preview({**preview, **method})
+            trace_label = f"{label} − Reference"
+            assert list(page.spectrum_preview._traces) == [trace_label]
+            _, displayed = page.spectrum_preview._traces[trace_label]
+            assert tuple(displayed) == preview["raw_minus_reference_db"]
+            assert f"{trace_label} · 8 sweeps" in page.spectrum_preview.plot.plotItem.titleLabel.text
+    finally:
+        page.close()
+        page.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
 def test_execution_page_owns_only_the_semantic_measurement_tree() -> None:
     """Execution must never install an item-based fallback measurement tree."""
 

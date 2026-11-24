@@ -10,6 +10,7 @@ from typing import Any
 from app.devices.anritsu_ms2830a import ReferenceSpectrum, SpectrumTrace
 from app.domain.errors import ExecutionError
 from app.domain.models import MeasurementPoint
+from app.domain.spectrum_averaging import InstrumentAverageProvenance
 from app.storage.hdf5_reader import Hdf5RunReader
 from app.storage.hdf5_writer import Hdf5RunWriter
 
@@ -84,6 +85,7 @@ class ReferenceHdf5Store:
         if stored is None:
             raise ExecutionError("The reference file contains no spectrum data.")
         try:
+            evidence = metadata.get("instrument_average")
             acquired = datetime.fromisoformat(
                 stored.acquired_at_utc or str(metadata["acquired_at_utc"])
             )
@@ -92,6 +94,7 @@ class ReferenceHdf5Store:
                 powers_dbm=stored.powers_dbm,
                 acquired_at_utc=acquired,
                 trace_name=stored.trace_name,
+                instrument_average=InstrumentAverageProvenance.from_metadata(evidence) if evidence is not None else None,
             )
             reference = ReferenceSpectrum(
                 trace=trace,
@@ -152,6 +155,7 @@ class ReferenceHdf5Store:
             "sweep_time_s": reference.sweep_time_s,
             "notes": reference.notes,
             "grid_hash": reference.grid_hash,
+            **({"instrument_average": reference.instrument_average.metadata()} if reference.instrument_average else {}),
         }
 
     @staticmethod

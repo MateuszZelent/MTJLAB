@@ -57,6 +57,28 @@ def test_three_overlay_curves_subtract_in_power_and_preserve_signed_values(neste
         read_private_view(session, point, ResultProcessing(), replace(view, background_index=1))
 
 
+@pytest.mark.parametrize("public", [False, True])
+def test_recorded_native_average_keeps_its_label_in_reference_comparison(nested_archive, public, monkeypatch):
+    session = ResultReadSession(nested_archive)
+    original = session.point(0)
+    metadata = dict(original.metadata)
+    processing = dict(metadata.get("spectrum_processing_v1", {}))
+    processing["instrument_average"] = {"sweep_count": 50}
+    metadata["spectrum_processing_v1"] = processing
+    point = replace(original, metadata=metadata)
+    monkeypatch.setattr(session, "point", lambda _index: point)
+    view = SpectrumView(show_analysis=False, show_raw=True, show_reference=True,
+                        reference_operation="subtract_reference_signed")
+    if public:
+        row = find_heatmap_rows(ThatecRunReader.describe(nested_archive))[0]
+        spectrum = session.public_spectrum(nested_archive, row.id, 0)
+        payload = read_public_view(session, spectrum, 0, (point,), ResultProcessing(), view)
+    else:
+        payload = read_private_view(session, point, ResultProcessing(), view)
+    assert [trace.label for trace in payload.traces] == ["Anritsu average (50 sweeps)",
+                                                        "Anritsu average (50 sweeps) − reference"]
+
+
 def test_recorded_markers_fixed_ranges_hold_float_and_export(nested_archive, shell_qt_application, tmp_path):
     app = shell_qt_application
     tab = load_tab(app, nested_archive)

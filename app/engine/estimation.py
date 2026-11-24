@@ -155,7 +155,12 @@ class PlanEstimator:
                 block_id = action.source_node_id or action.node_id
                 if action.payload.get("source_file"):
                     spectrum_extra_bytes += 8 * latest_spectrum_points * 8 + 16384
-                    warnings[f"{block_id}: loads a verified file; no reference sweeps are acquired."] += 1
+                    if action.payload.get("reference_averaging_source") == "instrument":
+                        warnings[
+                            f"{block_id}: loads a verified Anritsu mean ({action.payload['average_count']} sweeps)."
+                        ] += 1
+                    else:
+                        warnings[f"{block_id}: loads a verified file; no reference sweeps are acquired."] += 1
                     continue
                 average_count = int(action.payload.get("average_count", 1))
                 instrument_count = action.payload.get("instrument_average_count")
@@ -168,8 +173,8 @@ class PlanEstimator:
                 )
                 delay_budget = max(0, average_count - 1) * float(action.payload.get("inter_sweep_delay_s", 0.0))
                 nominal += delay_budget
+                configured_duration = action.payload.get("instrument_average_nominal_duration_s")
                 if instrument_count is not None:
-                    configured_duration = action.payload.get("instrument_average_nominal_duration_s")
                     timing_note = (
                         f"about {configured_duration:g} s at the configured sweep time"
                         if configured_duration is not None else "actual duration depends on analyzer sweep time"
@@ -182,8 +187,16 @@ class PlanEstimator:
                         f"({timing_note})."
                     ] += 1
                 elif instrument_duration is not None:
-                    nominal += instrument_duration
-                    warnings[f"{block_id}: targets {instrument_duration:g} s in the analyzer and reads one mean spectrum."] += 1
+                    nominal += configured_duration if configured_duration is not None else instrument_duration
+                    if configured_duration is not None:
+                        sweep_count = action.payload["instrument_average_nominal_sweep_count"]
+                        timing_note = f"{sweep_count} sweeps, about {configured_duration:g} s at the configured sweep time"
+                    else:
+                        timing_note = "actual count depends on analyzer sweep time"
+                    warnings[
+                        f"{block_id}: targets {instrument_duration:g} s in the analyzer and reads one mean spectrum "
+                        f"({timing_note})."
+                    ] += 1
                 else:
                     nominal += average_count * self._spectrum_base_s
                 minimum_duration = float(action.payload.get("minimum_duration_s", 0.0))
@@ -224,7 +237,8 @@ class PlanEstimator:
                     # A reference mean retains its own Hz and dBm arrays.
                     spectrum_extra_bytes += 2 * latest_spectrum_points * 8 + (sources_per_attempt * 8 if store_sources else 0)
                 if average_count > 1:
-                    warnings[f"{block_id}: averages {average_count} complete spectra."] += 1
+                    inputs = "Live frames in PyLab" if action.payload.get("acquisition_mode") == "continuous_live" else "complete spectra"
+                    warnings[f"{block_id}: averages {average_count} {inputs}."] += 1
             elif action.kind == "ramp_keithley_to_zero":
                 nominal += min(float(action.payload["deadline_s"]), 1.0)
             elif action.kind in {"update_moke_voltage", "stop_moke_voltage"}:

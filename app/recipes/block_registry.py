@@ -43,7 +43,7 @@ _ANRITSU_ACQUISITION_OPTIONS = frozenset({
 })
 ANRITSU_ACQUISITION_OPTION_FIELDS: Final = MappingProxyType({
     "acquire_reference": _ANRITSU_ACQUISITION_OPTIONS | {"source_file", "file_kind", "minimum_duration", "purpose"},
-    "acquire_spectrum": _ANRITSU_ACQUISITION_OPTIONS | {"processing"},
+    "acquire_spectrum": _ANRITSU_ACQUISITION_OPTIONS | {"processing", "store_processed"},
 })
 ACTION_FIELDS: Final = {
     "sequence": frozenset({"device_module", "operation", "configuration", "parameter_actions",
@@ -86,7 +86,7 @@ ACTION_FIELDS: Final = {
     "comment": frozenset({"text", "comment"}),
     "acquire_reference": ANRITSU_ACQUISITION_OPTION_FIELDS["acquire_reference"] | {"trace", "average_count"},
     "acquire_spectrum": ANRITSU_ACQUISITION_OPTION_FIELDS["acquire_spectrum"] | {
-        "trace", "average_count", "reference_operation", "store_raw", "store_processed",
+        "trace", "average_count", "reference_operation", "store_raw",
     },
     **{kind: frozenset({"template_id", "template_name", "title_pattern", "tags", "attach_hdf5", "attach_csv"})
        for kind in ("upload_to_elab", "upload_elab")},

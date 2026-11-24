@@ -3145,6 +3145,8 @@ class RecipePage(QWidget):
         snapshot = self._current_anritsu_snapshot()
         source = self._tree_source
         for node in candidates:
+            managed = self._managed_anritsu_acquisition(node)
+            acquisition_data = managed.data if managed is not None else {}
             raw_actions = node.data.get("parameter_actions", [])
             actions = (
                 [dict(action) for action in raw_actions if isinstance(action, dict)]
@@ -3156,15 +3158,15 @@ class RecipePage(QWidget):
                 snapshot=snapshot,
                 parameter_actions=actions,
                 acquire_single=bool(node.data.get("acquire_single", False)),
-                trace=str(node.data.get("trace", "TRAC1")),
-                post_configuration_operation=str(
+                trace=str(acquisition_data.get("trace", node.data.get("trace", "TRAC1"))),
+                post_configuration_operation=managed.type if managed is not None else str(
                     node.data.get("post_configuration_operation", "configure")
                 ),
                 acquisition_average_count=int(
-                    node.data.get("acquisition_average_count", 1)
+                    acquisition_data.get("average_count", node.data.get("acquisition_average_count", 1))
                 ),
                 acquisition_reference_operation=str(
-                    node.data.get("acquisition_reference_operation", "none")
+                    acquisition_data.get("reference_operation", node.data.get("acquisition_reference_operation", "none"))
                 ),
             )
             source = replace_recipe_node(source, node_id=node.id, node=replacement)
@@ -5722,22 +5724,16 @@ class RecipePage(QWidget):
             trace=str(node.data.get("trace", "TRAC1")),
         )
         stored_role = str(node.data.get("post_configuration_operation", ""))
-        managed_id = str(node.data.get("managed_acquisition_id", ""))
-        managed_acquisition = next(
-            (child for child in node.children if child.id == managed_id),
-            None,
-        )
-        if managed_acquisition is not None and managed_acquisition.type in {
-            "acquire_spectrum",
-            "acquire_reference",
-        }:
+        managed_acquisition = self._managed_anritsu_acquisition(node)
+        if managed_acquisition is not None:
             stored_role = managed_acquisition.type
+        elif node.data.get("managed_acquisition_id"):
+            stored_role = "configure"
         if stored_role in {"configure", "acquire_spectrum", "acquire_reference"}:
             dialog.node_role.setCurrentIndex(dialog.node_role.findData(stored_role))
         acquisition_data = (
             managed_acquisition.data if managed_acquisition is not None else node.data
         )
-        dialog.load_acquisition_options(acquisition_data)
         trace_index = dialog.trace.findText(str(acquisition_data.get("trace", "TRAC1")))
         if trace_index >= 0:
             dialog.trace.setCurrentIndex(trace_index)
@@ -5758,6 +5754,7 @@ class RecipePage(QWidget):
         reference_index = dialog.reference_operation.findData(reference_operation)
         if reference_index >= 0:
             dialog.reference_operation.setCurrentIndex(reference_index)
+        dialog.load_acquisition_options(acquisition_data)
         if highlight_required:
             dialog.highlight_required_configuration()
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -6551,6 +6548,16 @@ class RecipePage(QWidget):
         }
 
     @staticmethod
+    def _managed_anritsu_acquisition(node: RecipeNode) -> RecipeNode | None:
+        acquisitions = [child for child in node.children if child.type in ANRITSU_ACQUISITION_OPTION_FIELDS]
+        managed_id = node.data.get("managed_acquisition_id")
+        if managed_id:
+            return next((child for child in acquisitions if child.id == managed_id), None)
+        stored_role = node.data.get("post_configuration_operation")
+        matches = [child for child in acquisitions if child.type == stored_role]
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
     def _configured_anritsu_node(
         node: RecipeNode,
         *,
@@ -6604,42 +6611,39 @@ class RecipePage(QWidget):
             raise ConfigurationError(
                 "Anritsu acquisition contains an unsupported reference operation."
             )
-        managed_id = str(node.data.get("managed_acquisition_id", ""))
-        if not managed_id and acquire_single:
-            legacy = next(
-                (child for child in node.children if child.type == "acquire_spectrum"),
-                None,
-            )
-            managed_id = legacy.id if legacy is not None else ""
+        previous = RecipePage._managed_anritsu_acquisition(node)
+        managed_id = previous.id if previous is not None else ""
         children = [
             RecipePage._node_to_mapping(child)
             for child in node.children
-            if not managed_id or child.id != managed_id
+            if child is not previous
         ]
         if role != "configure":
             managed_id = managed_id or f"anritsu-acquire-{uuid4().hex[:8]}"
-            previous = next((child for child in node.children if child.id == managed_id), None)
-            options = (acquisition_options if acquisition_options is not None else previous.data if previous else {})
+            options = acquisition_options if acquisition_options is not None else previous.data if previous else {}
             option_keys = ANRITSU_ACQUISITION_OPTION_FIELDS[role]
             if any(field in options for field in ANRITSU_HARDWARE_AVERAGE_FIELDS):
                 acquisition_average_count = 1
             acquisition: dict[str, object] = {
-                **({"disabled": previous.data["disabled"]} if previous and "disabled" in previous.data else {}),
+                **({key: previous.data[key] for key in ("disabled", "label", "description") if key in previous.data}
+                   if previous is not None else {}),
                 **{key: value for key, value in options.items() if key in option_keys},
                 "id": managed_id,
                 "type": role,
-                "trace": trace,
-                "average_count": acquisition_average_count,
             }
+            if not acquisition.get("source_file"):
+                acquisition.update(trace=trace, average_count=acquisition_average_count)
             if role == "acquire_spectrum":
-                acquisition.update(
-                    {
-                        "reference_operation": acquisition_reference_operation,
-                        "store_raw": True,
-                        "store_processed": acquisition_reference_operation != "none" or bool(parse_processing(acquisition.get("processing"))[0]),
-                    }
-                )
-            children.append(acquisition)
+                filters, _parameters = parse_processing(acquisition.get("processing"))
+                acquisition.update(reference_operation=acquisition_reference_operation, store_raw=True)
+                if filters or acquisition_reference_operation == "none":
+                    acquisition["store_processed"] = bool(filters)
+                else:
+                    acquisition.setdefault("store_processed", True)
+            if previous is not None and previous.type == role:
+                children.insert(node.children.index(previous), acquisition)
+            else:
+                children.append(acquisition)
         else:
             managed_id = ""
         snapshot = snapshot or AnritsuConfigurationSnapshot(
@@ -6735,7 +6739,7 @@ class RecipePage(QWidget):
                 snapshot = self._anritsu_snapshot_from_mapping(
                     configuration, fallback=snapshot
                 )
-            managed = next((child for child in node.children if child.id == node.data.get("managed_acquisition_id")), None)
+            managed = self._managed_anritsu_acquisition(node)
             acquisition_data = managed.data if managed is not None else {}
             replacement = self._configured_anritsu_node(
                 node,
@@ -6743,7 +6747,7 @@ class RecipePage(QWidget):
                 parameter_actions=actions,
                 acquire_single=bool(node.data.get("acquire_single", False)),
                 trace=str(acquisition_data.get("trace", node.data.get("trace", "TRAC1"))),
-                post_configuration_operation=str(
+                post_configuration_operation=managed.type if managed is not None else str(
                     node.data.get("post_configuration_operation", "configure")
                 ),
                 acquisition_average_count=int(
@@ -6806,7 +6810,11 @@ class RecipePage(QWidget):
             QMessageBox.warning(self, "Edit comment", str(exc))
 
     def _edit_anritsu_acquisition_node(self, node: RecipeNode) -> None:
-        dialog = AnritsuAcquisitionEditorDialog(node, self)
+        try:
+            dialog = AnritsuAcquisitionEditorDialog(node, self)
+        except (ConfigurationError, TypeError, ValueError) as exc:
+            QMessageBox.warning(self, "Anritsu acquisition", str(exc))
+            return
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         replacement = self._node_to_mapping(node)

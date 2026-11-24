@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.domain.errors import ExecutionError
+from app.domain.spectrum_averaging import InstrumentAverageProvenance
 from app.spectrum import peak_preserving_indices
 
 if TYPE_CHECKING:
@@ -76,6 +77,7 @@ class StoredPoint:
     device_states: dict[str, Any]
     has_spectrum: bool
     details_loaded: bool = True
+    recorded_trace_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +109,8 @@ class StoredReference:
     source_sweep_indices: tuple[int, ...] = ()
     selected_sweep: int | None = None
     collection_average_count: int | None = None
+    instrument_average: InstrumentAverageProvenance | None = None
+    averaging_source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +125,8 @@ class StoredReferenceSummary:
     purpose: str
     configuration_fingerprint: str | None
     source_sweep_indices: tuple[int, ...] = ()
+    instrument_average: InstrumentAverageProvenance | None = None
+    averaging_source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,11 +485,25 @@ class Hdf5RunReader:
     @staticmethod
     def _read_point(group, name, spectra, *, include_details=True) -> StoredPoint:
         metadata = Hdf5RunReader._dataset_json(group, "metadata_json")
+        recorded_trace_name = None
+        if ("instrument_average" not in metadata
+                and (metadata.get("trace_variant") == "averaged" or "reference_schema" in metadata)
+                and name in spectra):
+            recorded_trace_name = Hdf5RunReader._attribute_text(spectra[name].attrs.get("trace_name"))
         if not include_details:
             # Keep the recorded evidence required by spectral post-processing.
             # Arbitrary additional provenance is loaded on checkpoint selection.
-            metadata = {key: metadata[key] for key in ("raw_recipe_sweep_indices", "spectrum_processing_v1", "saved_display_v1")
-                        if key in metadata}
+            keys = ("raw_recipe_sweep_indices", "spectrum_processing_v1", "saved_display_v1",
+                    "spectrum_average_count", "instrument_average", "average_count", "averaging_source",
+                    "background_averaging_source", "background_sweep_count", "nominal_sweep_time_s")
+            compact = {key: metadata[key] for key in keys if key in metadata}
+            if metadata.get("artifact_schema") == "lab-control-sweep-baseline-v1":
+                acquisition = metadata.get("acquisition_metadata")
+                if isinstance(acquisition, dict) and "instrument_average" in acquisition:
+                    compact["instrument_average"] = acquisition["instrument_average"]
+                if isinstance(acquisition, dict) and acquisition.get("averaging_source") == "instrument":
+                    compact["averaging_source"] = "instrument"
+            metadata = compact
         return StoredPoint(
             index=int(name),
             timestamp_utc=Hdf5RunReader._attribute_text(group.attrs.get("timestamp_utc")),
@@ -494,6 +514,7 @@ class Hdf5RunReader:
             device_states=Hdf5RunReader._dataset_json(group, "device_states_json") if include_details else {},
             has_spectrum=name in spectra,
             details_loaded=include_details,
+            recorded_trace_name=recorded_trace_name,
         )
 
     @staticmethod
@@ -670,6 +691,8 @@ class Hdf5RunReader:
                 from .reference_transaction import require_committed_reference
 
                 require_committed_reference(group)
+                metadata, fingerprint, instrument_average = Hdf5RunReader._reference_acquisition(group)
+                averaging_source = "instrument" if instrument_average else metadata.get("averaging_source")
                 if metadata_only:
                     frequency, power = group.get("frequency_hz"), group.get("power_dbm")
                     if (frequency is None or power is None or not hasattr(frequency, "dtype")
@@ -683,8 +706,10 @@ class Hdf5RunReader:
                         Hdf5RunReader._attribute_text(group.attrs.get("kind")) or "single",
                         int(group.attrs.get("average_count", 1)), int(frequency.shape[0]),
                         Hdf5RunReader._attribute_text(group.attrs.get("purpose")) or "reference",
-                        Hdf5RunReader._reference_fingerprint(group),
+                        fingerprint,
                         Hdf5RunReader._reference_source_indices(group),
+                        instrument_average,
+                        averaging_source,
                     ))
                     continue
                 frequencies, powers = Hdf5RunReader._read_spectrum_axes(group, f"Reference {index}")
@@ -704,9 +729,11 @@ class Hdf5RunReader:
                         frequencies_hz=frequencies,
                         powers_dbm=powers,
                         purpose=Hdf5RunReader._attribute_text(group.attrs.get("purpose")) or "reference",
-                        configuration_fingerprint=Hdf5RunReader._reference_fingerprint(group),
+                        configuration_fingerprint=fingerprint,
                         source_sweep_indices=Hdf5RunReader._reference_source_indices(group),
                         collection_average_count=int(group.attrs.get("average_count", 1)),
+                        instrument_average=instrument_average,
+                        averaging_source=averaging_source,
                     )
                 )
             return tuple(result)
@@ -740,6 +767,7 @@ class Hdf5RunReader:
             from .reference_transaction import require_committed_reference
 
             require_committed_reference(group)
+            metadata, fingerprint, instrument_average = Hdf5RunReader._reference_acquisition(group)
             frequencies, powers = Hdf5RunReader._read_spectrum_axes(group, f"Reference {index}")
             source_count = len(frequencies)
             if max_points is not None and max_points > 0 and source_count > max_points:
@@ -761,9 +789,11 @@ class Hdf5RunReader:
                 frequencies_hz=frequencies,
                 powers_dbm=powers,
                 purpose=Hdf5RunReader._attribute_text(group.attrs.get("purpose")) or "reference",
-                configuration_fingerprint=Hdf5RunReader._reference_fingerprint(group),
+                configuration_fingerprint=fingerprint,
                 source_sweep_indices=Hdf5RunReader._reference_source_indices(group),
                 collection_average_count=int(group.attrs.get("average_count", 1)),
+                instrument_average=instrument_average,
+                averaging_source="instrument" if instrument_average else metadata.get("averaging_source"),
             )
 
     @staticmethod
@@ -798,6 +828,7 @@ class Hdf5RunReader:
             if group is None:
                 raise ExecutionError(f"Recorded reference {index} is missing.")
             require_committed_reference(group)
+            acquisition, fingerprint, _instrument_average = Hdf5RunReader._reference_acquisition(group)
             indices = Hdf5RunReader._reference_source_indices(group)
             if not indices:
                 raise ExecutionError("Individual repeats are not stored for this baseline; use its stored mean.")
@@ -805,10 +836,6 @@ class Hdf5RunReader:
                 raise ExecutionError(f"Repeat {sweep + 1} is outside this baseline's {len(indices)} recorded repeats.")
             record = read_recipe_sweep(file, indices[sweep])
             frequencies, _mean = Hdf5RunReader._read_spectrum_axes(group, f"Reference {index}")
-            fingerprint = Hdf5RunReader._reference_fingerprint(group)
-            acquisition = json.loads(Hdf5RunReader._attribute_text(group.attrs.get("acquisition_metadata_json")) or "{}")
-            if not isinstance(acquisition, dict):
-                raise ExecutionError("Reference acquisition metadata is malformed.")
             duration = acquisition.get("minimum_duration_s", 0.)
             first = record if sweep == 0 else read_recipe_sweep(file, indices[0])
             def identity(item):
@@ -857,10 +884,8 @@ class Hdf5RunReader:
         return frequencies, powers
 
     @staticmethod
-    def _reference_fingerprint(group):
-        source = Hdf5RunReader._attribute_text(group.attrs.get("acquisition_metadata_json"))
-        if not source:
-            return None
+    def _reference_acquisition(group):
+        source = Hdf5RunReader._attribute_text(group.attrs.get("acquisition_metadata_json")) or "{}"
         try:
             metadata = json.loads(source)
             if not isinstance(metadata, dict):
@@ -868,7 +893,16 @@ class Hdf5RunReader:
             fingerprint = metadata.get("configuration_fingerprint")
             if fingerprint is not None and (not isinstance(fingerprint, str) or not fingerprint):
                 raise ValueError("Invalid analyzer configuration fingerprint.")
-            return fingerprint
+            evidence = metadata.get("instrument_average")
+            instrument_average = None if evidence is None else InstrumentAverageProvenance.from_metadata(evidence)
+            if instrument_average is not None and instrument_average.sweep_count != group.attrs.get("average_count", 1):
+                raise ValueError("Stored Anritsu average disagrees with its reference count.")
+            if (instrument_average is not None or metadata.get("averaging_source") == "instrument") and (
+                "source_recipe_sweep_indices" in group
+                or metadata.get("source_spectra_stored", False) is not False
+            ):
+                raise ValueError("Stored Anritsu average cannot link individual source sweeps.")
+            return metadata, fingerprint, instrument_average
         except (TypeError, ValueError) as exc:
             raise ExecutionError("Reference acquisition metadata is malformed.") from exc
 

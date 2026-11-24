@@ -761,6 +761,7 @@ class AnritsuSimulator(_BaseSimulator):
         self.stop_hz = 10e6
         self.points = 1001
         self.reference_level = 0.0
+        self.scale_mode = "LOG"
         self.continuous_sweep = True
         self.trace_frame = 0
         self.instrument_mode = "SPECT"
@@ -880,7 +881,8 @@ class AnritsuSimulator(_BaseSimulator):
             return
         trace_format = re.fullmatch(r"FORM\s+(ASC(?:,0)?|REAL,32|INT,32)", command, re.IGNORECASE)
         if trace_format:
-            self.trace_format = "ASC,0" if trace_format.group(1).upper().startswith("ASC") else trace_format.group(1).upper()
+            data_format = trace_format.group(1).upper()
+            self.trace_format = "ASC,0" if data_format.startswith("ASC") else data_format
             return
         byte_order = re.fullmatch(r"FORM:BORD\s+(SWAP|NORM)", command, re.IGNORECASE)
         if byte_order:
@@ -959,6 +961,8 @@ class AnritsuSimulator(_BaseSimulator):
             return '4,041,ON,"6 GHz",008,ON,"Preamplifier",020,ON,"Signal generator",021,OFF,"6 GHz generator"'
         if command == "INIT:SWP?":
             return "0"
+        if command == "DISP:WIND:TRAC:Y:SPAC?":
+            return self.scale_mode
         if command == "FORM?":
             return self.trace_format
         if command == "FORM:BORD?":

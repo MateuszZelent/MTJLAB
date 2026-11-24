@@ -2432,7 +2432,7 @@ finally: []
                     "Sweep axis · Source current",
                     "For each source-current point",
                     "Set ROI value · Keithley B · source current",
-                    "Acquire spectrum · Anritsu",
+                    "Acquire spectrum · PyLab triggered sweeps",
                     "Wait · 2 s",
                     "Finally — safe shutdown",
                     "Keithley B · OUTPUT OFF",

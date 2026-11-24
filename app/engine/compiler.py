@@ -15,6 +15,7 @@ from app.devices.anritsu_ms2830a.adapter import (
     SignalGeneratorConfig,
     SpectrumConfig,
 )
+from app.devices.anritsu_ms2830a.averaging import instrument_average_count_for_duration
 from app.devices.rigol_dg1000z.adapter import RigolChannelConfig, RigolOutputConfig
 from app.domain.errors import ConfigurationError, ExecutionError, SafetyViolation
 from app.domain.immutable import freeze_configuration
@@ -27,6 +28,10 @@ from app.domain.quantities import (
     DIMENSION_VOLTAGE,
     Quantity,
     parse_quantity,
+)
+from app.domain.spectrum_averaging import (
+    ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS,
+    ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS,
 )
 from app.recipes.models import Recipe, RecipeNode, validate_action_fields
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
@@ -538,7 +543,7 @@ class RecipeCompiler:
                 {
                     "node_id": item.node_id,
                     "kind": item.kind,
-                    "payload": self._canonicalize(item.payload),
+                    "payload": self._canonicalize(self._plan_identity_payload(item)),
                     "setpoints": item.setpoints_si,
                     "is_finally": item.is_finally,
                     "semantic_id": item.semantic_id,
@@ -664,7 +669,9 @@ class RecipeCompiler:
         from app.recipes.spectrum_processing import REFERENCE_UNITS
 
         def acquisition_mode(action: PlanAction) -> str:
-            if "instrument_average_count" in action.payload or "instrument_average_duration_s" in action.payload:
+            if ("instrument_average_count" in action.payload
+                    or "instrument_average_duration_s" in action.payload
+                    or action.payload.get("reference_averaging_source") == "instrument"):
                 return "instrument_average"
             return action.payload.get("acquisition_mode", "single_sweep")
 
@@ -672,6 +679,8 @@ class RecipeCompiler:
         configurations = {}
         processed_unit = None
         for action in actions:
+            if action.kind == "configure_anritsu_sg":
+                reference_mode = None
             if action.kind in {"configure_anritsu", "configure_anritsu_advanced"}:
                 config = action.payload["config"]
                 if configurations.get(action.kind) != config:
@@ -729,17 +738,25 @@ class RecipeCompiler:
             elif kind == "configure_anritsu_sg":
                 anritsu_mode = "sg"
                 manual_sweep_time_s = None
-            elif kind in {"acquire_reference", "acquire_spectrum"} and not payload.get("source_file"):
+            elif kind in {"acquire_reference", "acquire_spectrum"}:
                 if anritsu_mode == "sg":
                     raise ConfigurationError(f"{action.node_id}: acquisition requires an explicit Spectrum Analyzer configuration after SG mode; it cannot silently switch SG OFF.")
                 count = payload.get("instrument_average_count")
-                if count is not None and manual_sweep_time_s is not None:
+                target_s = payload.get("instrument_average_duration_s")
+                if manual_sweep_time_s is not None and (count is not None or target_s is not None):
+                    if target_s is not None:
+                        try:
+                            count = instrument_average_count_for_duration(target_s, manual_sweep_time_s)
+                        except SafetyViolation as exc:
+                            raise ConfigurationError(f"{action.node_id}: {exc}") from exc
                     nominal_duration_s = count * manual_sweep_time_s
                     if nominal_duration_s >= acquisition_timeout_s:
                         raise ConfigurationError(
                             f"{action.node_id}: {count} instrument sweeps at {manual_sweep_time_s:g} s each "
                             f"must fit within the {acquisition_timeout_s:g} s acquisition timeout."
                         )
+                    if target_s is not None:
+                        payload["instrument_average_nominal_sweep_count"] = count
                     payload["instrument_average_nominal_duration_s"] = nominal_duration_s
             key: tuple[str, str] | None = None
             if kind == "configure_keithley":
@@ -1110,6 +1127,21 @@ class RecipeCompiler:
         if parameter == "source.compliance":
             return applied.compliance_si
         return applied.settle_time_s
+
+    @staticmethod
+    def _plan_identity_payload(action: PlanAction) -> Mapping[str, Any]:
+        payload = action.payload
+        # Preserve existing resume identities for information derived from inputs that
+        # the plan already hashes: the requested time and configuration, or the imported file digest.
+        if "instrument_average_nominal_sweep_count" in payload:
+            return {key: value for key, value in payload.items() if key not in {
+                "instrument_average_nominal_sweep_count", "instrument_average_nominal_duration_s",
+            }}
+        if "source_sha256" in payload:
+            return {key: value for key, value in payload.items() if key not in {
+                "reference_averaging_source", "reference_instrument_average",
+            }}
+        return payload
 
     @staticmethod
     def _canonicalize(value: Any) -> Any:
@@ -3117,11 +3149,16 @@ class RecipeCompiler:
                     count = data["instrument_average_count"]
                     if type(count) is not int:
                         raise ConfigurationError(f"{node.id}: instrument_average_count must be an integer.")
-                    if not 2 <= count <= 9999:
-                        raise ConfigurationError(f"{node.id}: instrument_average_count must be in the range 2..9999.")
+                    if not ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS <= count <= ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS:
+                        raise ConfigurationError(
+                            f"{node.id}: instrument_average_count must be in the range "
+                            f"{ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS}..{ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS}."
+                        )
                     payload["instrument_average_count"] = count
                 else:
-                    target_s = self._resolve_quantity(data["instrument_average_duration"], DIMENSION_TIME, {}).si_value
+                    target_s = self._resolve_quantity(
+                        data["instrument_average_duration"], DIMENSION_TIME, {},
+                    ).si_value
                     timeout_s = parse_quantity(
                         self._settings.anritsu.acquisition.operation_complete_timeout, DIMENSION_TIME
                     ).si_value
@@ -3134,7 +3171,12 @@ class RecipeCompiler:
             if node.type == "acquire_reference" and data.get("source_file"):
                 from pathlib import Path
 
-                from app.storage.recipe_reference import file_sha256, load_recipe_reference
+                from app.storage.recipe_reference import (
+                    file_sha256,
+                    load_recipe_reference,
+                    recipe_reference_averaging,
+                    recipe_reference_uses_instrument_average,
+                )
 
                 path = Path(str(data["source_file"])).expanduser().resolve()
                 kind = str(data.get("file_kind", "reference"))
@@ -3142,14 +3184,21 @@ class RecipeCompiler:
                     key = (str(path), kind)
                     if key not in self._reference_assets:
                         digest = file_sha256(path)
-                        _trace, count, _evidence = load_recipe_reference(path, kind)
+                        _trace, count, evidence = load_recipe_reference(path, kind)
                         if file_sha256(path) != digest:
                             raise ValueError("Reference file changed during preflight.")
-                        self._reference_assets[key] = (digest, count)
-                    digest, count = self._reference_assets[key]
+                        self._reference_assets[key] = (
+                            digest, count, recipe_reference_averaging(evidence),
+                            recipe_reference_uses_instrument_average(evidence),
+                        )
+                    digest, count, average, instrument_source = self._reference_assets[key]
                 except (OSError, ValueError, ExecutionError) as exc:
                     raise ConfigurationError(f"{node.id}: cannot load reference: {exc}") from exc
                 payload.update(source_file=str(path), source_sha256=digest, file_kind=kind, average_count=count)
+                if instrument_source:
+                    payload["reference_averaging_source"] = "instrument"
+                if average is not None:
+                    payload["reference_instrument_average"] = average.metadata()
             if node.type == "acquire_spectrum":
                 from app.recipes.spectrum_processing import (
                     REFERENCE_OPERATIONS,

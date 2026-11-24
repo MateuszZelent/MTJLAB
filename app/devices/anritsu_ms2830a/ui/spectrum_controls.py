@@ -24,6 +24,10 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
+from app.devices.anritsu_ms2830a import (
+    ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS,
+    ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS,
+)
 from app.domain.quantities import (
     DIMENSION_DB,
     DIMENSION_DBM,
@@ -71,6 +75,8 @@ class AveragingTargetControls(QWidget):
         self.seconds.setRange(1, 2_147_483)  # QTimer takes signed 32-bit milliseconds.
         self.seconds.setValue(60)
         self.seconds.setSuffix(" s")
+        self._target_backend = "application"
+        self._targets = {"application": (initial_frames, 60), "instrument": (initial_frames, 5)}
         layout.addWidget(self.mode, 1, 0)
         layout.addWidget(self.frames, 1, 1)
         layout.addWidget(self.seconds, 1, 1)
@@ -81,8 +87,20 @@ class AveragingTargetControls(QWidget):
 
     def _sync_mode(self):
         timed = self.mode.currentData() == "seconds"
-        instrument = self.backend.currentData() == "instrument"
-        self.frames.setRange(2, 9999) if instrument else self.frames.setRange(1, 2_147_483_647)
+        backend = self.backend.currentData()
+        instrument = backend == "instrument"
+        if self._target_backend != backend:
+            self._targets[self._target_backend] = self.frames.value(), self.seconds.value()
+            self._target_backend = backend
+            if instrument:
+                self.frames.setRange(ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS, ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS)
+            else:
+                self.frames.setRange(1, 2_147_483_647)
+            frames, seconds = self._targets[backend]
+            self.frames.setValue(frames)
+            self.seconds.setValue(seconds)
+        self.mode.setItemText(self.mode.findData("frames"), "Sweeps" if instrument else "Frames")
+        self.frames.setAccessibleName("Averaging sweep count" if instrument else "Averaging frame count")
         self.frames.setToolTip("Complete sweeps per block" if instrument else "Live frames per average")
         self.seconds.setToolTip("Target based on the analyzer's nominal sweep time" if instrument else "Time window in seconds")
         self.frames.setVisible(not timed)

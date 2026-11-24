@@ -33,15 +33,18 @@ class BackgroundProfileHdf5Store:
         trace = SpectrumTrace(
             tuple(context.frequencies_hz), tuple(10 * np.log10(profile.mean_w) + 30),
             datetime.fromtimestamp(profile.completed_at_s, timezone.utc), "BACKGROUND_MEAN",
+            instrument_average=profile.instrument_average,
         )
-        metadata = {"background_profile_id": profile.profile_id}
+        metadata = {"background_profile_id": profile.profile_id, "spectrum_average_count": profile.sweep_count}
         if profile.averaging_source == "instrument":
             metadata.update(background_averaging_source="instrument", background_sweep_count=profile.sweep_count,
-                            nominal_sweep_time_s=profile.nominal_sweep_time_s)
+                            nominal_sweep_time_s=profile.nominal_sweep_time_s,
+                            instrument_average=profile.instrument_average.metadata())
         # An export without a source run cannot infer the original backend.
         if simulation_mode is None:
             simulation_metadata = {"enabled": None, "mode": "unknown",
-                                   "mode_source": "profile_export_without_source_archive"}
+                                   "mode_source": ("not_provided" if settings_source is not None
+                                                   else "profile_export_without_source_archive")}
         else:
             simulation_metadata = {"enabled": simulation_mode,
                                    "mode": "simulation" if simulation_mode else "hardware",

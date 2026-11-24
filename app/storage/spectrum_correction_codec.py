@@ -7,6 +7,7 @@ import json
 import re
 
 from app.domain.errors import ExecutionError
+from app.domain.spectrum_averaging import InstrumentAverageProvenance
 from app.domain.spectrum_correction import (
     BackgroundProfile,
     CorrectedSpectrumFrame,
@@ -80,6 +81,7 @@ def write_profile(group, context: SpectrumAcquisitionContext, profile: Backgroun
     }
     if instrument_mean:
         metadata["nominal_sweep_time_s"] = profile.nominal_sweep_time_s
+        metadata["instrument_average"] = profile.instrument_average.metadata()
     group.attrs["metadata_json"] = json.dumps(metadata, sort_keys=True, allow_nan=False)
     _array(group, "frequency_hz", context.frequencies_hz, "Hz")
     _array(group, "mean_w", profile.mean_w, "W")
@@ -96,6 +98,7 @@ def read_profile(group) -> tuple[SpectrumAcquisitionContext, BackgroundProfile]:
     instrument_mean = schema == INSTRUMENT_BACKGROUND_SCHEMA
     try:
         metadata = json.loads(group.attrs["metadata_json"])
+        evidence = metadata.get("instrument_average")
         context = SpectrumAcquisitionContext(
             _read_array(group, "frequency_hz", "Hz"),
             metadata["configuration_fingerprint"],
@@ -120,6 +123,7 @@ def read_profile(group) -> tuple[SpectrumAcquisitionContext, BackgroundProfile]:
             signal_free_qualified=metadata["signal_free_qualified"],
             averaging_source="instrument" if instrument_mean else "pc",
             nominal_sweep_time_s=metadata["nominal_sweep_time_s"] if instrument_mean else None,
+            instrument_average=InstrumentAverageProvenance.from_metadata(evidence) if evidence is not None else None,
         )
         if context.context_id != profile.context_id:
             raise ExecutionError("Stored profile frequency/configuration identity is corrupted.")
