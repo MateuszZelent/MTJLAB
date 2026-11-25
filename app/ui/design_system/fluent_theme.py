@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import sys
+from dataclasses import dataclass
 from weakref import WeakSet
 
 from PySide6.QtCore import QEvent, QObject
@@ -16,13 +16,46 @@ from qfluentwidgets import (
     qconfig,
     setTheme,
 )
+from qfluentwidgets.common.style_sheet import styleSheetManager
+from qfluentwidgets.components.widgets.label import FluentLabelBase
 from qframelesswindow import TitleBarButton
+from shiboken6 import isValid
 
 from app.ui.common.precision_stepper import install_precision_arrow_stepper
 
-from .station_qss import dialog_qss, event_log_qss
+from .station_qss import dialog_qss, event_log_qss, station_qss
 from .theme import effective_theme
 from .tokens import ThemeTokens, tokens_for
+
+_SEMANTIC_TEXT_PROPERTIES = frozenset({
+    b"deviceState",
+    b"outputState",
+    b"stationState",
+    b"safetyState",
+    b"liveState",
+    b"connectionState",
+    b"elabStatusState",
+    b"quickOutputState",
+})
+
+
+def set_dynamic_property(
+    widget: QWidget,
+    name: str,
+    value: object,
+    *,
+    repolish: bool = True,
+) -> bool:
+    """Update a Qt dynamic property and repolish only when the value actually changed."""
+    if widget.property(name) == value:
+        return False
+    widget.setProperty(name, value)
+    if repolish:
+        style = widget.style()
+        if style is not None:
+            style.unpolish(widget)
+            style.polish(widget)
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,9 +72,16 @@ def configure_widget_style(application: QApplication) -> None:
     Fusion paints those fallback controls in Qt; Fluent still owns the theme.
     Install once, before constructing the station windows where possible.
     """
-    if sys.platform == "win32" and not application.property("stationWidgetStyleConfigured"):
-        application.setStyle("Fusion")
+    if sys.platform != "win32" or application.property("stationWidgetStyleConfigured"):
+        return
+    # Never replace the base QStyle once widgets (especially QFluent Pivot)
+    # already exist; swapping QStyle mid-session corrupts their Qt style state
+    # on Windows and causes access violations on the next setStyleSheet().
+    if application.allWidgets():
         application.setProperty("stationWidgetStyleConfigured", True)
+        return
+    application.setStyle("Fusion")
+    application.setProperty("stationWidgetStyleConfigured", True)
 
 
 def apply_application_theme(application: QApplication, mode: str) -> AppliedTheme:
@@ -72,6 +112,11 @@ def apply_application_theme(application: QApplication, mode: str) -> AppliedThem
             application.setProperty("stationAppliedControlTheme", controls_signature)
         return AppliedTheme(name=name, tokens=tokens)
     _stage_fluent_accent(tokens)
+    # Prune widgets whose C++ counterparts were already destroyed before
+    # qfluentwidgets walks styleSheetManager during a global theme swap.
+    for managed_widget, _source in list(styleSheetManager.items()):
+        if not isValid(managed_widget):
+            styleSheetManager.deregister(managed_widget)
     # Settings contains many routes that can be hidden during a theme switch.
     # QFluent's lazy refresh only repolishes the currently visible subtree,
     # leaving hidden Pivot pages and their navigation in the previous theme.
@@ -132,19 +177,22 @@ class _DialogThemeFilter(QObject):
             self._fluent_background_widgets.add(widget)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.Show and isinstance(watched, QWidget):
+        event_type = event.type()
+        if event_type == QEvent.Type.Show and isinstance(watched, QWidget):
             self._track_shown_widget(watched)
             # A theme can change while this widget is hidden (including the
             # shell during startup). Commit its Fluent background before paint;
             # a delayed hover animation must not retain the previous theme.
             _settle_fluent_background(watched)
             _apply_station_control_style(watched, self._tokens)
-        elif (
-            event.type() == QEvent.Type.DynamicPropertyChange
-            and isinstance(watched, QWidget)
-            and bytes(event.propertyName()) == b"validationState"
-        ):
-            apply_validation_style(watched, tokens=self._tokens)
+        elif event_type == QEvent.Type.DynamicPropertyChange and isinstance(watched, QWidget):
+            prop_name = bytes(event.propertyName())
+            if prop_name == b"validationState":
+                apply_validation_style(watched, tokens=self._tokens)
+            elif prop_name in _SEMANTIC_TEXT_PROPERTIES:
+                _apply_semantic_text(watched, self._tokens)
+            elif prop_name == b"controlState":
+                _apply_station_button(watched, self._tokens)
         return False
 
 
@@ -298,6 +346,8 @@ def _apply_station_control_style(widget: QWidget, tokens: ThemeTokens) -> None:
         FluentStyleSheet.FLUENT_WINDOW.apply(widget)
     if isinstance(widget, QDialog):
         _set_style_if_changed(widget, dialog_qss(tokens))
+    elif widget.objectName() == "fluentShellContent":
+        _set_style_if_changed(widget, station_qss(tokens))
     _apply_station_surface(widget, tokens)
     _apply_semantic_text(widget, tokens)
     if widget.property("validationState") is not None:
@@ -399,12 +449,35 @@ def _apply_station_button(widget: QWidget, tokens: ThemeTokens) -> None:
         f"border-color: {tokens.focus};"
         "}"
         "QPushButton[controlState=\"confirmed\"] {"
-        f"color: {tokens.on_accent}; background-color: {tokens.accent};"
-        f"border: 1px solid {tokens.accent};"
+        f"color: {tokens.success}; background-color: {tokens.surface};"
+        f"border: 1px solid {tokens.success}; font-weight: 600;"
         "}"
-        "QPushButton[controlState=\"energized\"] {"
-        f"color: {tokens.on_emergency}; background-color: {tokens.danger};"
-        f"border: 1px solid {tokens.danger}; font-weight: 600;"
+        "QPushButton[controlState=\"confirmed\"]:hover {"
+        f"background-color: {tokens.surface_raised}; border-color: {tokens.success};"
+        "}"
+        "QPushButton[controlState=\"warning\"], QPushButton#warningButton {"
+        f"color: {tokens.caution}; background-color: {tokens.surface};"
+        f"border: 1px solid {tokens.caution}; font-weight: 600;"
+        "}"
+        "QPushButton[controlState=\"warning\"]:hover, QPushButton#warningButton:hover {"
+        f"background-color: {tokens.surface_raised}; border-color: {tokens.caution};"
+        "}"
+        "QPushButton[controlState=\"output-neutral\"] {"
+        f"color: {tokens.on_output_inactive}; background-color: {tokens.output_inactive};"
+        f"border: 1px solid {tokens.border};"
+        "}"
+        "QPushButton[controlState=\"output-neutral\"]:disabled {"
+        f"color: {tokens_for('light').text_muted};"
+        "}"
+        "QPushButton[controlState=\"output-neutral\"]:hover {"
+        f"border-color: {tokens.neutral};"
+        "}"
+        "QPushButton[controlState=\"output-neutral\"]:focus {"
+        f"border-color: {tokens.focus};"
+        "}"
+        "QPushButton[controlState=\"energized\"], QPushButton#outputOnButton {"
+        f"color: {tokens.on_emergency}; background-color: {tokens.output_active};"
+        f"border: 1px solid {tokens.output_active}; font-weight: 600;"
         "}"
     )
 
@@ -474,37 +547,98 @@ def _set_widget_background(
     widget.update()
 
 
+def _semantic_text_color(widget: QLabel, tokens: ThemeTokens) -> tuple[str, bool]:
+    """Return ``(hex_color, is_semantic_override)`` for a station label."""
+    is_muted_role = isinstance(widget, CaptionLabel) or widget.objectName() == "muted"
+    color = tokens.text_muted if is_muted_role else tokens.text_primary
+    station_state = widget.property("stationState")
+    device_state = widget.property("deviceState")
+    output_state = widget.property("outputState")
+    safety_state = widget.property("safetyState")
+    live_state = widget.property("liveState")
+    connection_state = widget.property("connectionState")
+    elab_status_state = widget.property("elabStatusState")
+    quick_output_state = widget.property("quickOutputState")
+
+    semantic = False
+    if (
+        device_state in {"verified", "connected"}
+        or output_state == "off"
+        or safety_state == "ready"
+        or live_state == "on"
+        or elab_status_state == "success"
+        or quick_output_state in {"on", "off"}
+        or station_state in {"connected", "verified", "output_off"}
+    ):
+        color = tokens.success
+        semantic = True
+    elif (
+        device_state == "fault"
+        or safety_state == "danger"
+        or output_state == "active"
+        or live_state in {"error", "fault"}
+        or connection_state == "error"
+        or elab_status_state == "danger"
+        or widget.objectName() == "errorText"
+        or station_state in {"fault", "unknown", "output_on"}
+    ):
+        color = tokens.danger
+        semantic = True
+    elif (
+        safety_state == "caution"
+        or device_state in {"compliance", "active"}
+        or output_state == "unknown"
+        or live_state in {"starting", "paused"}
+        or elab_status_state == "caution"
+    ):
+        color = tokens.caution
+        semantic = True
+    elif (
+        station_state == "disconnected"
+        or device_state == "disconnected"
+        or output_state == "neutral"
+        or live_state == "off"
+        or elab_status_state == "neutral"
+        or quick_output_state == "unknown"
+    ):
+        color = tokens.text_muted
+        semantic = True
+    elif is_muted_role:
+        semantic = True
+    return color, semantic
+
+
 def _apply_semantic_text(widget: QWidget, tokens: ThemeTokens) -> None:
     if not isinstance(widget, QLabel):
         return
     # Plain Qt labels keep their explicit palette when QFluent changes theme.
-    # Start every label from a readable station foreground, then layer semantic
-    # status colours on top.  This also covers labels created by QFormLayout.
-    color = (
-        tokens.text_muted
-        if isinstance(widget, CaptionLabel) or widget.objectName() == "muted"
-        else tokens.text_primary
-    )
-    station_state = widget.property("stationState")
-    if (
-        widget.property("deviceState") == "verified"
-        or widget.property("outputState") == "off"
-        or station_state in {"connected", "verified", "output_off"}
+    # FluentLabelBase installs a local custom QSS `color:` rule that overrides
+    # both ancestor stylesheets and QPalette, so semantic Fluent labels must
+    # also update via Fluent's native setTextColor(light, dark) API.
+    color, semantic = _semantic_text_color(widget, tokens)
+    if isinstance(widget, FluentLabelBase) and (
+        semantic or widget.property("_stationSemanticStyled")
     ):
-        color = tokens.success
-    elif (
-        widget.property("deviceState") == "fault"
-        or widget.property("safetyState") == "danger"
-        or widget.property("outputState") == "active"
-        or station_state in {"fault", "unknown", "output_on"}
-    ):
-        color = tokens.danger
-    elif station_state == "disconnected":
-        color = tokens.text_muted
-    elif widget.property("safetyState") == "caution" or widget.property("deviceState") in {"compliance", "active"}:
-        color = tokens.caution
-    palette = widget.palette()
+        light_hex, _ = _semantic_text_color(widget, tokens_for("light"))
+        dark_hex, _ = _semantic_text_color(widget, tokens_for("dark"))
+        light_color = QColor(light_hex)
+        dark_color = QColor(dark_hex)
+        if (
+            widget.lightColor.name(QColor.NameFormat.HexArgb)
+            != light_color.name(QColor.NameFormat.HexArgb)
+            or widget.darkColor.name(QColor.NameFormat.HexArgb)
+            != dark_color.name(QColor.NameFormat.HexArgb)
+        ):
+            widget.setTextColor(light_color, dark_color)
+        widget.setProperty("_stationSemanticStyled", semantic)
+
     foreground = QColor(color)
+    palette = widget.palette()
+    if (
+        palette.color(QPalette.ColorRole.WindowText).name().lower() == foreground.name().lower()
+        and palette.color(QPalette.ColorRole.Text).name().lower() == foreground.name().lower()
+    ):
+        return
     palette.setColor(QPalette.ColorRole.WindowText, foreground)
     palette.setColor(QPalette.ColorRole.Text, foreground)
     palette.setColor(QPalette.ColorRole.ButtonText, foreground)

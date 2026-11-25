@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import json
+from collections.abc import Iterator
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterator
 
 import h5py
 import numpy as np
 
 from app.domain.errors import ExecutionError, ProcessingCancelled
 from app.domain.spectrum_correction import (
-    CorrectedSpectrumFrame, CorrectionConfig, SpectrumFrameEnvelope, SpectrumFrameRole,
+    CorrectedSpectrumFrame,
+    CorrectionConfig,
+    SpectrumFrameEnvelope,
+    SpectrumFrameRole,
 )
 from app.storage.spectrum_correction_codec import read_corrected, read_envelope, read_profile
-from app.storage.spectrum_interference_codec import read_interference_calibration
 from app.storage.spectrum_decision_store import ROOT, SCHEMA, iter_decisions, read_decision_context
+from app.storage.spectrum_interference_codec import read_interference_calibration
+
 from .realtime_processor import RealtimeSpectrumProcessor
 
 

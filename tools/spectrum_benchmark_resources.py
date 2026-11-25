@@ -2,8 +2,8 @@
 
 import ctypes
 import os
-from pathlib import Path
 import shutil
+from pathlib import Path
 
 
 def process_resources():

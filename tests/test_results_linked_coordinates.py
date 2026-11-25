@@ -136,6 +136,88 @@ def test_empty_spectrum_coordinate_controls_remain_readable(dc_archive, shell_qt
         app.processEvents()
 
 
+@pytest.mark.parametrize("voltages", [(-.0750732421875,), (-.0750732421875, -.05401611328125)])
+def test_heatmap_keeps_moke_voltage_in_partial_and_complete_sweeps(
+    tmp_path, shell_qt_application, voltages,
+):
+    from qfluentwidgets import CaptionLabel
+
+    app = shell_qt_application
+    path = tmp_path / "moke-sweep.h5"
+    writer = Hdf5RunWriter(path, recipe_source="name: MOKE sweep\n", settings_source="schema_version: 1\n",
+                          plan_hash="moke-sweep", device_idn={}, expected_points=12)
+    vout = "moke_box.vout0.voltage"
+    current = "keithley.A.current"
+    bias = "keithley.B.current"
+    for voltage in voltages:
+        for b in (-.01, .054):
+            for level in (-.0051, 0., .0051):
+                index = writer.point_count
+                writer.append(
+                    MeasurementPoint(index=index, setpoints={vout: voltage, current: level, bias: b}, measurements={}),
+                    SpectrumTrace((1e6, 2e6), (-80. + index, -70.), datetime.now(UTC), "TRAC1"),
+                )
+    writer.close("faulted" if len(voltages) == 1 else "completed")
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    tab = HeatmapResultsTab()
+    try:
+        tab.resize(1280, 900)
+        tab.show()
+        tab.load(path, ThatecRunReader.describe(path), Hdf5RunReader.points(path, include_details=False))
+        wait_until(app, lambda: not tab._read_tasks)
+
+        def select(coordinate, value):
+            for combo in tab._range_combos[coordinate]:
+                combo.setCurrentIndex(combo.findData(value))
+
+        assert tab.y_axis_combo.currentData() == current
+        headings = {label.text() for label in tab.filter_host.findChildren(CaptionLabel) if label.isVisibleTo(tab)}
+        assert {"Axis ranges", "Slice filters"} <= headings
+        select(bias, -.01)
+        if len(voltages) == 1:
+            assert tab.y_axis_combo.findData(vout) == -1
+            labels = tab.filter_host.findChildren(CaptionLabel, "heatmapFixedCoordinate")
+            value, = [label for label in labels if "VOUT 0" in label.text()]
+            assert "-75.073" in value.text() and "mV" in value.text()
+            assert value.isVisibleTo(tab) and value.geometry().isValid()
+            assert tab._request().filters[vout] == voltages[0]
+            expected_checkpoints = [0, 1, 2]
+        else:
+            assert tab.y_axis_combo.findData(vout) >= 0
+            app.processEvents()
+            minimum, maximum = tab._range_combos[vout]
+            assert minimum.isVisibleTo(tab) and maximum.isVisibleTo(tab)
+            assert [minimum.itemData(index) for index in range(minimum.count())] == list(voltages)
+            select(vout, voltages[-1])
+            expected_checkpoints = [6, 7, 8]
+        tab.load_button.click()
+        wait_until(app, lambda: not tab._read_tasks)
+        assert tab.heatmap._data is not None, tab.info_label.text()
+        assert tab.heatmap._cell_checkpoint_indices[:, 0].tolist() == expected_checkpoints
+        title = tab.heatmap.plot.plotItem.titleLabel.item.toPlainText()
+        assert "MOKE Box VOUT 0" in title and "Keithley B -10 mA" in title
+        assert "Keithley A" not in title
+        assert tab.heatmap.export_metadata["title"] == title
+
+        tab.y_axis_combo.setCurrentIndex(tab.y_axis_combo.findData(bias))
+        select(current, 0.)
+        if len(voltages) > 1:
+            select(vout, voltages[-1])
+        tab.load_button.click()
+        wait_until(app, lambda: not tab._read_tasks)
+        assert tab.heatmap._data is not None, tab.info_label.text()
+        assert tab.heatmap._cell_checkpoint_indices[:, 0].tolist() == [expected_checkpoints[1], expected_checkpoints[1] + 3]
+        title = tab.heatmap.plot.plotItem.titleLabel.item.toPlainText()
+        assert "MOKE Box VOUT 0" in title and "Keithley A" in title
+        assert "Keithley B" not in title
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+    finally:
+        tab.close()
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_two_physical_axes_do_not_pin_coordinates_derived_from_both():
     from app.ui.results.heatmap_coordinates import default_heatmap_ranges
 

@@ -4,13 +4,13 @@ import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from tempfile import TemporaryDirectory
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtWidgets import QApplication, QStackedWidget, QTabWidget, QToolBar
+from PySide6.QtWidgets import QApplication, QDialog, QStackedWidget, QTabWidget, QToolBar
 from qfluentwidgets import (
     BodyLabel,
     CardWidget,
@@ -25,10 +25,12 @@ from qfluentwidgets import (
 from app.ui.shell import MainWindow
 from app.ui.execution import RunMonitorPage
 from app.engine.compiler import RecipeCompiler
+from app.engine.estimation import PlanEstimator
 from app.recipes import parse_recipe_text
 from app.recipes.semantic_tree import AxisPointContext, normalize_recipe_tree
 from app.domain.execution_state import SemanticOperationState
 from app.devices.registry import built_in_device_registry
+from app.devices.keithley_2600.ui.page import KeithleyNodeEditorDialog
 from app.ui.measurement_tree import MeasurementTreeView
 from app.ui.recipes import SweepGeneratorDialog
 from tests.helpers import simulation_settings
@@ -42,6 +44,70 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication([])
+
+    def test_keithley_configuration_blocks_open_with_channel_and_source_mode(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        source = """schema_version: 1
+name: Keithley configurations
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: bias-a, type: configure_keithley, channel: A, mode: current, level: '2 mA', compliance: '30 mV', source_range: '10 mA'}
+    - {id: bias-b, type: configure_keithley, channel: B, mode: voltage, level: '5 mV', compliance: '1 mA', source_range: '1 V'}
+"""
+        try:
+            window.resize(1280, 850)
+            window.show()
+            window._navigate_to("sweeps")
+            self.application.processEvents()
+            page = window.recipe_page
+            page._apply_builder_source(source, "Test")
+            loaded_source = page.editor.toPlainText()
+            keithley = window.keithley_page
+            keithley.channel.setCurrentText("B")
+            keithley.mode.setCurrentText("current")
+            keithley.settle.setText("250 ms")
+            keithley.channel.setCurrentText("A")
+            keithley.mode.setCurrentText("voltage")
+            keithley.settle.setText("150 ms")
+
+            for node_id, channel, mode, level, settling in (
+                ("bias-a", "A", "current", "2 mA", "150 ms"),
+                ("bias-b", "B", "voltage", "5 mV", "250 ms"),
+            ):
+                with self.subTest(channel=channel, mode=mode):
+                    def inspect_dialog(dialog):
+                        dialog.resize(1120, 780)
+                        dialog.show()
+                        self.application.processEvents()
+                        snapshot = dialog.configuration_snapshot()
+                        self.assertEqual(snapshot.channel, channel)
+                        self.assertEqual(snapshot.source_mode, mode)
+                        self.assertEqual(snapshot.source_level, level)
+                        self.assertEqual(snapshot.settling_time, settling)
+                        self.assertNotIn("settling_time", dialog.programmed_configuration_fields())
+                        self.assertTrue(dialog.settle.isVisibleTo(dialog))
+                        self.assertGreater(dialog.settle.width(), 0)
+                        dialog.reject()
+                        return QDialog.DialogCode.Rejected
+
+                    semantic_id = next(
+                        key for key, node in page.tree_model.tree.by_id.items()
+                        if node.source_node_id == node_id
+                    )
+                    with patch.object(KeithleyNodeEditorDialog, "exec", autospec=True,
+                                      side_effect=inspect_dialog) as execute_dialog:
+                        page._activate_semantic_node(semantic_id)
+                    execute_dialog.assert_called_once()
+                    device_snapshot = page._keithley_snapshot_for(channel, mode)
+                    self.assertEqual(device_snapshot.source_mode, mode)
+
+            self.assertEqual(page._current_keithley_snapshot().source_mode, "voltage")
+            self.assertEqual(page.editor.toPlainText(), loaded_source)
+        finally:
+            window.recipe_page._close_discard_confirmed = True
+            window.close()
 
     def test_sweep_builder_exposes_fluent_workspace_surfaces_at_desktop_size(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
@@ -98,7 +164,7 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             page.execution_mode.setCurrentIndex(1)
             self.application.processEvents()
             self.assertEqual(page.execution_mode.currentData(), "dry_run")
-            self.assertEqual(page.run_button.text(), "Run dry run")
+            self.assertEqual(page.run_button.text(), "Go to Execute")
             self.assertIn("outputs OFF", page.execution_mode_hint.text())
             self.assertIn("MOKE VOUT writes are skipped", page.execution_mode_hint.text())
             page.output_file_stem.setText("operator-check")
@@ -127,6 +193,125 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             self.assertNotEqual(light, dark)
         finally:
             window._set_theme_mode("system", persist=False)
+            window.close()
+            self.application.processEvents()
+
+    def test_execution_plan_jumps_from_ramp_to_the_first_spectrum(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        source = """schema_version: 1
+name: Ramped spectrum scan
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: source, type: configure_keithley, channel: A, mode: current, level: '0 mA', compliance: '30 mV', source_range: '10 mA'}
+    - {id: enable, type: set_keithley_output, channel: A, enabled: true}
+    - {id: approach, type: ramp_keithley_current, channel: A, level: '-0.1 mA', step: '100 uA', settle_time: '2 ms'}
+    - id: scan
+      type: sweep
+      label: Keithley A scan
+      target: keithley.A.current
+      segments: [{start: '-0.1 mA', stop: '0.1 mA', points: 3}]
+      children:
+        - {id: acquire, type: acquire_spectrum, instrument_average_count: 50}
+"""
+        try:
+            window.resize(1280, 840)
+            window.show()
+            window._navigate_to("sweeps")
+            page = window.recipe_page
+            page._apply_builder_source(source, "Test plan")
+            recipe = parse_recipe_text(page.editor.toPlainText())
+            plan = RecipeCompiler(window._settings).compile(recipe)
+            page._accept_preflight(recipe, plan, PlanEstimator(window._settings).estimate(plan))
+            page.run_button.click()
+            self.application.processEvents()
+
+            monitor = window.run_monitor
+            model = monitor.tree_model
+            tree = monitor.measurement_tree
+            first_spectrum = model.index_for_semantic_id("acquire")
+            approach = model.index_for_semantic_id("approach")
+            self.assertIn("Ramp Keithley A", approach.data())
+            self.assertFalse(model.hasChildren(approach))
+            self.assertIn("First spectrum at action 5", monitor.plan_preview_summary.text())
+            self.assertTrue(monitor.first_spectrum_button.isVisibleTo(window))
+            self.assertTrue(monitor.first_spectrum_button.geometry().isValid())
+            self.assertIn("Acquire spectrum", first_spectrum.data())
+            tree.collapse(first_spectrum.parent().parent())
+            monitor.first_spectrum_button.click()
+            self.application.processEvents()
+            self.assertEqual(tree.currentIndex(), first_spectrum)
+            self.assertTrue(tree.viewport().rect().intersects(tree.visualRect(first_spectrum)))
+        finally:
+            window.recipe_page._close_discard_confirmed = True
+            window.close()
+
+    def test_go_to_execute_previews_plan_before_readiness_and_run(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        source = (
+            "schema_version: 1\nname: staged-measurement\n"
+            "root: {id: settle, type: wait, duration: '10 ms'}\n"
+        )
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("sweeps")
+            page = window.recipe_page
+            page.path.clear()
+            page._apply_builder_source(source, "Test plan")
+            recipe = parse_recipe_text(page.editor.toPlainText())
+            plan = RecipeCompiler(window._settings).compile(recipe)
+            page._accept_preflight(recipe, plan, PlanEstimator(window._settings).estimate(plan))
+            window._run_controller.start = Mock()
+
+            page.run_button.click()
+            self.application.processEvents()
+            monitor = window.run_monitor
+            self.assertIs(window.stackedWidget.currentWidget(), window.navigation_routes["execution"])
+            self.assertIsNone(window._sweep_readiness_dialog)
+            window._run_controller.start.assert_not_called()
+            self.assertTrue(monitor.launch_button.isVisibleTo(window))
+            self.assertGreater(monitor.launch_button.width(), 40)
+            self.assertFalse(monitor.first_spectrum_button.isVisibleTo(window))
+            self.assertEqual(monitor.plan_timeline.actions, plan.actions)
+            self.assertIn("staged-measurement", monitor.plan_preview_name.text())
+            self.assertFalse(monitor.stop_button.isEnabled())
+            self.assertFalse(monitor._eta_timer.isActive())
+            window.resize(1024, 700)
+            self.application.processEvents()
+            self.assertTrue(monitor.launch_button.isVisibleTo(window))
+            self.assertTrue(monitor.measurement_tree.isVisibleTo(window))
+            self.assertGreater(monitor.measurement_tree.height(), 200)
+
+            monitor.launch_button.click()
+            dialog = window._sweep_readiness_dialog
+            self.assertIsNotNone(dialog)
+            window._run_controller.start.assert_not_called()
+            dialog.reject()
+            self.assertTrue(monitor.launch_button.isEnabled())
+            monitor.launch_button.click()
+            dialog = window._sweep_readiness_dialog
+            self.assertIsNotNone(dialog)
+            page.output_file_stem.setText("review-again")
+            self.assertFalse(monitor.launch_button.isEnabled())
+            dialog.start_button.click()
+            window._run_controller.start.assert_not_called()
+            self.assertIsNone(window._sweep_readiness_dialog)
+
+            window._navigate_to("sweeps")
+            page.run_button.click()
+            monitor.launch_button.click()
+            dialog = window._sweep_readiness_dialog
+            self.assertIsNotNone(dialog)
+            dialog.start_button.click()
+            window._run_controller.start.assert_called_once()
+            self.assertIs(window._run_controller.start.call_args.args[2], plan)
+            self.assertEqual(window._run_controller.start.call_args.kwargs["file_stem_override"], "review-again")
+            self.assertTrue(monitor.launch_button.isHidden() or monitor.launch_card.isHidden())
+            self.assertTrue(monitor.stop_button.isEnabled())
+        finally:
+            window.recipe_page._close_discard_confirmed = True
             window.close()
             self.application.processEvents()
 

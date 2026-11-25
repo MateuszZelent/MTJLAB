@@ -2,28 +2,46 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from enum import StrEnum
+import contextlib
 import hashlib
 import json
 import math
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
-from typing import Sequence
 
+import numpy as np
+
+from app.devices.anritsu_ms2830a import ReferenceSpectrum, SpectrumTrace
 from app.domain.errors import ExecutionError
 from app.domain.manual_metadata import ManualMetadataValue
 from app.domain.models import MeasurementPoint
-from app.devices.anritsu_ms2830a import ReferenceSpectrum, SpectrumTrace
 from app.spectrum import frequency_grids_match
 
 from .hdf5_writer import Hdf5RunWriter
 from .reference_store import ReferenceHdf5Store
 from .saved_spectrum_view import SavedSpectrumView
 
-
 MANUAL_SPECTRUM_SCHEMA = "manual-spectrum-v1"
 MANUAL_SPECTRUM_RECIPE = "schema_version: 1\n"
+_CLOSE_CLEANUP_ERRORS = (
+    ExecutionError,
+    OSError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    KeyError,
+    AttributeError,
+)
+
+
+def _ensure_hdf5_path(path: Path) -> Path:
+    """Ensure an HDF5 extension without replacing arbitrary dotted suffixes."""
+    if path.suffix.lower() in {".h5", ".hdf5"}:
+        return path
+    return path.with_name(f"{path.name}.h5")
 
 
 class ManualSpectrumSaveMode(StrEnum):
@@ -60,7 +78,7 @@ class ManualSpectrumArchive:
         isolate_validation: bool = False,
     ) -> None:
         if not isinstance(simulation, bool):
-            raise ValueError("Manual archive requires a boolean simulation mode.")
+            raise TypeError("Manual archive requires a boolean simulation mode.")
         self._settings_source = str(settings_source)
         self._device_idn = {
             str(key): str(value) for key, value in (device_idn or {}).items()
@@ -83,13 +101,11 @@ class ManualSpectrumArchive:
             return
         try:
             writer.close("incomplete")
-        except Exception:
+        except _CLOSE_CLEANUP_ERRORS:
             file_handle = getattr(writer, "_file", None)
-            try:
+            with contextlib.suppress(*_CLOSE_CLEANUP_ERRORS):
                 if file_handle is not None and bool(file_handle.id.valid):
                     file_handle.close()
-            except Exception:
-                pass
 
     @property
     def active_path(self) -> Path | None:
@@ -126,33 +142,120 @@ class ManualSpectrumArchive:
         if not trace_variant.strip():
             raise ExecutionError("Manual spectrum save requires a trace variant.")
         if processed_values is not None:
-            processed = tuple(float(value) for value in processed_values)
-            if not all(math.isfinite(value) for value in processed):
+            processed_arr = np.asarray(processed_values, dtype=np.float64)
+            if processed_arr.ndim != 1 or not np.all(np.isfinite(processed_arr)):
                 raise ExecutionError("The processed manual spectrum contains NaN or infinity.")
+            processed: tuple[float, ...] | None = tuple(processed_arr.tolist())
         else:
             processed = None
-        path = Path(destination).expanduser().resolve()
-        if not path.suffix:
-            path = path.with_suffix(".h5")
-        if path.suffix.lower() not in {".h5", ".hdf5"}:
-            path = path.with_suffix(".h5")
+        trace_frequencies = self._validate_trace_frequencies(trace)
+        path = _ensure_hdf5_path(Path(destination).expanduser().resolve())
         if selected_mode is ManualSpectrumSaveMode.TIMESTAMPED:
             path = timestamped_path(path)
 
+        pending_context: tuple[str, dict[str, str], dict[str, object]] | None = None
         if capture_context is not None:
             # Snapshot before file mutation. Run identity remains immutable for
             # an append session; a new file gets the current capture context.
             capture_context = json.loads(json.dumps(capture_context, allow_nan=False))
             if capture_context.get("simulation") is not self._simulation:
                 raise ExecutionError("Manual capture context simulation provenance differs.")
-            settings_source = str(capture_context["settings_source"])
-            device_idn = dict(capture_context["device_idn"])
-            operator_context = dict(capture_context["operator_context"])
-            self._settings_source = settings_source
-            self._device_idn = device_idn
-            self._operator_context = operator_context
-        writer = self._open_for(path, selected_mode)
-        self._validate_grid(trace)
+            pending_context = (
+                str(capture_context["settings_source"]),
+                dict(capture_context["device_idn"]),
+                dict(capture_context["operator_context"]),
+            )
+
+        if selected_mode is ManualSpectrumSaveMode.TIMESTAMPED:
+            if path.exists():
+                raise ExecutionError(
+                    f"Timestamped manual spectrum target already exists: {path}"
+                )
+            if self._writer is not None:
+                self.close()
+            if pending_context is not None:
+                self._settings_source, self._device_idn, self._operator_context = pending_context
+            writer = self._create_new_writer(path)
+            self._writer = writer
+            self._path = path
+            self._frequency_grid = trace_frequencies
+            self._last_reference = None
+            try:
+                point_index = self._write_capture(
+                    writer,
+                    trace,
+                    metadata_values=metadata_values,
+                    metadata_scope=metadata_scope,
+                    trace_variant=trace_variant,
+                    processed=processed,
+                    processed_unit=processed_unit,
+                    processing_operation=processing_operation,
+                    capture_context=capture_context,
+                    reference=reference,
+                    saved_display=saved_display,
+                )
+                writer.close("completed")
+            except Exception as exc:
+                try:
+                    writer.close("faulted")
+                except _CLOSE_CLEANUP_ERRORS as close_error:
+                    exc.add_note(
+                        f"Closing the failed timestamped manual archive also failed: {close_error}"
+                    )
+                raise
+            finally:
+                self._writer = None
+                self._path = None
+                self._frequency_grid = None
+                self._last_reference = None
+            return ManualSpectrumSaveResult(
+                path=path,
+                point_index=point_index,
+                point_count=point_index + 1,
+                mode=selected_mode,
+            )
+
+        writer = self._open_for(
+            path,
+            selected_mode,
+            trace_frequencies=trace_frequencies,
+            pending_context=pending_context,
+        )
+        point_index = self._write_capture(
+            writer,
+            trace,
+            metadata_values=metadata_values,
+            metadata_scope=metadata_scope,
+            trace_variant=trace_variant,
+            processed=processed,
+            processed_unit=processed_unit,
+            processing_operation=processing_operation,
+            capture_context=capture_context,
+            reference=reference,
+            saved_display=saved_display,
+        )
+        return ManualSpectrumSaveResult(
+            path=path,
+            point_index=point_index,
+            point_count=point_index + 1,
+            mode=selected_mode,
+        )
+
+    def _write_capture(
+        self,
+        writer: Hdf5RunWriter,
+        trace: SpectrumTrace,
+        *,
+        metadata_values: Sequence[ManualMetadataValue],
+        metadata_scope: str,
+        trace_variant: str,
+        processed: tuple[float, ...] | None,
+        processed_unit: str | None,
+        processing_operation: str,
+        capture_context: dict[str, object] | None,
+        reference: ReferenceSpectrum | None,
+        saved_display: SavedSpectrumView | None,
+    ) -> int:
         point_index = writer.point_count
         descriptors = [
             {
@@ -177,7 +280,7 @@ class ManualSpectrumArchive:
                     kind="loaded" if reference.kind == "imported" else reference.kind,
                     average_count=reference.average_count,
                     acquisition_metadata={
-                        **ReferenceHdf5Store.metadata(reference),
+                        **ReferenceHdf5Store.metadata(reference, simulation_mode=self._simulation),
                         "source_file": reference.source_file,
                     },
                 )
@@ -195,7 +298,7 @@ class ManualSpectrumArchive:
                 "metadata_scope": metadata_scope,
                 "selected_metadata_keys": sorted(measurements),
                 "metadata_descriptors": descriptors,
-                "metadata_sampled_at_utc": datetime.now(timezone.utc).isoformat(),
+                "metadata_sampled_at_utc": datetime.now(UTC).isoformat(),
                 "metadata_snapshot_kind": "last_confirmed_at_save",
                 "capture_context_at_save": capture_context or {},
                 **({"instrument_average": capture_context["instrument_average"]}
@@ -213,18 +316,7 @@ class ManualSpectrumArchive:
             saved_display=saved_display,
         )
         writer.flush_checkpoint()
-        if selected_mode is ManualSpectrumSaveMode.TIMESTAMPED:
-            writer.close("completed")
-            self._writer = None
-            self._path = None
-            self._frequency_grid = None
-            self._last_reference = None
-        return ManualSpectrumSaveResult(
-            path=path,
-            point_index=point_index,
-            point_count=point_index + 1,
-            mode=selected_mode,
-        )
+        return point_index
 
     def close(self) -> None:
         """Close the current append session while keeping it resumable."""
@@ -239,15 +331,46 @@ class ManualSpectrumArchive:
             # Keep it resumable and importable; "incomplete" denotes a crash.
             writer.close("aborted")
 
+    def _create_new_writer(self, path: Path) -> Hdf5RunWriter:
+        plan_hash = hashlib.sha256(
+            MANUAL_SPECTRUM_RECIPE.encode("utf-8")
+        ).hexdigest()
+        return Hdf5RunWriter(
+            path,
+            recipe_source=MANUAL_SPECTRUM_RECIPE,
+            settings_source=self._settings_source,
+            plan_hash=plan_hash,
+            device_idn=self._device_idn,
+            operator_context=self._operator_context,
+            simulation_metadata={
+                "enabled": self._simulation,
+                "manual_spectrum": True,
+            },
+            run_attributes={"manual_spectrum_schema": MANUAL_SPECTRUM_SCHEMA},
+            expected_points=None,
+            isolate_validation=self._isolate_validation,
+        )
+
     def _open_for(
-        self, path: Path, mode: ManualSpectrumSaveMode
+        self,
+        path: Path,
+        mode: ManualSpectrumSaveMode,
+        *,
+        trace_frequencies: tuple[float, ...] | None = None,
+        pending_context: tuple[str, dict[str, str], dict[str, object]] | None = None,
     ) -> Hdf5RunWriter:
         path = path.expanduser().resolve()
         if self._writer is not None and self._path == path:
+            if trace_frequencies is not None:
+                self._validate_grid_frequencies(self._frequency_grid, trace_frequencies)
+                if self._frequency_grid is None:
+                    self._frequency_grid = trace_frequencies
+            if pending_context is not None:
+                self._settings_source, self._device_idn, self._operator_context = pending_context
             return self._writer
-        if self._writer is not None:
-            self.close()
 
+        # Validate the target archive and incoming trace grid BEFORE closing any
+        # existing append session, so a rejected target never disrupts the live session.
         if path.exists():
             if mode is not ManualSpectrumSaveMode.APPEND:
                 raise ExecutionError(
@@ -257,6 +380,12 @@ class ManualSpectrumArchive:
             simulation_metadata = json.loads(identity["simulation_json"])
             if simulation_metadata.get("enabled") is not self._simulation:
                 raise ExecutionError("Manual archive simulation provenance differs; choose a new file.")
+            if trace_frequencies is not None:
+                self._validate_grid_frequencies(frequency_grid, trace_frequencies)
+            if self._writer is not None:
+                self.close()
+            if pending_context is not None:
+                self._settings_source, self._device_idn, self._operator_context = pending_context
             writer = Hdf5RunWriter.resume(
                 path,
                 recipe_source=identity["recipe_source"],
@@ -267,41 +396,46 @@ class ManualSpectrumArchive:
                 operator_context=self._operator_context,
                 isolate_validation=self._isolate_validation,
             )
-            self._frequency_grid = frequency_grid
+            self._frequency_grid = frequency_grid if frequency_grid is not None else trace_frequencies
         else:
-            plan_hash = hashlib.sha256(
-                MANUAL_SPECTRUM_RECIPE.encode("utf-8")
-            ).hexdigest()
-            writer = Hdf5RunWriter(
-                path,
-                recipe_source=MANUAL_SPECTRUM_RECIPE,
-                settings_source=self._settings_source,
-                plan_hash=plan_hash,
-                device_idn=self._device_idn,
-                operator_context=self._operator_context,
-                simulation_metadata={
-                    "enabled": self._simulation,
-                    "manual_spectrum": True,
-                },
-                run_attributes={"manual_spectrum_schema": MANUAL_SPECTRUM_SCHEMA},
-                expected_points=None,
-                isolate_validation=self._isolate_validation,
-            )
-            self._frequency_grid = None
+            if self._writer is not None:
+                self.close()
+            if pending_context is not None:
+                self._settings_source, self._device_idn, self._operator_context = pending_context
+            writer = self._create_new_writer(path)
+            self._frequency_grid = trace_frequencies
         self._writer = writer
         self._path = path
         return writer
 
-    def _validate_grid(self, trace: SpectrumTrace) -> None:
-        frequencies = tuple(float(value) for value in trace.frequencies_hz)
-        if self._frequency_grid is None:
-            self._frequency_grid = frequencies
+    @staticmethod
+    def _validate_trace_frequencies(trace: SpectrumTrace) -> tuple[float, ...]:
+        frequencies = np.asarray(trace.frequencies_hz, dtype=np.float64)
+        powers = np.asarray(trace.powers_dbm, dtype=np.float64)
+        if frequencies.ndim != 1 or powers.ndim != 1 or frequencies.size != powers.size or frequencies.size < 2:
+            raise ExecutionError("Manual spectrum trace must contain at least two matching frequency and power points.")
+        if not (np.all(np.isfinite(frequencies)) and np.all(np.isfinite(powers))):
+            raise ExecutionError("Manual spectrum trace contains NaN or infinity.")
+        return tuple(frequencies.tolist())
+
+    @staticmethod
+    def _validate_grid_frequencies(
+        existing_grid: tuple[float, ...] | None,
+        incoming_frequencies: tuple[float, ...],
+    ) -> None:
+        if existing_grid is None:
             return
-        if not frequency_grids_match(self._frequency_grid, frequencies):
+        if not frequency_grids_match(existing_grid, incoming_frequencies):
             raise ExecutionError(
                 "The manual archive already contains a different frequency grid; "
                 "start a new timestamped file for this analyser configuration."
             )
+
+    def _validate_grid(self, trace: SpectrumTrace) -> None:
+        frequencies = self._validate_trace_frequencies(trace)
+        self._validate_grid_frequencies(self._frequency_grid, frequencies)
+        if self._frequency_grid is None:
+            self._frequency_grid = frequencies
 
     @staticmethod
     def _validate_metadata(values: Sequence[ManualMetadataValue]) -> None:
@@ -323,12 +457,8 @@ def timestamped_path(
 ) -> Path:
     """Return a collision-free ``stem_YYYYmmddTHHMMSS.ffffffZ.h5`` path."""
 
-    candidate = Path(base).expanduser()
-    if not candidate.suffix:
-        candidate = candidate.with_suffix(".h5")
-    if candidate.suffix.lower() not in {".h5", ".hdf5"}:
-        candidate = candidate.with_suffix(".h5")
-    moment = (timestamp or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    candidate = _ensure_hdf5_path(Path(base).expanduser())
+    moment = (timestamp or datetime.now(UTC)).astimezone(UTC)
     stamp = moment.strftime("%Y%m%dT%H%M%S.%fZ")
     output = candidate.with_name(f"{candidate.stem}_{stamp}{candidate.suffix}")
     serial = 2

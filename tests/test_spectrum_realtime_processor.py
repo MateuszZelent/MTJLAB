@@ -230,6 +230,18 @@ def test_window_matches_batch_even_after_periodic_rebuild():
     assert average.first_time_s == 1091
 
 
+def test_window_rebuilds_sum_after_evicting_large_transient_without_cancellation_loss():
+    average = TemporalPowerAverage(2, TemporalAverageMode.WINDOW, tau_s=1, window_frames=4)
+    # Single huge transient followed by quiet sub-femtowatt signed residuals.
+    average.add([1.0, -1.0], 1.0, "ref")
+    quiet = np.array([1e-18, -2e-18])
+    for step in range(2, 6):
+        average.add(quiet, float(step), "ref")
+    # Frame 1 (the 1.0 W transient) was evicted at step 5; without a rebuild
+    # guard, float64 subtraction 1.0 + 3e-18 - 1.0 wipes out the quiet signal.
+    np.testing.assert_allclose(average.mean, quiet, rtol=1e-12, atol=0.0)
+
+
 def test_refresh_new_state_and_gap_reset_temporal_average():
     ctx = context()
     engine = processor(ctx)

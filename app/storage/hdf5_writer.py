@@ -75,6 +75,7 @@ class Hdf5RunWriter:
         run_attributes: dict[str, object] | None = None,
         isolate_validation: bool = False,
         validation_memory_budget_bytes: int | None = None,
+        allow_skipped_checkpoints: bool = False,
     ) -> None:
         from app.storage.resource_budget import resolve_import_memory_budget
 
@@ -168,6 +169,7 @@ class Hdf5RunWriter:
                 expected_points=expected_points,
                 recipe_source=recipe_source,
                 settings_source=settings_source,
+                allow_skipped_checkpoints=allow_skipped_checkpoints,
             )
             self._point_count = 0
             self._correction_contexts: dict[str, SpectrumAcquisitionContext] = {}

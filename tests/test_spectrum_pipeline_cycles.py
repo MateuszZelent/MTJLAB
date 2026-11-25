@@ -1,8 +1,9 @@
 """Actual repeated pipeline archives, cleanup telemetry and incomplete journals."""
 
+import gc
 import json
 import os
-import gc
+import shutil
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -12,7 +13,23 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from app.storage.hdf5_reader import Hdf5RunReader
-from tools.benchmark_spectrum_cycles import benchmark_cycles, drain_deleted_objects, resource_summary
+from tools.benchmark_spectrum_cycles import (
+    benchmark_cycles,
+    drain_deleted_objects,
+    resource_summary,
+)
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_cycle_temp_files(request: pytest.FixtureRequest):
+    target = request.getfixturevalue("tmp_path") if "tmp_path" in request.fixturenames else None
+    yield
+    if target is not None and target.exists():
+        for child in list(target.iterdir()):
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
 
 
 def test_repeated_full_pipeline_retains_each_archive_and_measures_same_process(tmp_path):

@@ -1,16 +1,19 @@
 """Bounded offline power-stability diagnostics; never a qualification or TTL."""
 
-from dataclasses import dataclass
 import math
-from typing import Iterable
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 import numpy as np
 
 from app.domain.spectrum_correction import (
-    SpectrumAcquisitionContext, SpectrumFrameEnvelope, SpectrumFrameRole,
+    SpectrumAcquisitionContext,
+    SpectrumFrameEnvelope,
+    SpectrumFrameRole,
 )
-from .streaming_statistics import dbm_to_w
+
 from .background_profile import BackgroundProfileBuilder
+from .streaming_statistics import dbm_to_w
 from .sweep_counter_guard import SweepCounterGuard
 
 
@@ -131,11 +134,14 @@ def overlapping_allan_variance(block_mean_w, factors, *, cancellation_check=None
     return np.asarray(values), np.asarray(counts, dtype=np.int64)
 
 
+_DEFAULT_DIAGNOSTIC_CONFIG = ReferenceDiagnosticConfig()
+
+
 def diagnose_reference(
     context: SpectrumAcquisitionContext,
     frames: Iterable[tuple[SpectrumFrameEnvelope, np.ndarray]],
     bin_indices: tuple[int, ...],
-    config: ReferenceDiagnosticConfig = ReferenceDiagnosticConfig(),
+    config: ReferenceDiagnosticConfig = _DEFAULT_DIAGNOSTIC_CONFIG,
     *, cancellation_check=None, expected_profile=None,
 ) -> ReferenceDiagnostics:
     """Read each raw once; retain bounded time-block summaries, not F×history.

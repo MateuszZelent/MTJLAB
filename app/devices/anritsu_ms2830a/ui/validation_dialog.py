@@ -3,12 +3,24 @@
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, LineEdit, PrimaryPushButton, ProgressBar, PushButton, ScrollArea, TitleLabel
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QFormLayout, QFrame, QHBoxLayout, QWidget
+from qfluentwidgets import (
+    BodyLabel,
+    LineEdit,
+    PrimaryPushButton,
+    ProgressBar,
+    PushButton,
+    ScrollArea,
+    TitleLabel,
+)
 
 from app.ui.dialogs import StationDialog, StationFileDialog
-from .correction_controller import SpectrumCorrectionController, SpectrumInterferenceValidationRequest
+
+from .correction_controller import (
+    SpectrumCorrectionController,
+    SpectrumInterferenceValidationRequest,
+)
 from .training_dialog import parse_region_text
 
 
@@ -29,6 +41,7 @@ class SpectrumValidationDialog(StationDialog):
         hint.setWordWrap(True)
         layout.addWidget(hint)
         scroll = ScrollArea(self)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content = QWidget(scroll)
@@ -58,6 +71,7 @@ class SpectrumValidationDialog(StationDialog):
         note.setWordWrap(True)
         form.addRow(note)
         scroll.setWidget(content)
+        scroll.enableTransparentBackground()
         layout.addWidget(scroll, 1)
         self.status = BodyLabel("Ready. Choose a model and a separate completed raw REF.", self)
         self.status.setWordWrap(True)
@@ -69,11 +83,13 @@ class SpectrumValidationDialog(StationDialog):
         self.result_label.setWordWrap(True)
         layout.addWidget(self.result_label)
         actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addStretch(1)
         self.start = PrimaryPushButton("Validate and save report", self)
         self.cancel = PushButton("Cancel validation", self)
         self.cancel.setEnabled(False)
         self.close_button = PushButton("Close", self)
-        for button in (self.start, self.cancel, self.close_button):
+        for button in (self.close_button, self.cancel, self.start):
             actions.addWidget(button)
         layout.addLayout(actions)
         self.start.clicked.connect(self._start)

@@ -14,7 +14,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from app.engine import ExecutionMode, RecipeCompiler
 from app.domain.execution_state import SemanticOperationState
+from app.domain.models import ApplicationState
 from app.devices.registry import built_in_device_registry
+from app.engine.runner import RunResult
 from app.recipes import load_recipe, parse_recipe_text
 from app.recipes.semantic_tree import normalize_recipe_tree
 from app.ui.execution import RunMonitorPage
@@ -411,6 +413,39 @@ def test_execution_workspace_is_bounded_while_tree_keeps_internal_scroll() -> No
         app.processEvents()
 
 
+def test_compliance_skip_updates_execution_progress_and_completion_dialog(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    page = RunMonitorPage()
+    try:
+        page.resize(1200, 760)
+        page.show()
+        page.progress.setRange(0, 15)
+        page.append_event("sweep_compliance_limited", {
+            "source_current_a": {"B": -0.01},
+            "next_action_index": 12,
+            "skipped_points": 3,
+        })
+        app.processEvents()
+        assert page.progress.value() == 12
+        assert page.warnings.isVisibleTo(page)
+        assert "Keithley B (-10 mA)" in page.warnings.toPlainText()
+
+        page.complete({
+            "result": RunResult(ApplicationState.SAFE, 15, 2, compliance_points_skipped=3),
+            "path": tmp_path / "data.h5",
+        })
+        app.processEvents()
+        dialog = page._completion_dialog
+        assert dialog is not None and dialog.isVisibleTo(page)
+        assert dialog.summary.geometry().height() > 0
+        assert "2 measurement points saved" in dialog.summary.text()
+        assert "compliance skipped 3 planned point(s)" in dialog.summary.text()
+    finally:
+        page.close()
+        page.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
 def test_large_spectrum_preview_is_decimated_before_plotting() -> None:
     app = QApplication.instance() or QApplication([])
     page = RunMonitorPage()
@@ -461,11 +496,11 @@ def test_execution_preview_labels_averaging_source_and_keeps_reference_differenc
             ({"instrument_average": {"sweep_count": 8}}, "Anritsu average"),
         ):
             page.update_spectrum_preview({**preview, **method})
-            trace_label = f"{label} − Reference"
+            trace_label = "Raw − Reference"
             assert list(page.spectrum_preview._traces) == [trace_label]
             _, displayed = page.spectrum_preview._traces[trace_label]
             assert tuple(displayed) == preview["raw_minus_reference_db"]
-            assert f"{trace_label} · 8 sweeps" in page.spectrum_preview.plot.plotItem.titleLabel.text
+            assert f"{trace_label} · {label} · 8 sweeps" in page.spectrum_preview.plot.plotItem.titleLabel.text
     finally:
         page.close()
         page.deleteLater()

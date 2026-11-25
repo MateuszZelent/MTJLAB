@@ -291,6 +291,7 @@ class QualificationRunner:
                     device_idn=identities,
                     device_capabilities=capabilities,
                     expected_points=plan.total_points,
+                    allow_skipped_checkpoints=plan.may_skip_compliance_points,
                     operator_context={
                         **self.policy.identity.as_context(),
                         "qualification_id": qualification_id,

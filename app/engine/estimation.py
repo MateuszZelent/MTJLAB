@@ -239,6 +239,13 @@ class PlanEstimator:
                 if average_count > 1:
                     inputs = "Live frames in PyLab" if action.payload.get("acquisition_mode") == "continuous_live" else "complete spectra"
                     warnings[f"{block_id}: averages {average_count} {inputs}."] += 1
+            elif action.kind == "ramp_keithley_current":
+                channel = action.payload["channel"]
+                nplc = nplc_by_channel.get(channel, 1.0)
+                nominal += action.payload["planned_step_count"] * (
+                    action.payload["settle_time_s"] + self._command_overhead_s
+                    + 2.0 * nplc / self._line_frequency_hz
+                )
             elif action.kind == "ramp_keithley_to_zero":
                 nominal += min(float(action.payload["deadline_s"]), 1.0)
             elif action.kind in {"update_moke_voltage", "stop_moke_voltage"}:

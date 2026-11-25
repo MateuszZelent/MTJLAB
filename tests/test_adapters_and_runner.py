@@ -1971,11 +1971,15 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter.connect()
         adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01))
         adapter.set_output("B", True)
+        before_ramp = len(session.writes)
 
         result = adapter.ramp_to_level(
             KeithleyRampRequest("B", 0.0012, 0.0001, 0.001, 1.0)
         )
 
+        mutations = [command for command in session.writes[before_ramp:]
+                     if not command.startswith("print(")]
+        self.assertEqual(mutations, ["smub.source.leveli = 0.0011", "smub.source.leveli = 0.0012"])
         self.assertAlmostEqual(result.start_si, 0.001)
         self.assertAlmostEqual(result.levels_si[-1], 0.0012)
         self.assertEqual(

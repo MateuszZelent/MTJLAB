@@ -57,6 +57,7 @@ from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.safety.keithley import validate_keithley_source
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
+from app.ui.design_system import set_dynamic_property
 from app.ui.dialogs import StationDialog, StationMessageBox as QMessageBox
 from app.ui.widgets import LimitField, NotificationBanner, SpectrumPlotWidget
 from app.ui.widgets.fluent_tab_view import FluentTabView
@@ -1172,7 +1173,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             ("source_level", "Source level", "source.level"),
             ("compliance", "Compliance", "source.compliance"),
             ("nplc", "NPLC", "measurement.nplc"),
-            ("settling_time", "Settling time", "measurement.settling_time"),
+            ("settling_time", "Settling time (PyLab)", "measurement.settling_time"),
             ("sense_mode", "Sense mode", "measurement.sense_mode"),
             ("source_autorange", "Source autorange", "source.range"),
             ("source_range", "Source range", "source.range"),
@@ -1199,6 +1200,8 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             current = getattr(baseline, field) if baseline is not None else None
             if baseline is not None and field.endswith("_range") and getattr(baseline, field.replace("_range", "_autorange")):
                 current = "AUTO"
+            if field == "settling_time" and action == "Set":
+                action = "Timing"
             rows.append(ConfigurationComparisonRow(field, label, current, value, action))
         if hasattr(self, "_recipe_context_resolver") and planned.source_mode in {"current", "voltage"}:
             range_row = next(row for row in rows if row.key == "source_range")
@@ -3697,7 +3700,7 @@ class KeithleyPage(QWidget):
         output_off_action = PushButton("OUTPUT OFF")
         for button in (output_on_action, output_off_action):
             button.setProperty("compact", True)
-        output_on_action.setObjectName("outputOnButton")
+        output_on_action.setObjectName("keithleyOutputOnButton")
         output_off_action.setObjectName("outputOffButton")
         output_on_action.clicked.connect(
             lambda _checked=False, ch=channel: self._request_channel_output(ch, True)
@@ -4381,19 +4384,16 @@ class KeithleyPage(QWidget):
         self._output_state_known[channel] = True
         widgets = self.channel_cards[channel]
         widgets["output"].setText("OUTPUT ON" if enabled else "OUTPUT OFF")
-        widgets["output"].setProperty("outputState", "active" if enabled else "neutral")
-        widgets["led"].setProperty("outputState", "active" if enabled else "neutral")
+        output_state = "active" if enabled else "neutral"
+        set_dynamic_property(widgets["output"], "outputState", output_state)
+        set_dynamic_property(widgets["led"], "outputState", output_state)
         widgets["output_on_action"].setChecked(enabled)
-        widgets["output_on_action"].setProperty(
-            "controlState", "energized" if enabled else "available"
-        )
-        for widget in (
-            widgets["output"],
-            widgets["led"],
+        set_dynamic_property(
             widgets["output_on_action"],
-        ):
-            widget.style().unpolish(widget)
-            widget.style().polish(widget)
+            "controlState",
+            "energized" if enabled else "output-neutral",
+        )
+        set_dynamic_property(widgets["output_off_action"], "controlState", "output-neutral")
         widgets["output_on_action"].setText("OUTPUT ON")
         widgets["output_off_action"].setText("OUTPUT OFF")
         if channel == self.channel.currentText():
@@ -4410,17 +4410,11 @@ class KeithleyPage(QWidget):
         self._output_state_known[channel] = False
         widgets = self.channel_cards[channel]
         widgets["output"].setText("OUTPUT UNKNOWN")
-        widgets["output"].setProperty("outputState", "neutral")
-        widgets["led"].setProperty("outputState", "neutral")
+        set_dynamic_property(widgets["output"], "outputState", "neutral")
+        set_dynamic_property(widgets["led"], "outputState", "neutral")
         widgets["output_on_action"].setChecked(False)
-        widgets["output_on_action"].setProperty("controlState", "available")
-        for widget in (
-            widgets["output"],
-            widgets["led"],
-            widgets["output_on_action"],
-        ):
-            widget.style().unpolish(widget)
-            widget.style().polish(widget)
+        set_dynamic_property(widgets["output_on_action"], "controlState", "available")
+        set_dynamic_property(widgets["output_off_action"], "controlState", "available")
         if channel == self.channel.currentText():
             self.output_toggle.blockSignals(True)
             self.output_toggle.setChecked(False)

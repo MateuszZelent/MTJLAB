@@ -3,20 +3,40 @@
 # ruff: noqa: F401
 from __future__ import annotations
 
+import math
 from typing import Any
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QSplitter, QStackedWidget, QVBoxLayout, QWidget,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSplitter,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel, CaptionLabel,
-    CardWidget, CheckBox, ComboBox, LineEdit, PrimaryPushButton, PushButton,
-    ScrollArea, SegmentedWidget, SpinBox,
+    BodyLabel,
+    CaptionLabel,
+    CardWidget,
+    CheckBox,
+    ComboBox,
+    LineEdit,
+    PrimaryPushButton,
+    PushButton,
+    ScrollArea,
+    SegmentedWidget,
+    SpinBox,
 )
-from app.ui.dialogs import StationMessageBox as QMessageBox
 
 from app.devices.anritsu_ms2830a import AnritsuConfigurationSnapshot, SignalGeneratorSnapshot
 from app.devices.anritsu_ms2830a.ui.page import (
@@ -24,15 +44,28 @@ from app.devices.anritsu_ms2830a.ui.page import (
     AnritsuSpectrumConfigurationPanel,
 )
 from app.domain.errors import ConfigurationError
-from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, parse_quantity
+from app.domain.quantities import (
+    DIMENSION_DB,
+    DIMENSION_DBM,
+    DIMENSION_FREQUENCY,
+    QuantityError,
+    parse_quantity,
+)
 from app.recipes import RecipeNode
-from app.recipes.block_registry import ANRITSU_ACQUISITION_OPTION_FIELDS, ANRITSU_HARDWARE_AVERAGE_FIELDS
-from app.recipes.spectrum_processing import REFERENCE_OPERATIONS
+from app.recipes.block_registry import (
+    ANRITSU_ACQUISITION_OPTION_FIELDS,
+    ANRITSU_HARDWARE_AVERAGE_FIELDS,
+)
+from app.recipes.spectrum_processing import REFERENCE_OPERATIONS, acquisition_summary
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
-from app.ui.recipes.sweep_editor import SweepGeneratorDialog
+from app.ui.dialogs import StationMessageBox as QMessageBox
+from app.ui.recipes.configuration_comparison import (
+    ConfigurationComparisonRow,
+    ConfigurationReview,
+)
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
-from app.ui.recipes.configuration_comparison import ConfigurationReview, ConfigurationComparisonRow
+from app.ui.recipes.sweep_editor import SweepGeneratorDialog
 
 
 class AnritsuNodeEditorDialog(FluentRecipeDialog):
@@ -74,7 +107,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         self.setMinimumSize(680, 480)
         surface = self.use_modal_shell_content().surface
         layout = self.modal_content_layout(spacing=10)
-        heading = BodyLabel("Anritsu MS2830A · Spectrum analyser")
+        heading = BodyLabel("Anritsu MS2830A · Spectrum analyzer")
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
         self.review = ConfigurationReview(surface)
@@ -127,6 +160,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QFrame.Shape.NoFrame)
         left_scroll.setWidget(left)
+        left_scroll.enableTransparentBackground()
         self.content_splitter.addWidget(left_scroll)
         right = CardWidget(surface)
         right.setObjectName("recipeEditorParameters")
@@ -197,12 +231,14 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         self.reference_operation.currentIndexChanged.connect(self._clear_processed_storage_choice)
         self.acquisition_options_button = PushButton("Acquisition options…", right)
         self.acquisition_options_button.clicked.connect(self._edit_acquisition_options)
+        self.average_count.valueChanged.connect(self._role_changed)
         right_layout.addWidget(self.acquisition_options_button, 5, 0, 1, 2)
         right_layout.setRowStretch(operation_row + 4, 1)
         right_scroll = ScrollArea(surface)
         right_scroll.setWidgetResizable(True)
         right_scroll.setFrameShape(QFrame.Shape.NoFrame)
         right_scroll.setWidget(right)
+        right_scroll.enableTransparentBackground()
         self.content_splitter.addWidget(right_scroll)
         self.content_splitter.setSizes([570, 390])
         layout.addWidget(self.content_splitter, 1)
@@ -252,9 +288,10 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         role = self.selected_node_role()
         acquisition = role != "configure"
         spectrum = role == "acquire_spectrum"
+        reference = role == "acquire_reference"
         self.acquisition_options_button.setVisible(acquisition)
         self.acquisition_options_button.setText(
-            "Spectrum acquisition options…" if spectrum else "Reference / background acquisition…"
+            "Spectrum acquisition settings…" if spectrum else "Reference settings…"
         )
         self.reference_operation_label.setVisible(spectrum)
         self.reference_operation.setVisible(spectrum)
@@ -264,19 +301,18 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         self.trace_label.setVisible(acquisition and not imported)
         self.trace.setVisible(acquisition and not imported)
         hardware_average = any(field in options for field in ANRITSU_HARDWARE_AVERAGE_FIELDS)
-        pylab_average = acquisition and not imported and not hardware_average
-        self.average_count.setVisible(pylab_average)
-        self.average_count_label.setVisible(pylab_average)
-        if imported:
-            summary = "Load saved background" if options.get("file_kind") == "background" else "Load saved reference"
-        elif "instrument_average_count" in options:
-            summary = f"Anritsu Lin Average · {options['instrument_average_count']} sweeps"
-        elif "instrument_average_duration" in options:
-            summary = f"Anritsu Lin Average · ~{options['instrument_average_duration']}"
-        elif options.get("acquisition_mode") == "continuous_live":
-            summary = "PyLab Live averaging"
-        else:
-            summary = "PyLab triggered sweeps"
+        show_count = acquisition and not imported and not hardware_average and "minimum_duration" not in options
+        self.average_count.setVisible(show_count)
+        self.average_count_label.setVisible(show_count)
+        summary = acquisition_summary(
+            {"average_count": self.average_count.value(), **options}, reference_only=reference,
+        )
+        if not imported:
+            method = (
+                "Anritsu Lin Average" if hardware_average else
+                "PyLab Live" if options.get("acquisition_mode") == "continuous_live" else "PyLab triggered"
+            )
+            summary = f"{method} · {summary}"
         self.acquisition_hint.setText(summary)
         self.apply_button.setText(
             {
@@ -508,15 +544,11 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
             return
         if parameter_id == "advanced.attenuation":
             try:
-                parsed = parse_quantity(value, "dimensionless", require_unit=False)
-                advanced.attenuation.setValue(round(parsed.si_value))
-            except (ConfigurationError, ValueError):
-                try:
-                    advanced.attenuation.setValue(
-                        round(float(value.lower().replace("db", "").strip()))
-                    )
-                except ValueError:
-                    pass
+                parsed = parse_quantity(value, DIMENSION_DB, require_unit=False)
+                if math.isfinite(parsed.si_value):
+                    advanced.attenuation.setValue(round(parsed.si_value))
+            except (ConfigurationError, QuantityError, ValueError):
+                pass
             return
         if parameter_id == "advanced.preamplifier_enabled":
             advanced.preamplifier.setChecked(value.strip().lower() == "true")
@@ -534,7 +566,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
                 for action in actions
             ):
                 self.advanced_panel.configuration()
-        except Exception as exc:
+        except (ConfigurationError, QuantityError, ValueError) as exc:
             QMessageBox.warning(self, "Anritsu node", str(exc))
             return
         action_by_parameter = {
@@ -640,7 +672,7 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         )
         self.output_policy.addItem("Force RF OUTPUT OFF", userData="off")
         output_index = self.output_policy.findData(output_policy)
-        self.output_policy.setCurrentIndex(output_index if output_index >= 0 else 0)
+        self.output_policy.setCurrentIndex(max(output_index, 0))
         form.addWidget(BodyLabel("RF output"), 2, 0)
         form.addWidget(self.output_policy, 2, 1, 1, 2)
         scroll = ScrollArea(surface)
@@ -650,6 +682,7 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         body = QVBoxLayout(body_host)
         body.setContentsMargins(0, 0, 0, 0)
         scroll.setWidget(body_host)
+        scroll.enableTransparentBackground()
         layout.addWidget(scroll, 1)
         body.addLayout(form)
         self.open_roi_button = PrimaryPushButton("Edit ROI…", surface)
@@ -781,7 +814,7 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         try:
             parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY)
             parse_quantity(self.power.text(), DIMENSION_DBM)
-        except ConfigurationError as exc:
+        except (ConfigurationError, QuantityError, ValueError) as exc:
             QMessageBox.warning(self, "Anritsu SG node", str(exc))
             return
         actions = self.planned_parameter_actions()

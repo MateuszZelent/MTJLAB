@@ -15,6 +15,7 @@ from qfluentwidgets import (
 )
 
 from app.devices.discovery import DiscoveredInstrument
+from app.ui.design_system import set_dynamic_property
 
 
 class DeviceCard(CardWidget):
@@ -65,10 +66,10 @@ class DeviceCard(CardWidget):
         self.update_resource(resource)
 
     def update_state(self, state: str) -> None:
-        self.state.setText(state.replace("_", " ").title())
-        self.state.setProperty("stationState", state)
-        self.state.style().unpolish(self.state)
-        self.state.style().polish(self.state)
+        text = state.replace("_", " ").title()
+        if self.state.text() != text:
+            self.state.setText(text)
+        set_dynamic_property(self.state, "stationState", state)
 
     def update_identity(self, value: object) -> None:
         idn = getattr(value, "idn", None)
@@ -172,7 +173,11 @@ class DeviceConnectionPanel(CardWidget):
         self.setObjectName("connectionPanel")
         self.setProperty("stationSurface", "surface")
         layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(8)
         copy = QVBoxLayout()
+        copy.setContentsMargins(0, 0, 0, 0)
+        copy.setSpacing(2)
         self.heading = StrongBodyLabel("Instrument connection", self)
         self.heading.setObjectName("sectionTitle")
         self.summary = BodyLabel(parent=self)
@@ -214,11 +219,13 @@ class DeviceConnectionPanel(CardWidget):
     def update_state(self, state: str) -> None:
         normalized = state.strip().lower().replace(" ", "_")
         self._connection_state = normalized
-        self.state.setText(normalized.replace("_", " ").upper())
-        self.state.setObjectName("state" + "".join(part.title() for part in normalized.split("_")))
-        self.state.setProperty("deviceState", normalized)
-        self.state.style().unpolish(self.state)
-        self.state.style().polish(self.state)
+        label_text = normalized.replace("_", " ").upper()
+        if self.state.text() != label_text:
+            self.state.setText(label_text)
+        object_name = "state" + "".join(part.title() for part in normalized.split("_"))
+        if self.state.objectName() != object_name:
+            self.state.setObjectName(object_name)
+        set_dynamic_property(self.state, "deviceState", normalized)
         self._apply_connection_controls()
 
     def _apply_connection_controls(self) -> None:
@@ -239,9 +246,11 @@ class DeviceConnectionPanel(CardWidget):
         }
         disconnected = self._connection_state == "disconnected"
         retryable = self._connection_state == "fault"
-        self.connect_button.setProperty(
-            "controlState", "confirmed" if connected else "available"
-        )
+        control_state = "confirmed" if connected else "available"
+        set_dynamic_property(self.connect_button, "controlState", control_state)
+        connect_label = "Connected" if connected else "Connect"
+        if self.connect_button.text() != connect_label:
+            self.connect_button.setText(connect_label)
         self.connect_button.setEnabled(connected or disconnected or retryable)
         self.disconnect_button.setEnabled(connected or not disconnected)
         self.connect_button.setToolTip(
@@ -252,9 +261,6 @@ class DeviceConnectionPanel(CardWidget):
             if connected
             else "No active instrument session to disconnect."
         )
-        for button in (self.connect_button, self.disconnect_button):
-            button.style().unpolish(button)
-            button.style().polish(button)
 
     def update_identity(self, value: object) -> None:
         if idn := getattr(value, "idn", None):
@@ -270,7 +276,8 @@ class DeviceConnectionPanel(CardWidget):
 
     def set_connecting(self, active: bool) -> None:
         self._set_busy(active, "Connecting…")
-        self.connect_button.setText("Connecting…" if active else "Connect")
+        if active:
+            self.connect_button.setText("Connecting…")
 
     def show_error(self, action: str, error: str) -> None:
         self.set_connecting(False)
@@ -280,9 +287,7 @@ class DeviceConnectionPanel(CardWidget):
         self._set_summary_error(True)
 
     def _set_summary_error(self, active: bool) -> None:
-        self.summary.setProperty("connectionState", "error" if active else "normal")
-        self.summary.style().unpolish(self.summary)
-        self.summary.style().polish(self.summary)
+        set_dynamic_property(self.summary, "connectionState", "error" if active else "normal")
 
     def _set_busy(self, active: bool, label: str) -> None:
         self._busy = active

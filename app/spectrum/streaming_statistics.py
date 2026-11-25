@@ -185,21 +185,26 @@ class TemporalPowerAverage:
             self.weight_square_sum = (1 - alpha) ** 2 * self.weight_square_sum + alpha**2
             self.count += 1
         else:
+            rebuild_sum = False
             if len(self._ring) == self.window_frames:
                 old, old_profile, _old_time = self._ring.popleft()
                 self._sum -= old
+                # Evicting a large or canceling sample from a signed running sum
+                # can erase lower-magnitude residuals; rebuild from retained rows.
+                rebuild_sum = bool(np.any(np.abs(old) > 0.5 * np.abs(self._sum)))
                 self.reference_weights[old_profile] -= 1.0
                 if self.reference_weights[old_profile] <= 0:
                     del self.reference_weights[old_profile]
             self._ring.append((values.copy(), profile_id, at_s))
-            self._sum += values
             self.reference_weights[profile_id] = self.reference_weights.get(profile_id, 0) + 1
             self.count = len(self._ring)
             self._updates += 1
-            if self._updates % 1024 == 0:
+            if rebuild_sum or self._updates % 1024 == 0:
                 self._sum.fill(0)
                 for row, _profile, _at in self._ring:
                     self._sum += row
+            else:
+                self._sum += values
             np.divide(self._sum, self.count, out=self.mean)
             self.weight_square_sum = 1 / self.count
             self.first_time_s = self._ring[0][2]

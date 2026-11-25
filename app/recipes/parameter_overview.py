@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import QuantityError, parse_quantity
-from app.recipes.block_registry import ACTION_FIELDS, ANRITSU_HARDWARE_AVERAGE_FIELDS, block_for_node
+from app.recipes.block_registry import ACTION_CONTROL_ROLES, ACTION_FIELDS, ANRITSU_HARDWARE_AVERAGE_FIELDS, block_for_node
 from app.recipes.configuration_context import configuration_before
 from app.recipes.models import Recipe, RecipeNode
 from app.recipes.parameter_registry import PARAMETERS_BY_TARGET
@@ -94,6 +94,7 @@ _LABELS = {
     "source_level": "Source level",
     "source_range": "Source range",
     "source_autorange": "Source autorange",
+    "settling_time": "Settling time (PyLab)",
     "output_enabled": "Output enabled",
     "nplc": "Measurement NPLC",
     "rbw": "Resolution bandwidth (RBW)",
@@ -550,7 +551,7 @@ class _Overview:
                         summary, axis_detail = _axis(action, _dimension(device, channel, key, mode))
                         add(key, summary, "sweep", axis_detail)
                     else:
-                        add(key, action.get("value"), "set")
+                        add(key, action.get("value"), "timing" if key == "settling_time" else "set")
                         if key in {
                             "source_range",
                             "measure_voltage_range",
@@ -599,6 +600,14 @@ class _Overview:
                     output(False)
                 else:
                     add(key, value, "final")
+        elif node.type == "ramp_keithley_current":
+            timing = (
+                ("step", "Maximum step {}"),
+                ("settle_time", "wait {} per step"),
+                ("deadline", "timeout {}"),
+            )
+            details = ", ".join(label.format(data[key]) for key, label in timing if key in data)
+            add("source_level", data.get("level"), "set", details)
         else:
             fields = ACTION_FIELDS.get(node.type, frozenset())
             for key, value in data.items():
@@ -609,7 +618,7 @@ class _Overview:
                 if "output" in node.type and key == "enabled":
                     output(value)
                     continue
-                action = (
+                action = ACTION_CONTROL_ROLES.get((node.type, key)) or (
                     "final"
                     if final
                     else "timing"

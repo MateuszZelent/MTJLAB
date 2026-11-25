@@ -260,6 +260,7 @@ def test_timed_background_editor_preserves_duration_and_purpose(application, tmp
         values = dialog.node_fields()
         assert values["minimum_duration"] == "30 s" and values["purpose"] == "background"
         assert values["average_count"] == 30
+        assert dialog.reference_average_target.currentData() == "count_and_duration"
         assert dialog.grab().save(str(tmp_path / f"background-editor-{theme}.png"))
         managed = AnritsuNodeEditorDialog(simulation_settings())
         try:
@@ -270,6 +271,22 @@ def test_timed_background_editor_preserves_duration_and_purpose(application, tmp
         finally:
             managed.close()
             managed.deleteLater()
+
+        target = dialog.reference_average_target
+        target.setCurrentIndex(target.findData("count"))
+        application.processEvents()
+        assert not dialog.minimum_duration.isVisible()
+        assert "minimum_duration" not in dialog.node_fields()
+        assert dialog.node_fields()["average_count"] == 30
+
+        target.setCurrentIndex(target.findData("duration"))
+        application.processEvents()
+        assert not dialog.average_count.isVisible()
+        assert dialog.node_fields()["average_count"] == 1
+        assert dialog.node_fields()["minimum_duration"] == "30 s"
+        dialog.minimum_duration.setText("10 mA")
+        with pytest.raises(ValueError):
+            dialog.node_fields()
     finally:
         dialog.close()
         dialog.deleteLater()
@@ -308,6 +325,81 @@ def test_import_replaces_hidden_acquisition_settings_and_retains_the_local_draft
     finally:
         dialog.close()
         dialog.deleteLater()
+        application.processEvents()
+
+
+def test_hardware_reference_settings_are_editable_from_the_sweep_tree(application, monkeypatch):
+    source = """\
+schema_version: 1
+name: Selected pairs
+root:
+  id: measurement
+  type: sequence
+  children:
+  - id: reference
+    type: acquire_reference
+    trace: TRAC1
+    instrument_average_duration: 5 s
+    store_source_spectra: false
+    purpose: reference
+  - id: spectrum
+    type: acquire_spectrum
+    trace: TRAC1
+    instrument_average_duration: 5 s
+    store_source_spectra: false
+    reference_operation: none
+    store_raw: true
+    store_processed: false
+"""
+    original = parse_recipe_text(source)
+    page = RecipePage(simulation_settings())
+    page.path.clear()
+
+    def configure_reference(dialog):
+        assert dialog.acquisition_mode.currentData() == "instrument_average"
+        assert dialog.instrument_average_target.currentData() == "duration"
+        assert dialog.instrument_average_duration.text() == "5 s"
+        dialog.acquisition_mode.setCurrentIndex(dialog.acquisition_mode.findData("continuous_live"))
+        target = dialog.reference_average_target
+        target.setCurrentIndex(target.findData("duration"))
+        dialog.minimum_duration.setText("2.5 s")
+        dialog.resize(640, 580)
+        dialog.show()
+        application.processEvents()
+        for control in (dialog.processing_options.source, target, dialog.minimum_duration, dialog.apply_button):
+            contained(dialog, control)
+        assert not dialog.average_count.isVisible()
+        assert dialog.spectrum_storage.currentData() is False
+        dialog.accept()
+        return dialog.result()
+
+    monkeypatch.setattr(AnritsuAcquisitionEditorDialog, "exec", configure_reference)
+    try:
+        page._apply_builder_source(source, "Loaded sweep", selected_node_id="reference")
+        page.resize(1440, 900)
+        page.show()
+        application.processEvents()
+        assert page.open_editor_button.text() == "Reference settings…"
+        assert page.open_editor_button.isVisible() and page.open_editor_button.isEnabled()
+        page.open_editor_button.click()
+
+        edited = parse_recipe_text(page.editor.toPlainText())
+        before = {node.id: node for node in original.root.children}
+        after = {node.id: node for node in edited.root.children}
+        reference = after.pop("reference")
+        before.pop("reference")
+        assert after == before
+        assert reference.data["acquisition_mode"] == "continuous_live"
+        assert reference.data["minimum_duration"] == "2.5 s"
+        assert reference.data["average_count"] == 1
+        assert reference.data["store_source_spectra"] is False
+        assert "instrument_average_duration" not in reference.data
+        assert page._selected_recipe_node().id == "reference"
+        assert "2.5 s" in page.tree_model.value_for("reference")
+    finally:
+        page._close_discard_confirmed = True
+        page.close()
+        page.deleteLater()
         application.processEvents()
 
 
@@ -458,8 +550,12 @@ def test_execution_preview_identifies_the_anritsu_mean_and_count(application):
         }
         page.update_spectrum_preview(preview)
         contained(page, page.spectrum_preview)
-        assert "Anritsu average − Reference" in page.spectrum_preview._traces
-        assert "50 sweeps" in page.spectrum_preview.plot.plotItem.titleLabel.text
+        assert list(page.spectrum_preview._traces) == ["Raw − Reference"]
+        np.testing.assert_array_equal(
+            page.spectrum_preview._traces["Raw − Reference"][1],
+            preview["raw_minus_reference_db"],
+        )
+        assert "Raw − Reference · Anritsu average · 50 sweeps" in page.spectrum_preview.plot.plotItem.titleLabel.text
         page.update_spectrum_preview({**preview, "preview_kind": "reference"})
         assert "Anritsu reference average" in page.spectrum_preview._traces
         assert "50 sweeps" in page.spectrum_preview.plot.plotItem.titleLabel.text

@@ -12,6 +12,7 @@ from app.ui.shell import main_window
 
 def test_open_readiness_connects_only_missing_required_page_sessions(tmp_path):
     from types import MethodType
+
     from PySide6.QtWidgets import QApplication, QWidget
 
     app = QApplication.instance() or QApplication([])
@@ -67,6 +68,7 @@ def test_resume_checks_current_readiness_and_estop_before_start(monkeypatch, blo
         _emergency_inhibit=blocker == "estop", _settings=object(),
         dashboard=SimpleNamespace(evaluate_readiness=Mock(return_value=StationReadiness(items))),
         recipe_page=SimpleNamespace(semantic_tree_snapshot=Mock(return_value="tree")),
+        rigol_page=SimpleNamespace(voltage_entry_modes=Mock(return_value={})),
         _active_device_controllers=Mock(return_value={}),
         _run_controller=SimpleNamespace(start=Mock()),
         _repository=SimpleNamespace(path="settings.yml"), _simulation=True,

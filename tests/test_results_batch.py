@@ -36,7 +36,8 @@ def test_batch_groups_only_recorded_devices_and_visits_with_selected_axis_range(
     assert [item.checkpoints for item in plans] == [(0, 1), (2,), (3,)]
     assert "MOKE Box VOUT 0 -4 mV" in plans[0].title
     assert "Keithley B 4 mA" in plans[0].title
-    assert "Keithley A -14 to +14 mA" in plans[0].title
+    assert "Keithley A" not in plans[0].title
+    assert ("a", "Keithley A", "A", -.014, .014) in plans[0].parameters
     assert "Visit 2" in plans[1].title
     assert plans[2].request.filters["b"] == -.002
     limited = plan_heatmaps(coordinates, HeatmapRequest("frequency", "a", {"a": (0, .014)}))
@@ -80,8 +81,10 @@ def test_dialog_exports_recorded_heatmaps_and_powerpoint(tmp_path, shell_qt_appl
         assert index["exported"] == 2
         assert dialog.current.text() == index["items"][-1]["title"]
         for entry in index["items"]:
-            assert "Keithley B 0 to 1 mA" in entry["title"]
-            assert "Keithley B 0 to 1 mA" in entry["image"]
+            assert "frequency" in entry["title"].lower() and "Keithley B" not in entry["title"]
+            assert "Keithley B" not in entry["image"]
+            current = next(parameter for parameter in entry["parameters"] if parameter["id"] == "keithley.B.current")
+            assert (current["minimum"], current["maximum"]) == (0., .001)
             derived = read_heatmap_analysis(dialog.folder / entry["data"])
             assert derived.metadata["title"] == entry["title"]
             assert derived.metadata["axes"]["x"]["unit"] == "Hz"

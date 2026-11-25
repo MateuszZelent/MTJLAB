@@ -15,6 +15,7 @@ from app.devices.keithley_2600.ui.page import (
 )
 from app.engine.compiler import RecipeCompiler
 from app.recipes import parse_recipe_text
+from app.recipes.parameter_overview import build_sweep_parameter_entries
 from app.ui.design_system import apply_application_theme
 from app.ui.recipes.page import RecipePage
 from tests.helpers import simulation_settings
@@ -287,6 +288,107 @@ def test_output_action_compares_recipe_state_instead_of_its_own_yaml(app, tmp_pa
         page.close()
 
 
+def test_ramp_review_compares_only_target_current(app, tmp_path):
+    from app.domain.quantities import QuantityError
+    from app.ui.recipes.common_dialogs import ActionNodeEditorDialog
+
+    source = SOURCE.split("    - id: selected")[0] + """    - id: ramp
+      type: ramp_keithley_current
+      channel: A
+      level: 0.2 mA
+      step: 100 uA
+      settle_time: 2 ms
+      deadline: 60 s
+"""
+    page = RecipePage(simulation_settings())
+    page.path.setText(str(tmp_path / "ramp.yml"))
+    page.set_keithley_snapshot_provider(lambda *_: KeithleyConfigurationSnapshot(
+        channel="A", source_mode="current", source_level="0.1 mA", settling_time="100 ms",
+    ))
+    page._apply_builder_source(source, "Test")
+    recipe = parse_recipe_text(source)
+    node = recipe.root.children[-1]
+
+    def inspect(dialog):
+        dialog.show()
+        app.processEvents()
+        table = dialog.review.table
+        assert table.isVisibleTo(dialog) and table.visualItemRect(table.item(0, 0)).height() > 0
+        row, = table.rows
+        assert (row.label, row.current, row.planned, row.action) == ("Target current", "0.1 mA", "0.2 mA", "Set")
+        assert "1 parameter to set" in table.summary_text
+        assert "100 ms" not in table.item(0, 1).text()
+        assert dialog._field_label("settle_time") == "Wait after each step"
+        assert dialog.node_fields()["settle_time"] == "2 ms"
+        with pytest.raises(QuantityError, match="Expected dimension current"):
+            dialog._validate_fields({**dialog.node_fields(), "step": "1 mV"})
+        return QDialog.DialogCode.Rejected
+
+    try:
+        with patch.object(ActionNodeEditorDialog, "exec", inspect):
+            page._edit_action_node(node)
+        entries = build_sweep_parameter_entries(recipe, page._device_tab_comparison_values)
+        ramp_entries = [entry for entry in entries if entry.source_id == "ramp"]
+        changed, = [entry for entry in ramp_entries if entry.action == "set"]
+        assert changed.parameter == "source_level" and "2 ms per step" in changed.detail
+        settling = next(entry for entry in ramp_entries if entry.parameter == "settling_time")
+        assert settling.action == "preserve" and settling.sweep_value == "100 ms"
+    finally:
+        page._close_discard_confirmed = True
+        page.close()
+
+
+def test_action_reviews_distinguish_device_writes_from_recipe_controls(app, tmp_path):
+    from app.ui.recipes.common_dialogs import ActionNodeEditorDialog
+
+    source = SOURCE.split("    - id: selected")[0] + """    - {id: on, type: set_keithley_output, channel: A, enabled: true, label: 'Enable CH A'}
+    - {id: bias, type: update_keithley_level, channel: A, mode: current, level: '0.1 mA'}
+    - {id: prepare, type: configure_moke_box, channel: 0, minimum_voltage: '-20 mV', maximum_voltage: '20 mV'}
+    - {id: arm, type: arm_moke_voltage}
+    - {id: vout, type: update_moke_voltage, channel: 0, voltage: '10 mV'}
+    - {id: check-iv, type: measure_keithley, channel: A}
+    - {id: settle, type: wait, duration: '2 ms'}
+finally:
+  - {id: zero, type: ramp_keithley_to_zero, channel: A, deadline: '60 s'}
+"""
+    page = RecipePage(simulation_settings())
+    page.path.setText(str(tmp_path / "controls.yml"))
+    page._apply_builder_source(source, "Test")
+    recipe = parse_recipe_text(source)
+    expected = {
+        "on": [("enabled", "Set")],
+        "bias": [("mode", "Require"), ("level", "Set")],
+        "prepare": [("channel", "Edit"), ("minimum_voltage", "Edit"), ("maximum_voltage", "Edit")],
+        "arm": [],
+        "vout": [("voltage", "Set")],
+        "check-iv": [("channel", "Edit")],
+        "settle": [("duration", "Edit")],
+        "zero": [("channel", "Edit"), ("deadline", "Edit")],
+    }
+
+    def inspect(dialog):
+        rows = dialog.review.table.rows
+        assert [(row.key, row.action) for row in rows] == expected[dialog._node.id]
+        if all(row.action == "Edit" for row in rows):
+            assert "parameters to set" not in dialog.review.table.summary_text
+        return QDialog.DialogCode.Rejected
+
+    try:
+        with patch.object(ActionNodeEditorDialog, "exec", inspect):
+            for node in (*recipe.root.children[1:], *recipe.finally_nodes):
+                page._edit_action_node(node)
+        entries = {(entry.source_id, entry.parameter): entry.action
+                   for entry in build_sweep_parameter_entries(recipe, page._device_tab_comparison_values)}
+        assert entries["prepare", "minimum_voltage"] == "constraint"
+        assert entries["prepare", "maximum_voltage"] == "constraint"
+        assert entries["bias", "source_mode"] == "require"
+        assert entries["zero", "deadline"] == "timing"
+        assert entries["zero", "output_enabled"] == "final"
+    finally:
+        page._close_discard_confirmed = True
+        page.close()
+
+
 def test_channel_switch_keeps_inactive_drafts_hidden(app, tmp_path):
     source = SOURCE.replace("    - id: selected", "    - {id: baseline-b, type: configure_keithley, channel: B, mode: current, level: '0 mA', compliance: '20 mV', source_range: '10 mA', source_autorange: false}\n    - id: selected")
     page = RecipePage(simulation_settings())
@@ -353,18 +455,22 @@ def test_literal_editor_shows_station_autorange_policy_used_by_compiler(app, tmp
     raw = audit_settings(tmp_path).model_dump(mode="python")
     raw["devices"]["keithley"]["safety"]["channels"]["A"]["defaults"]["source_autorange"] = True
     settings = StationSettings.model_validate(raw)
-    source = SOURCE.split("    - id: selected")[0].replace(", source_autorange: false", "")
+    source = SOURCE.split("    - id: selected")[0].replace(", source_autorange: false", ", settle_time: '2 ms'")
     page = RecipePage(settings)
     page.path.setText(str(tmp_path / "auto.yml"))
     page._apply_builder_source(source, "Test")
     node = parse_recipe_text(source).root.children[0]
     request = RecipeCompiler(settings).compile(parse_recipe_text(source)).actions[0].payload["request"]
     assert request.source_autorange and request.source_range_si is None
+    assert request.settle_time_s == pytest.approx(0.002)
 
     def inspect(dialog):
         assert dialog.configuration_snapshot().source_autorange is True
         row = next(row for row in dialog.comparison.rows if row.key == "source_range")
         assert row.planned == "AUTO"
+        timing = next(row for row in dialog.comparison.rows if row.key == "settling_time")
+        assert timing.action == "Timing" and timing.label == "Settling time (PyLab)"
+        assert "1 PyLab timing setting" in dialog.comparison.summary_text
         return QDialog.DialogCode.Rejected
 
     try:

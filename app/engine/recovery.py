@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields as dataclass_fields, replace
-from datetime import datetime
 import json
+from dataclasses import asdict, dataclass, replace
+from dataclasses import fields as dataclass_fields
+from datetime import datetime
+from numbers import Integral
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.domain.errors import ExecutionError
 from app.domain.spectrum_averaging import InstrumentAverageProvenance
-from app.engine.compiler import ExecutionPlan, PlanAction, action_produces_checkpoint, controlled_output_endpoints
+from app.engine.compiler import (
+    ExecutionPlan,
+    PlanAction,
+    action_produces_checkpoint,
+    controlled_output_endpoints,
+)
 
 if TYPE_CHECKING:
     from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
@@ -105,11 +112,45 @@ class RunRecoveryManager:
     ) -> tuple[int, int, dict[str, Any], dict[str, Any]] | None:
         if "events/name" not in h5 or "events/message" not in h5:
             return None
-        names_ds = h5["events/name"]
-        messages_ds = h5["events/message"]
-        from app.storage.event_log import committed_event_count
+        events = h5["events"]
+        names_ds = events["name"]
+        messages_ds = events["message"]
+        from app.storage.event_log import EVENT_COLUMNS, committed_event_count
+
         try:
-            total = committed_event_count(h5["events"])
+            if all(column in events for column in EVENT_COLUMNS) or any(
+                column in events for column in ("timestamp", "severity")
+            ):
+                total = committed_event_count(events)
+            else:
+                # Minimal legacy/synthetic archives containing only name & message
+                # columns still enforce committed_count and drop incomplete tail rows.
+                lengths = (len(names_ds), len(messages_ds))
+                if "committed_count" in events.attrs:
+                    marker = events.attrs["committed_count"]
+                    if (
+                        isinstance(marker, bool)
+                        or not isinstance(marker, Integral)
+                        or not 0 <= marker <= min(lengths)
+                    ):
+                        raise ValueError(
+                            "Invalid committed event count or missing committed event rows."
+                        )
+                    total = int(marker)
+                else:
+                    total = min(lengths)
+                    while total:
+                        row_name = names_ds.asstr()[total - 1]
+                        row_message = messages_ds.asstr()[total - 1]
+                        try:
+                            complete = bool(row_name) and isinstance(
+                                json.loads(row_message), dict
+                            )
+                        except (TypeError, ValueError):
+                            complete = False
+                        if complete:
+                            break
+                        total -= 1
         except (ValueError, KeyError, TypeError) as exc:
             raise ExecutionError(f"Invalid recovery event log: {exc}") from exc
         if total == 0:
@@ -189,7 +230,7 @@ class RunRecoveryManager:
             Hdf5RunWriter._validate_trace(trace)
             origin = state.get("origin", {})
             if not isinstance(origin, dict):
-                raise ValueError("origin must be a mapping")
+                raise TypeError("origin must be a mapping")
             acquisition_mode = metadata.get("acquisition_mode", "single_sweep")
             if acquisition_mode not in ("single_sweep", "continuous_live"):
                 raise ValueError("unsupported reference acquisition mode")
@@ -217,12 +258,12 @@ class RunRecoveryManager:
                 key = ("rigol_output", action.payload["config"].channel)
             elif action.kind == "configure_anritsu_sg":
                 key = ("anritsu", "sg")
-            elif action.kind in {"update_keithley_level", "update_keithley_compliance"}:
+            elif action.kind in {"update_keithley_level", "update_keithley_compliance", "ramp_keithley_current"}:
                 key = ("keithley", action.payload["channel"])
                 if key not in latest:
                     raise ExecutionError("Recovery source update lacks an explicit baseline.")
                 old_index, baseline = latest[key]
-                field = "level_si" if action.kind == "update_keithley_level" else "compliance_si"
+                field = "compliance_si" if action.kind == "update_keithley_compliance" else "level_si"
                 request = replace(baseline.payload["request"], **{field: action.payload[field]})
                 latest[key] = (old_index, replace(baseline, payload={"request": request}))
                 continue

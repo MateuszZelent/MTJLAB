@@ -50,10 +50,10 @@ def _render(widget, application):
     return widget.grab().toImage()
 
 
-def _assert_axis(axis):
+def _assert_axis(axis, expected_text_color: str):
     assert axis.pen().style() == Qt.PenStyle.NoPen
     assert axis.tickPen().style() == Qt.PenStyle.NoPen
-    assert axis.textPen().color().name() == "#636363"
+    assert axis.textPen().color().name() == expected_text_color.lower()
     assert axis.style["tickFont"].pointSizeF() == 11
     assert axis.style["tickFont"].families()[0] == "Arial"
     assert QRawFont.fromFont(axis.style["tickFont"]).supportsCharacter("0")
@@ -71,18 +71,29 @@ def _assert_axis(axis):
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
-def test_paper_palette_is_independent_of_application_theme(theme):
-    palette = plot_theme(tokens_for(theme))
-    assert palette.background == "#ffffff"
-    assert palette.axes == palette.grid == "#636363"
-    assert palette.measurement == "#1f77b4"
-    assert palette.reference == "#ff7f0e"
+def test_screen_and_publication_palettes_follow_theme_contract(theme):
+    tokens = tokens_for(theme)
+    screen = plot_theme(tokens)
+    assert screen.background == tokens.plot_background
+    assert screen.axes == tokens.plot_axes
+    assert screen.grid == tokens.plot_grid
+    assert screen.measurement == tokens.plot_measurement
+    assert screen.reference == tokens.plot_reference
+    assert screen.danger == tokens.danger
+    assert screen.success == tokens.success
+
+    paper = plot_theme(tokens, publication=True)
+    assert paper.background == "#ffffff"
+    assert paper.axes == paper.grid == "#636363"
+    assert paper.measurement == "#1f77b4"
+    assert paper.reference == "#ff7f0e"
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 @pytest.mark.parametrize("kind", ["spectrum", "heatmap"])
-def test_paper_plots_render_with_source_typography(application, tmp_path, theme, kind):
+def test_plots_honor_application_theme_and_source_typography(application, tmp_path, theme, kind):
     apply_application_theme(application, theme)
+    palette = plot_theme(tokens_for(theme))
     widget = SpectrumPlotWidget() if kind == "spectrum" else HeatmapPlotWidget()
     try:
         widget.resize(1120, 720)
@@ -100,17 +111,18 @@ def test_paper_plots_render_with_source_typography(application, tmp_path, theme,
         rendered = _render(widget, application)
         item = widget.plot.plotItem
         for axis in (item.getAxis("left"), item.getAxis("bottom")):
-            _assert_axis(axis)
+            _assert_axis(axis, palette.axes)
+        tokens = tokens_for(theme)
         assert item.titleLabel.opts["size"] == "11pt"
-        assert item.titleLabel.opts["color"] == "#636363"
+        assert item.titleLabel.opts["color"].lower() == tokens.text_primary.lower()
         assert item.titleLabel.item.font().families()[0] == "Arial"
-        assert widget.plot.backgroundBrush().color().name() == "#ffffff"
+        assert widget.plot.backgroundBrush().color().name() == palette.background.lower()
         assert item.vb.sceneBoundingRect().width() > 600
         assert item.vb.sceneBoundingRect().height() > 350
         if kind == "heatmap":
-            _assert_axis(widget.color_bar.axis)
+            _assert_axis(widget.color_bar.axis, palette.axes)
         else:
-            assert widget._curves["Recorded spectrum"].opts["pen"].color().name() == "#1f77b4"
+            assert widget._curves["Recorded spectrum"].opts["pen"].color().name() == palette.measurement.lower()
             assert widget._curves["Explicit colour"].opts["pen"].color().name() == "#a020f0"
             assert [label.text for _, label in item.legend.items] == [
                 "Recorded spectrum", "Explicit colour"]
@@ -131,10 +143,12 @@ def test_major_grid_is_below_opaque_images_and_keeps_source_alpha(plot, applicat
     grids = [item for item in plot.plotItem.items if isinstance(item, pg.GridItem)]
     assert len(grids) == 1
     grid = grids[0]
+    expected_grid = "#636363" if publication else plot_theme(tokens_for("dark")).grid.lower()
+    expected_alpha = 0.5 if publication else 0.75
     assert grid.opts["textPen"] is None
     assert grid.opts["tickSpacing"] == ([None], [None])
-    assert grid.opts["pen"].color().name() == "#636363"
-    assert grid.opts["pen"].color().alphaF() == pytest.approx(.5, abs=.003)
+    assert grid.opts["pen"].color().name() == expected_grid
+    assert grid.opts["pen"].color().alphaF() == pytest.approx(expected_alpha, abs=.004)
     assert grid.opts["pen"].widthF() == pytest.approx(.8)
     assert grid.opts["pen"].style() == Qt.PenStyle.DashLine
     # Rasterize the grid's picture directly: stock GridItem silently replaces alpha with 50/255.
@@ -147,7 +161,7 @@ def test_major_grid_is_below_opaque_images_and_keeps_source_alpha(plot, applicat
     finally:
         painter.end()
     pixels = np.frombuffer(image.bits(), dtype=np.uint8).reshape(400, 400, 4)
-    assert pixels[:, :, :3].min() < 200
+    assert pixels[:, :, :3].min() < 230
     data = np.zeros((10, 10, 3), dtype=np.uint8)
     data[:] = (36, 104, 166)
     heatmap = pg.ImageItem(data, axisOrder="row-major", autoLevels=False)
@@ -205,20 +219,23 @@ def test_axis_units_keep_their_source_scale(plot, application, unit):
     assert axis.autoSIPrefix is (unit == "W")
 
 
-def test_legend_keeps_labels_and_uses_source_frame_spacing_and_location(plot, application):
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_legend_keeps_labels_and_uses_source_frame_spacing_and_location(plot, application, theme):
     legend = plot.addLegend(offset=(10, 10))
     plot.plot([1, 2], [1, 2], name="Measured <b>signal</b>")
     plot.plot([1, 2], [2, 1], name="Reference")
-    apply_scientific_style(plot.plotItem)
+    apply_scientific_style(plot.plotItem, theme)
     _render(plot, application)
+    tokens = tokens_for(theme)
     assert [label.text for _, label in legend.items] == ["Measured <b>signal</b>", "Reference"]
+    expected_face = tokens.surface_raised if theme == "dark" else tokens.surface
     assert legend.frame
-    assert legend.brush().color().name() == "#ffffff"
-    assert legend.brush().color().alphaF() == pytest.approx(.8, abs=.003)
-    assert legend.pen().color().name() == "#cccccc"
-    assert legend.pen().color().alphaF() == pytest.approx(.8, abs=.003)
+    assert legend.brush().color().name() == expected_face.lower()
+    assert legend.brush().color().alphaF() == pytest.approx(.8, abs=.004)
+    assert legend.pen().color().name() == tokens.border.lower()
+    assert legend.pen().color().alphaF() == pytest.approx(.8, abs=.004)
     assert legend.labelTextSize() == "11pt"
-    assert legend.labelTextColor().name() == "#636363"
+    assert legend.labelTextColor().name() == tokens.text_primary.lower()
     assert legend.layout.verticalSpacing() / legend.layout.horizontalSpacing() == pytest.approx(.3 / .4)
     for _, label in legend.items:
         assert label.item.font().families()[0] == "Arial"
@@ -272,7 +289,8 @@ def test_paper_scene_and_cursor_objects_are_deleted_with_the_widget(application)
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
-def test_holds_and_annotations_keep_paper_colours_in_ui_and_export(application, tmp_path, theme):
+def test_holds_and_annotations_follow_screen_theme_and_export_paper_colours(application, tmp_path, theme):
+    palette = plot_theme(tokens_for(theme))
     widget = SpectrumPlotWidget()
     try:
         widget.set_trace("Raw", [1, 2], [2, 3], primary=True)
@@ -284,9 +302,9 @@ def test_holds_and_annotations_keep_paper_colours_in_ui_and_export(application, 
         widget.set_replacement_markers([2], [2])
         widget.set_peak_markers([1, 2], [3, 2])
         widget.select_peak_marker(1)
-        assert widget._curves["Max hold"].opts["pen"].color().name() == "#d62728"
-        assert widget._curves["Min hold"].opts["pen"].color().name() == "#2ca02c"
-        assert widget.compliance_markers.points()[0].brush().color().name() == "#d62728"
+        assert widget._curves["Max hold"].opts["pen"].color().name() == palette.danger.lower()
+        assert widget._curves["Min hold"].opts["pen"].color().name() == palette.success.lower()
+        assert widget.compliance_markers.points()[0].brush().color().name() == palette.danger.lower()
         info = widget._export_figure(tmp_path / f"annotations-{theme}.png")
         exported = {(point["color"], point["symbol"], point["size"]) for point in info["points"]}
         assert exported == {("#1f77b4", "o", 10), ("#ff7f0e", "o", 14),

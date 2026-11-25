@@ -98,7 +98,7 @@ def test_clone_rebinds_managed_acquisitions_in_both_branches():
     assert source == before
 
 
-def test_editing_reference_to_zero_duration_removes_old_timing(monkeypatch, shell_qt_application):
+def test_editing_reference_to_count_only_removes_old_timing(monkeypatch, shell_qt_application):
     source = yaml.safe_dump({"schema_version": 1, "name": "edit-reference", "root": {
         "id": "reference", "type": "acquire_reference", "average_count": 4,
         "minimum_duration": "30 s", "inter_sweep_delay": "3 s", "purpose": "background", "disabled": True}})
@@ -107,7 +107,8 @@ def test_editing_reference_to_zero_duration_removes_old_timing(monkeypatch, shel
     saved = []
 
     def edit(dialog):
-        dialog.minimum_duration.setText("0 s")
+        target = dialog.reference_average_target
+        target.setCurrentIndex(target.findData("count"))
         dialog.inter_sweep_delay.setText("0 s")
         dialog.reference_purpose.setCurrentIndex(0)
         dialog.show()

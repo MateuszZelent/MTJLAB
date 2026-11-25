@@ -27,9 +27,31 @@ class ReferenceHdf5Store:
     SCHEMA = "lab-control-anritsu-reference-v1"
 
     @classmethod
-    def save(cls, path: str | Path, reference: ReferenceSpectrum) -> ReferenceSpectrum:
+    def save(
+        cls,
+        path: str | Path,
+        reference: ReferenceSpectrum,
+        *,
+        simulation_mode: bool | None = None,
+    ) -> ReferenceSpectrum:
+        if simulation_mode is not None and not isinstance(simulation_mode, bool):
+            raise TypeError(
+                f"Expected simulation_mode to be a boolean or None, got {simulation_mode!r}."
+            )
         target = Path(path)
-        metadata = cls.metadata(reference)
+        metadata = cls.metadata(reference, simulation_mode=simulation_mode)
+        if simulation_mode is None:
+            simulation_metadata: dict[str, Any] = {
+                "enabled": None,
+                "mode": "unknown",
+                "mode_source": "not_provided",
+            }
+        else:
+            simulation_metadata = {
+                "enabled": simulation_mode,
+                "mode": "simulation" if simulation_mode else "hardware",
+                "mode_source": "application_runtime",
+            }
         writer = Hdf5RunWriter(
             target,
             recipe_source=(
@@ -46,6 +68,7 @@ class ReferenceHdf5Store:
                     "hardware_options": reference.hardware_options,
                 }
             },
+            simulation_metadata=simulation_metadata,
             expected_points=1,
         )
         try:
@@ -64,28 +87,70 @@ class ReferenceHdf5Store:
                     "kind": reference.kind,
                     "average_count": reference.average_count,
                     "grid_hash": reference.grid_hash,
+                    "simulation_enabled": simulation_mode,
                 },
             )
             writer.close("completed")
-        except Exception:
+        except Exception as exc:
             try:
                 writer.close("faulted")
-            except Exception:
-                pass
+            except (ExecutionError, OSError, RuntimeError, ValueError, TypeError, KeyError) as close_error:
+                exc.add_note(f"Closing the failed reference archive also failed: {close_error}")
             raise
         return replace(reference, source_file=str(target.resolve()), saved_to_file=True)
 
     @classmethod
-    def load(cls, path: str | Path) -> ReferenceSpectrum:
+    def read_simulation_enabled(cls, path: str | Path) -> bool | None:
+        """Read recorded simulation provenance: True, False, or None when unknown."""
         target = Path(path)
         metadata = Hdf5RunReader.single_point(target).metadata
         if metadata.get("reference_schema") != cls.SCHEMA:
             raise ExecutionError("The selected HDF5 file is not a Lab Control reference artefact.")
+        run_simulation = Hdf5RunReader.detail(target).simulation_metadata
+        return cls._resolve_simulation_enabled(run_simulation, metadata)
+
+    @classmethod
+    def load_with_provenance(
+        cls,
+        path: str | Path,
+        *,
+        expected_simulation_mode: bool | None = None,
+        allow_unknown_simulation: bool = True,
+    ) -> tuple[ReferenceSpectrum, bool | None]:
+        """Load one reference spectrum along with its recorded simulation provenance."""
+        if expected_simulation_mode is not None and not isinstance(expected_simulation_mode, bool):
+            raise TypeError(
+                "Expected expected_simulation_mode to be a boolean or None, "
+                f"got {expected_simulation_mode!r}."
+            )
+        target = Path(path)
+        metadata = Hdf5RunReader.single_point(target).metadata
+        if metadata.get("reference_schema") != cls.SCHEMA:
+            raise ExecutionError("The selected HDF5 file is not a Lab Control reference artefact.")
+        run_simulation = Hdf5RunReader.detail(target).simulation_metadata
+        simulation_enabled = cls._resolve_simulation_enabled(run_simulation, metadata)
+        if expected_simulation_mode is not None:
+            if simulation_enabled is None:
+                if not allow_unknown_simulation:
+                    raise ExecutionError(
+                        "Reference file does not record whether it was acquired in simulation or hardware mode."
+                    )
+            elif simulation_enabled is not expected_simulation_mode:
+                if simulation_enabled:
+                    raise ExecutionError(
+                        "Cannot load a simulated reference spectrum into a hardware measurement session."
+                    )
+                raise ExecutionError(
+                    "Cannot load a hardware reference spectrum into a simulation session."
+                )
         stored = Hdf5RunReader.spectrum(target, 0)
         if stored is None:
             raise ExecutionError("The reference file contains no spectrum data.")
         try:
             evidence = metadata.get("instrument_average")
+            timing_context = metadata.get("timing_context")
+            if timing_context is not None and not isinstance(timing_context, str):
+                raise ValueError("The reference timing context must be text.")
             acquired = datetime.fromisoformat(
                 stored.acquired_at_utc or str(metadata["acquired_at_utc"])
             )
@@ -125,13 +190,38 @@ class ReferenceHdf5Store:
                 notes=str(metadata.get("notes", "")),
                 saved_to_file=True,
                 grid_hash=str(metadata["grid_hash"]),
+                timing_context=timing_context,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ExecutionError(f"Reference metadata is invalid: {exc}") from exc
+        return reference, simulation_enabled
+
+    @classmethod
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        expected_simulation_mode: bool | None = None,
+        allow_unknown_simulation: bool = True,
+    ) -> ReferenceSpectrum:
+        reference, _simulation_enabled = cls.load_with_provenance(
+            path,
+            expected_simulation_mode=expected_simulation_mode,
+            allow_unknown_simulation=allow_unknown_simulation,
+        )
         return reference
 
     @classmethod
-    def metadata(cls, reference: ReferenceSpectrum) -> dict[str, Any]:
+    def metadata(
+        cls,
+        reference: ReferenceSpectrum,
+        *,
+        simulation_mode: bool | None = None,
+    ) -> dict[str, Any]:
+        if simulation_mode is not None and not isinstance(simulation_mode, bool):
+            raise TypeError(
+                f"Expected simulation_mode to be a boolean or None, got {simulation_mode!r}."
+            )
         return {
             "reference_schema": cls.SCHEMA,
             "kind": reference.kind,
@@ -155,8 +245,32 @@ class ReferenceHdf5Store:
             "sweep_time_s": reference.sweep_time_s,
             "notes": reference.notes,
             "grid_hash": reference.grid_hash,
+            **({"timing_context": reference.timing_context} if reference.timing_context else {}),
             **({"instrument_average": reference.instrument_average.metadata()} if reference.instrument_average else {}),
+            **({"simulation_enabled": simulation_mode} if simulation_mode is not None else {}),
         }
+
+    @classmethod
+    def _resolve_simulation_enabled(
+        cls,
+        run_simulation: object,
+        point_metadata: dict[str, Any],
+    ) -> bool | None:
+        if not isinstance(run_simulation, dict):
+            raise ExecutionError("Reference /run/simulation_json metadata must be a JSON object.")
+        try:
+            run_enabled = cls._optional_bool(run_simulation.get("enabled"))
+            point_enabled = cls._optional_bool(point_metadata.get("simulation_enabled"))
+        except ValueError as exc:
+            raise ExecutionError(f"Reference simulation provenance is invalid: {exc}") from exc
+        mode = run_simulation.get("mode")
+        if mode == "unknown" and run_enabled is not None:
+            raise ExecutionError("Reference simulation provenance disagrees between mode and enabled.")
+        if run_enabled is not None and point_enabled is not None and run_enabled is not point_enabled:
+            raise ExecutionError(
+                "Reference simulation provenance disagrees between /run and checkpoint metadata."
+            )
+        return run_enabled if run_enabled is not None else point_enabled
 
     @staticmethod
     def _optional_float(value: object) -> float | None:

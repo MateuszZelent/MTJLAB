@@ -69,6 +69,7 @@ class SpectrogramAnalysisRequest:
     reference_operation: str = "none"
     interference_calibration: object = None
     display_start_s: float | None = None
+    frame_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,7 +184,19 @@ class _SpectrumAnalysisWorker(QObject):
     @staticmethod
     def _check_interruption():
         if QThread.currentThread().isInterruptionRequested():
-            raise RuntimeError("Spectrum analysis cancelled during shutdown.")
+            raise RuntimeError("Spectrum analysis canceled during shutdown.")
+
+    @staticmethod
+    def _row_cache_keys(request: SpectrogramAnalysisRequest) -> tuple[tuple[int, float], ...]:
+        if request.frame_ids and len(request.frame_ids) == len(request.timestamps_s):
+            return tuple(
+                (int(frame_id), stamp)
+                for frame_id, stamp in zip(request.frame_ids, request.timestamps_s, strict=True)
+            )
+        return tuple(
+            (id(row), stamp)
+            for row, stamp in zip(request.rows, request.timestamps_s, strict=True)
+        )
 
     def _analyze_spectrogram(self, request):
         if (not request.modes and request.reference_operation == "none"
@@ -191,6 +204,13 @@ class _SpectrumAnalysisWorker(QObject):
             selected = [(stamp, row) for stamp, row in zip(request.timestamps_s, request.rows, strict=True)
                         if request.display_start_s is None or stamp >= request.display_start_s]
             self._check_interruption()
+            if not selected:
+                empty = np.empty((0, len(request.frequencies_hz)), dtype=np.float32)
+                empty.setflags(write=False)
+                self.completed.emit(SpectrogramAnalysisOutcome(
+                    request.generation, request.frequencies_hz, (),
+                    empty, request.source_unit, "Raw", request.cache_key, (0.0, 1.0)))
+                return
             matrix = np.stack([row for _, row in selected])
             matrix.setflags(write=False)
             levels = spectrogram_color_levels(matrix, request.source_unit)
@@ -204,21 +224,22 @@ class _SpectrumAnalysisWorker(QObject):
             self._spectrogram_rows.clear()
             self._spectrogram_cache_key = request.cache_key
             self._reference_rows.clear()
-        active = set(request.timestamps_s)
-        self._spectrogram_rows = {stamp: row for stamp, row in self._spectrogram_rows.items() if stamp in active}
-        self._reference_rows = {stamp: row for stamp, row in self._reference_rows.items() if stamp in active}
+        row_keys = self._row_cache_keys(request)
+        active = set(row_keys)
+        self._spectrogram_rows = {key: row for key, row in self._spectrogram_rows.items() if key in active}
+        self._reference_rows = {key: row for key, row in self._reference_rows.items() if key in active}
         reference_enabled = request.reference_operation != "none"
         rows, input_unit = request.rows, request.source_unit
         if reference_enabled:
             if request.reference_values_dbm is None or "background" in request.modes:
                 raise ValueError("Choose one configured correction: Background or Reference.")
             converted = []
-            for stamp, row in zip(request.timestamps_s, request.rows, strict=True):
+            for row_key, row in zip(row_keys, request.rows, strict=True):
                 self._check_interruption()
-                if stamp not in self._reference_rows:
+                if row_key not in self._reference_rows:
                     values, input_unit = apply_reference_operation(row, request.reference_values_dbm, request.reference_operation)
-                    self._reference_rows[stamp] = (values, input_unit)
-                values, input_unit = self._reference_rows[stamp]
+                    self._reference_rows[row_key] = (values, input_unit)
+                values, input_unit = self._reference_rows[row_key]
                 converted.append(values)
             rows = tuple(converted)
         outputs = []
@@ -229,14 +250,14 @@ class _SpectrumAnalysisWorker(QObject):
         # arrive. Only invalidate rows whose preceding history was truncated.
         temporal = "emi_reject" in request.modes and "background" not in request.modes
         history_length = max(24 if temporal else 1, request.parameters.temporal_average_frames)
-        for index, (stamp, row) in enumerate(zip(request.timestamps_s, rows, strict=True)):
+        for index, (row_key, stamp, _row) in enumerate(zip(row_keys, request.timestamps_s, rows, strict=True)):
             if QThread.currentThread().isInterruptionRequested():
-                raise RuntimeError("Spectrogram processing cancelled during shutdown.")
+                raise RuntimeError("Spectrogram processing canceled during shutdown.")
             if request.display_start_s is not None and stamp < request.display_start_s:
                 continue
             start = max(0, index - history_length + 1)
-            history_key = (request.timestamps_s[start], index - start + 1) if history_length > 1 else None
-            cached = self._spectrogram_rows.get(stamp)
+            history_key = (row_keys[start], index - start + 1) if history_length > 1 else None
+            cached = self._spectrogram_rows.get(row_key)
             if cached is not None and cached[3] != history_key:
                 cached = None
             if cached is None:
@@ -250,13 +271,20 @@ class _SpectrumAnalysisWorker(QObject):
                     interference_calibration=request.interference_calibration, cleaner=_clean_display,
                 )
                 cached = (np.asarray(result.values, dtype=np.float32), result.unit, result.method, history_key, statistics)
-                self._spectrogram_rows[stamp] = cached
+                self._spectrogram_rows[row_key] = cached
             values, unit, method, _history_key, statistics = cached
             outputs.append(values)
             output_times.append(stamp)
         self._check_interruption()
+        if not outputs:
+            empty = np.empty((0, len(request.frequencies_hz)), dtype=np.float32)
+            empty.setflags(write=False)
+            self.completed.emit(SpectrogramAnalysisOutcome(
+                request.generation, request.frequencies_hz, (),
+                empty, unit, method, request.cache_key, (0.0, 1.0), statistics))
+            return
         matrix = np.stack(outputs)
-        matrix = np.frombuffer(matrix.tobytes(), dtype=matrix.dtype).reshape(matrix.shape)
+        matrix.setflags(write=False)
         levels = spectrogram_color_levels(matrix, unit)
         if levels is None:
             raise ValueError("No finite spectrum values are available for the spectrogram.")
@@ -381,8 +409,14 @@ class SpectrumAnalysisController(QObject):
         self._worker.failed.connect(self._failed)
         self._busy = False
         self._closed = False
-        self._pending: SpectrumAnalysisRequest | SpectrogramAnalysisRequest | None = None
+        self._pending_by_kind: dict[type, SpectrumAnalysisRequest | SpectrogramAnalysisRequest] = {}
         self._thread.start()
+
+    @property
+    def _pending(self) -> SpectrumAnalysisRequest | SpectrogramAnalysisRequest | None:
+        if not self._pending_by_kind:
+            return None
+        return next(reversed(self._pending_by_kind.values()))
 
     @property
     def busy(self) -> bool:
@@ -392,7 +426,7 @@ class SpectrumAnalysisController(QObject):
         if self._closed:
             return
         if self._busy:
-            self._pending = request
+            self._pending_by_kind[type(request)] = request
             return
         self._busy = True
         self._request.emit(request)
@@ -414,16 +448,18 @@ class SpectrumAnalysisController(QObject):
         self._start_pending()
 
     def _start_pending(self) -> None:
-        pending, self._pending = self._pending, None
-        if pending is not None:
-            self.submit(pending)
+        if not self._pending_by_kind:
+            return
+        key = next(iter(self._pending_by_kind))
+        pending = self._pending_by_kind.pop(key)
+        self.submit(pending)
 
     def close(self, *, timeout_ms: int = 100) -> bool:
         """Request stop without destroying or waiting forever for a live thread."""
         if type(timeout_ms) is not int or timeout_ms < 0:
             raise ValueError("Analysis shutdown timeout must be a non-negative integer.")
         self._closed = True
-        self._pending = None
+        self._pending_by_kind.clear()
         if not self._thread.isRunning():
             return True
         self._thread.requestInterruption()

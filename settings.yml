@@ -1,0 +1,631 @@
+# Measurement station configuration.
+# Device permissions, laboratory limits and hardware readback are enforced
+# directly; there is no separate profile confirmation workflow.
+
+schema_version: 1
+
+profile:
+  id: "default-lab-profile"
+  name: "Default station profile"
+
+# The operating-system login is the authentication boundary. Every local user
+# is an operator by default. Grant engineer/service only to exact OS account
+# names during station provisioning; never use a shared application password.
+access_control:
+  identity_provider: "operating_system"
+  default_roles:
+  - "operator"
+  user_roles: {}
+
+application:
+  locale: "en_US"
+  log_level: "INFO"
+  audit_log_directory: "logs"
+  service_console_enabled: false
+  require_second_confirmation_for_limit_override: true
+  settings_autosave: false
+  restore_last_recipe: true
+  elab:
+    enabled: false
+    template_id:
+    template_name: ""
+    title_pattern: "PyLab measurement {run_name}"
+    tags:
+    - "pylab"
+    - "measurement"
+    upload_hdf5: true
+    upload_csv: true
+    recent_templates: []
+    favorite_templates: []
+
+units:
+  internal_system: "SI"
+  require_explicit_unit_in_free_text: true
+  defaults:
+    voltage: "V"
+    current: "A"
+    power: "W"
+    frequency: "Hz"
+    resistance: "ohm"
+    time: "s"
+    rf_power: "dBm"
+
+execution:
+  default_settle_time: "100 ms"
+  command_timeout: "5 s"
+  connect_timeout: "3 s"
+  retry_count: 1
+  retry_backoff: "250 ms"
+  heartbeat_interval: "1 s"
+  watchdog_grace: "500 ms"
+  estimated_command_overhead: "25 ms"
+  estimated_spectrum_base_time: "100 ms"
+  estimated_spectrum_transfer_rate_points_per_second: 100000
+  estimated_line_frequency: "50 Hz"
+  checkpoint_every_points: 1
+  stop_on_compliance: true
+  stop_on_device_error: true
+  stop_on_lost_connection: true
+  max_expanded_points: 100000
+  emergency_stop_order:
+  - "keithley.outputs_off"
+  - "rigol.outputs_off"
+  - "anritsu.rf_off_and_abort"
+  - "storage.flush_checkpoint"
+
+storage:
+  output_directory: "./measurements"
+  # Absolute path persisted when the operator selects or moves the Samples catalogue.
+  # An empty value uses the platform default (Documents/PyLab).
+  catalogue_directory: ""
+  filename_pattern: "{sample_id}_{coord}_{device}_{recipe}"
+  primary_format: "hdf5"
+  write_csv_summary: true
+  save_recipe_snapshot: true
+  save_settings_snapshot: true
+  flush_after_each_spectrum: true
+  compression: "gzip"
+  compression_level: 4
+
+ui:
+  framework: "PySide6"
+  theme: "system"
+  show_engineering_notation: true
+  plot_max_visible_spectra: 20
+  plot_downsample_threshold: 200000
+  remember_window_layout: true
+  confirm_output_enable: true
+  show_raw_scpi_console: false
+
+devices:
+  rigol:
+    enabled: true
+    display_name: "Rigol DG1032Z"
+    connection:
+      resource:                  # assigned by VISA discovery
+      visa_backend: "system"
+      timeout: "4 s"
+      read_termination:
+      write_termination:
+    identity:
+      expected_vendor_contains: "RIGOL"
+      expected_models:
+      - "DG1032Z"
+      require_serial_match: false
+      expected_serial:
+    capabilities:
+      source: "query_and_model_database"
+      fail_on_unknown_firmware_command: true
+      probe_optional_commands_on_connect: true
+    safety:
+      allow_output_enable: false
+      outputs_off_on_connect: true
+      outputs_off_on_disconnect: true
+      require_external_current_sensor_for_runtime_trip: true
+      fixed_source_resistance: "50 ohm"
+      channels:
+        "1":
+          enabled: true
+          allowed_waveforms:
+          - "SIN"
+          - "SQU"
+          - "RAMP"
+          - "PULS"
+          - "NOIS"
+          - "USER"
+          - "DC"
+          lab_limits:
+            frequency:
+              min: 1 Hz
+              max: 30 MHz
+            combined_voltage_limit: "100 mV"
+            estimated_load_current:
+              min: "-10 mA"
+              max: "10 mA"
+              max_abs: "10 mA"
+              enforcement: "preflight_model_only"
+            estimated_load_power:
+              min: "0 W"
+              max: "5 mW"
+              max_abs: "5 mW"
+            settle_time:
+              min: "10 ms"
+              max: "10 s"
+            modulation_rate:
+              min: "1 Hz"
+              max: "1 MHz"
+            sweep_duration:
+              min: "1 ms"
+              max: "100 s"
+            sweep_steps:
+              min: 2
+              max: 1024
+            burst_period:
+              min: "2.0166 us"
+              max: "10 s"
+            burst_cycles:
+              min: 1
+              max: 1000000
+          defaults:
+            waveform: "SIN"
+            frequency: "1 kHz"
+            high_level: "1 mV"
+            low_level: "-1 mV"
+            output_load_setting: "HIGHZ"
+            output_enabled: false
+        "2":
+          enabled: false
+          allowed_waveforms:
+          - "SIN"
+          - "SQU"
+          - "RAMP"
+          - "PULS"
+          - "NOIS"
+          - "USER"
+          - "DC"
+          lab_limits:
+            frequency:
+              min: "1 Hz"
+              max: "1 MHz"
+            combined_voltage_limit: "100 mV"
+            estimated_load_current:
+              min: "-10 mA"
+              max: "10 mA"
+              max_abs: "10 mA"
+              enforcement: "preflight_model_only"
+            estimated_load_power:
+              min: "0 W"
+              max: "5 mW"
+              max_abs: "5 mW"
+            settle_time:
+              min: "10 ms"
+              max: "10 s"
+            modulation_rate:
+              min: "1 Hz"
+              max: "1 MHz"
+            sweep_duration:
+              min: "1 ms"
+              max: "100 s"
+            sweep_steps:
+              min: 2
+              max: 1024
+            burst_period:
+              min: "2.0166 us"
+              max: "10 s"
+            burst_cycles:
+              min: 1
+              max: 1000000
+          defaults:
+            waveform: "SIN"
+            frequency: "1 kHz"
+            high_level: "1 mV"
+            low_level: "-1 mV"
+            output_load_setting: "HIGHZ"
+            output_enabled: false
+
+  keithley:
+    enabled: true
+    display_name: "Keithley dual-channel SMU"
+    connection:
+      resource:                  # e.g. TCPIP0::192.168.1.120::INSTR
+      visa_backend: "system"
+      timeout: "10 s"
+      read_termination: ""
+      write_termination:
+    identity:
+      expected_vendor_contains: "KEITHLEY"
+      expected_models:
+      - "2602A"                 # confirm with *IDN?
+      require_serial_match: false
+      expected_serial:
+    driver:
+      raise_keithley_errors: true
+      dynamic_tsp_discovery: true
+      raw_tsp_console_enabled: false
+    safety:
+      allow_output_enable: false
+      outputs_off_on_connect: false
+      outputs_off_on_disconnect: true
+      output_off_mode: "normal"
+      stop_on_compliance: false
+      compliance_policy: "warn_clamp"
+      stop_on_overpower: true
+      channels:
+        A:
+          enabled: false
+          sense_mode: "2wire"
+          allowed_source_modes:
+          - "current"
+          - "voltage"
+          - "measure_only"
+          lab_limits:
+            source_current:
+              min: "-1 mA"
+              max: "1 mA"
+              max_abs: "1 mA"
+            source_voltage:
+              min: "-100 mV"
+              max: "100 mV"
+              max_abs: "100 mV"
+            current_compliance:
+              min: "100 nA"
+              max: "1 mA"
+            voltage_compliance:
+              # Series 2601A/2602A documented hardware minimum is 10 mV.
+              min: "10 mV"
+              max: "100 mV"
+            measured_current_trip:
+              min: "-1.1 mA"
+              max: "1.1 mA"
+            measured_voltage_trip:
+              min: "-110 mV"
+              max: "110 mV"
+            max_abs_power: "100 uW"
+            ramp_current_step_max: "100 uA"
+            ramp_voltage_step_max: "10 mV"
+            sweep_points_max: 1000
+            point_settle_time:
+              min: "1 ms"
+              max: "10 s"
+          defaults:
+            source_mode: "measure_only"
+            output_enabled: false
+            sense_mode: "2wire"
+            nplc: 1.0
+            settling_time: "100 ms"
+            source_autorange: false
+            source_range: "10 mA"
+            measure_voltage_autorange: true
+            measure_voltage_range: "AUTO"
+            measure_current_autorange: true
+            measure_current_range: "AUTO"
+            measure_delay: "auto"
+        B:
+          enabled: true
+          sense_mode: "2wire"
+          allowed_source_modes:
+          - "current"
+          - "voltage"
+          - "measure_only"
+          lab_limits:
+            # Working limits for the 1 mA ... 10 mA example.
+            # These are not the maximum capabilities of the 2602A model.
+            source_current:
+              min: "0 mA"
+              max: "10 mA"
+              max_abs: "10 mA"
+            source_voltage:
+              min: "-67 mV"
+              max: "67 mV"
+              max_abs: "67 mV"
+            current_compliance:
+              min: "100 uA"
+              max: "10 mA"
+            voltage_compliance:
+              # Series 2601A/2602A documented hardware minimum is 10 mV.
+              min: "10 mV"
+              max: "67 mV"
+            measured_current_trip:
+              min: "-0.5 mA"
+              max: "10.5 mA"
+            measured_voltage_trip:
+              min: "-70 mV"
+              max: "70 mV"
+            max_abs_power: "670 uW"
+            ramp_current_step_max: "100 uA"
+            ramp_voltage_step_max: "5 mV"
+            sweep_points_max: 1000
+            point_settle_time:
+              min: "1 ms"
+              max: "10 s"
+          defaults:
+            source_mode: "current"
+            source_current: "1 mA"
+            voltage_compliance: "67 mV"
+            output_enabled: false
+            sense_mode: "2wire"
+            nplc: 1.0
+            settling_time: "100 ms"
+            source_autorange: false
+            source_range: "1 A"
+            measure_voltage_autorange: true
+            measure_voltage_range: "AUTO"
+            measure_current_autorange: true
+            measure_current_range: "AUTO"
+            measure_delay: "auto"
+
+  anritsu:
+    enabled: true
+    display_name: "Anritsu MS2830A"
+    connection:
+      resource:
+      visa_backend: "@py"
+      timeout: "30 s"
+      read_termination: ""
+      write_termination: ""
+    identity:
+      expected_vendor_contains: "ANRITSU"
+      expected_models:
+      - "MS2830A"
+      require_serial_match: false
+      expected_serial:
+      required_options: []
+    acquisition:
+      # The legacy setting name "standard_scpi_opc" selects the qualified
+      # MS2830A protocol: INIT:MODE:SING, *WAI, INIT:SWP? confirmation,
+      # and the documented ABOR command.
+      # Unverified mode permits manual Live/Fetch but blocks recipe checkpoints
+      # so that an old trace cannot be stored as a new measurement point.
+      single_sweep_mode: "unverified"
+      operation_complete_timeout: "30 s"
+      live_refresh_interval: "500 ms"
+      application_average_count: 200
+    spectrum_correction:
+      # Enabling processing never grants permission to energize hardware.
+      enabled: false
+      method: "reference_subtraction"
+      calibration_duration: "60 s"
+      calibration_min_sweeps: 30
+      temporal_average:
+        mode: "ema_preview"
+        time_constant: "1 s"
+        window_frames: 32
+      reference_policy:
+        mode: "manual_refresh"
+        # Unknown TTL is reported as unqualified, not infinitely valid.
+        maximum_age: null
+        # Starting values for operator-confirmed alternating blocks, not a
+        # qualification of drift, signal absence, or physical settling.
+        block_duration: "1 s"
+        signal_duration: "5 s"
+        minimum_sweeps: 2
+        maximum_reference_blocks: 256
+      maximum_gap: "5 s"
+      render_interval: "50 ms"
+      diagnostics_interval: "1 s"
+      processing_queue_frames: 8
+      working_memory_limit_mib: 64
+      archive_raw_frames: true
+    signal_generator:
+      # The historical driver used INST SG, FREQ, POW and OUTP. Keep this
+      # unverified until the exact option and firmware pass HIL qualification.
+      control_protocol: "unverified"
+      frequency:
+        min:
+        max:
+      power:
+        min:
+        max:
+      default_frequency: "1 GHz"
+      default_power: "-30 dBm"
+    advanced_spectrum:
+      # Read-only queries can be used for diagnostics. Writes remain locked
+      # until this exact SCPI family passes HIL on a listed firmware version.
+      control_protocol: "unverified"
+      qualified_firmware: []
+    safety:
+      acquisition_allowed: false
+      # Optional: enable only when the laboratory wants to require an explicit
+      # expected RF power declaration before acquisition.
+      require_rf_input_limit_definition: false
+      signal_generator_output_allowed: false
+      outputs_off_on_disconnect: true
+      rf_input:
+        # Set these values for the exact instrument variant, installed options,
+        # preamplifier state, attenuators, and the complete RF signal path.
+        max_expected_power_at_connector:
+        external_attenuation: "0 dB"
+        minimum_internal_attenuation:
+        preamplifier_allowed: false
+        dc_input_allowed: false
+      frequency:
+        min:
+        max:
+      reference_level:
+        # Hardware-defined MS2830A range; displayed read-only in Settings.
+        min: "-120 dBm"
+        max: "+50 dBm"
+      sweep_points:
+        min: 101
+        max: 10001
+      defaults:
+        application: "SPECT"
+        continuous_sweep: false
+        start_frequency: "1 MHz"
+        stop_frequency: "10 MHz"
+        center_frequency: "5.5 MHz"
+        span: "9 MHz"
+        rbw: "10 kHz"
+        vbw: "10 kHz"
+        reference_level: "0 dBm"
+        sweep_points: 1001
+        trace: "TRAC1"
+
+  moke_box:
+    enabled: false
+    display_name: MOKE Box
+    endpoint:
+    timeout: 3 s
+    expected_model:
+    protocol_qualified: false
+    allow_vout_control: false
+    allowed_vout_channels: []
+    test_vout_channels: []
+    voltage_control:
+      approved: false
+      binding_id: ''
+      qualification_reference: ''
+      channel: 2
+      kepco_model: BOP 72-6M
+      kepco_mode: current
+      minimum: -1 V
+      maximum: 1 V
+      safe_target: 0 V
+      maximum_step: 50 mV
+      maximum_slew: 1 V/s
+      step_interval: 50 ms
+      ramp_timeout: 30 s
+      # Starting value only: qualify the actual coil response on the station.
+      minimum_settling_time: 2 s
+    calibration_directory: calibrations/moke_box
+    active_calibration_id:
+    channel_profiles:
+      '0':
+        approved: false
+        binding_id: unconnected-test-VOUT0
+        qualification_reference: ''
+        channel: 0
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
+      '1':
+        approved: false
+        binding_id: unconnected-test-VOUT1
+        qualification_reference: ''
+        channel: 1
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
+      '3':
+        approved: false
+        binding_id: unconnected-test-VOUT3
+        qualification_reference: ''
+        channel: 3
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
+      '4':
+        approved: false
+        binding_id: unconnected-test-VOUT4
+        qualification_reference: ''
+        channel: 4
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
+      '5':
+        approved: false
+        binding_id: unconnected-test-VOUT5
+        qualification_reference: ''
+        channel: 5
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
+      '6':
+        approved: false
+        binding_id: unconnected-test-VOUT6
+        qualification_reference: ''
+        channel: 6
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
+      '7':
+        approved: false
+        binding_id: unconnected-test-VOUT7
+        qualification_reference: ''
+        channel: 7
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
+    live_interval: 1 s
+    plot_refresh_interval: 500 ms
+    history_window: 60 s
+
+  lakeshore_gaussmeter:
+    enabled: false
+    display_name: Lake Shore 475
+    resource:
+    visa_backend: system
+    timeout: 3 s
+    baud_rate: 57600
+    expected_serial:
+    require_serial_match: false
+    live_interval: 1 s
+
+recipe_defaults:
+  example_nested_sweep:
+    keithley_channel: "B"
+    current:
+      start: "1 mA"
+      stop: "10 mA"
+      points: 100
+      spacing: "linear"
+    voltage_compliance: "67 mV"
+    rigol_channel: 1
+    rigol_waveform: "SQU"
+    rigol_high_level:
+      start: "1 mV"
+      stop: "3 mV"
+      points: 20
+      spacing: "linear"
+    rigol_low_level: "-1 mV"
+    analyzer_acquisition_per_point: true
+    expected_total_spectra: 2000

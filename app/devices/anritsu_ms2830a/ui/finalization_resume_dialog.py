@@ -2,13 +2,33 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtWidgets import QAbstractItemView, QFormLayout, QHBoxLayout, QHeaderView, QTableWidgetItem, QWidget
-from qfluentwidgets import BodyLabel, CheckBox, LineEdit, PrimaryPushButton, ProgressBar, PushButton, TableWidget, TitleLabel
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QFormLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QTableWidgetItem,
+    QWidget,
+)
+from qfluentwidgets import (
+    BodyLabel,
+    CheckBox,
+    LineEdit,
+    PrimaryPushButton,
+    ProgressBar,
+    PushButton,
+    TableWidget,
+    TitleLabel,
+)
 
-from app.domain.spectrum_finalization import SpectrumFinalizationResumeRequest, SpectrumResumeInspectionRequest
+from app.domain.spectrum_finalization import (
+    SpectrumFinalizationResumeRequest,
+    SpectrumResumeInspectionRequest,
+)
 from app.ui.dialogs import StationDialog, StationFileDialog
 from app.ui.widgets.fluent_ownership import own_fluent_helpers
+
 from .correction_controller import SpectrumCorrectionController
 
 
@@ -84,12 +104,14 @@ class SpectrumFinalizationResumeDialog(StationDialog):
         self.progress.hide()
         layout.addWidget(self.progress)
         actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addStretch(1)
         self.start = PrimaryPushButton("Resume remaining blocks", self)
         self.close_button = PushButton("Cancel", self)
         self.start.clicked.connect(self._submit)
         self.close_button.clicked.connect(self.reject)
-        actions.addWidget(self.start)
         actions.addWidget(self.close_button)
+        actions.addWidget(self.start)
         layout.addLayout(actions)
         self._update_ready()
         own_fluent_helpers(self)

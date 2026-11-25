@@ -2,14 +2,34 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CheckBox, ComboBox, LineEdit, PrimaryPushButton, ProgressBar, PushButton, ScrollArea, SpinBox, TitleLabel
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QFormLayout, QFrame, QHBoxLayout, QWidget
+from qfluentwidgets import (
+    BodyLabel,
+    CheckBox,
+    ComboBox,
+    LineEdit,
+    PrimaryPushButton,
+    ProgressBar,
+    PushButton,
+    ScrollArea,
+    SpinBox,
+    TitleLabel,
+)
 
-from app.domain.quantities import DIMENSION_FREQUENCY, DIMENSION_POWER, format_quantity_auto, parse_quantity
+from app.domain.quantities import (
+    DIMENSION_FREQUENCY,
+    DIMENSION_POWER,
+    format_quantity_auto,
+    parse_quantity,
+)
 from app.spectrum.resonance_bootstrap import ResonanceBootstrapConfig
 from app.ui.dialogs import StationDialog, StationFileDialog
-from .correction_controller import SpectrumCorrectionController, SpectrumResonanceBootstrapRequest
+
+from .correction_controller import (
+    SpectrumCorrectionController,
+    SpectrumResonanceBootstrapRequest,
+)
 
 
 class SpectrumResonanceDialog(StationDialog):
@@ -31,6 +51,7 @@ class SpectrumResonanceDialog(StationDialog):
         hint.setWordWrap(True)
         layout.addWidget(hint)
         scroll = ScrollArea(self)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content = QWidget(scroll)
@@ -80,6 +101,7 @@ class SpectrumResonanceDialog(StationDialog):
         self._editors.extend((self.center, self.fwhm_input, self.shape, self.blocks, self.resamples, self.method,
                               self.discard_tail, self.independent, self.equivalent, self.stationary, self.evidence))
         scroll.setWidget(content)
+        scroll.enableTransparentBackground()
         layout.addWidget(scroll, 1)
         self.status = BodyLabel("Ready. Choose archives and provide the center and width with units.", self)
         self.status.setWordWrap(True)
@@ -91,11 +113,13 @@ class SpectrumResonanceDialog(StationDialog):
         self.result_label.setWordWrap(True)
         layout.addWidget(self.result_label)
         actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addStretch(1)
         self.start = PrimaryPushButton("Analyze and save report", self)
         self.cancel = PushButton("Cancel analysis", self)
         self.cancel.setEnabled(False)
         self.close_button = PushButton("Close", self)
-        for button in (self.start, self.cancel, self.close_button):
+        for button in (self.close_button, self.cancel, self.start):
             actions.addWidget(button)
         layout.addLayout(actions)
         self.start.clicked.connect(self._start)

@@ -79,7 +79,7 @@ class RecipeBuilderTests(unittest.TestCase):
         requests: list[tuple[object, bool, str, str, str]] = []
         plan = object()
         try:
-            page.run_requested.connect(
+            page.execution_preview_requested.connect(
                 lambda selected, dry_run, mode, output_dir, file_stem: requests.append(
                     (selected, dry_run, mode, output_dir, file_stem)
                 )
@@ -89,11 +89,11 @@ class RecipeBuilderTests(unittest.TestCase):
             page.output_directory.setText("measurements/custom")
             page.output_file_stem.setText("sample sweep")
             page._plan = plan
-            page.request_run()
+            page.request_execution_preview()
             page.execution_mode.setCurrentIndex(0)
             page.output_file_stem.clear()
             page._plan = plan
-            page.request_run()
+            page.request_execution_preview()
 
             self.assertEqual(
                 requests,

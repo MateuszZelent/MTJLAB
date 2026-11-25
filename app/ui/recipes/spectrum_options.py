@@ -19,6 +19,7 @@ class RecipeSpectrumOptions(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         self.source = ComboBox(self)
+        self.source.setAccessibleName("Reference source")
         for label, value in (
             ("Acquire at this recipe step", "acquire"),
             ("Load saved reference", "reference"),

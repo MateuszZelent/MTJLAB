@@ -1,8 +1,8 @@
 """Offline two-sample bootstrap of complete, qualified spectral block means."""
 
+import math
 from dataclasses import asdict, dataclass
 from importlib.metadata import version
-import math
 
 import numpy as np
 
@@ -57,9 +57,12 @@ def bootstrap_buffer_bytes(reference_blocks, signal_blocks, points, config):
     return estimate
 
 
+_DEFAULT_BOOTSTRAP_CONFIG = ResonanceBootstrapConfig()
+
+
 def bootstrap_resonance_blocks(frequencies_hz, reference_blocks_w, signal_blocks_w, *,
                                 initial_center_hz, initial_fwhm_hz, shape="gaussian",
-                                config=ResonanceBootstrapConfig(), cancellation_check=None, progress_callback=None):
+                                config=_DEFAULT_BOOTSTRAP_CONFIG, cancellation_check=None, progress_callback=None):
     """Resample each whole F-vector, REF once per replicate, independently of SIGNAL.
 
     Inputs are equal-sized nonoverlapping block means within each source.

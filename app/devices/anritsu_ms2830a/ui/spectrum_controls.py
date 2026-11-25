@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -56,6 +56,8 @@ class AveragingTargetControls(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.backend = ComboBox(self)
         self.backend.setAccessibleName("Averaging source")
+        self.backend.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.backend.setMinimumWidth(110)
         self.backend.addItem("PyLab Live", userData="application")
         if allow_instrument:
             self.backend.addItem("Anritsu · Lin Average", userData="instrument")
@@ -64,14 +66,20 @@ class AveragingTargetControls(QWidget):
             self.backend.hide()
         self.mode = ComboBox(self)
         self.mode.setAccessibleName("Averaging target mode")
+        self.mode.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.mode.setMinimumWidth(84)
         self.mode.addItem("Frames", userData="frames")
         self.mode.addItem("Seconds", userData="seconds")
         self.frames = SpinBox(self)
         self.frames.setAccessibleName("Averaging frame count")
+        self.frames.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.frames.setMinimumWidth(84)
         self.frames.setRange(1, 2_147_483_647)
         self.frames.setValue(initial_frames)
         self.seconds = SpinBox(self)
         self.seconds.setAccessibleName("Averaging duration in seconds")
+        self.seconds.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.seconds.setMinimumWidth(84)
         self.seconds.setRange(1, 2_147_483)  # QTimer takes signed 32-bit milliseconds.
         self.seconds.setValue(60)
         self.seconds.setSuffix(" s")
@@ -80,6 +88,7 @@ class AveragingTargetControls(QWidget):
         layout.addWidget(self.mode, 1, 0)
         layout.addWidget(self.frames, 1, 1)
         layout.addWidget(self.seconds, 1, 1)
+        layout.setColumnStretch(0, 1)
         layout.setColumnStretch(1, 1)
         self.mode.currentIndexChanged.connect(self._sync_mode)
         self.backend.currentIndexChanged.connect(self._sync_mode)
@@ -142,7 +151,7 @@ class StripeCorrectionControls(QWidget):
         description = CaptionLabel(
             "Automatic Stripes uses a matching background recorded with the signal of interest absent. "
             "With Subtract [dB], Corrected matches stripe levels to the reference. "
-            "Reconstruct bands estimates the trace in stripe bands from neighbouring frequencies, including fluctuating lines. "
+            "Reconstruct bands estimates the trace in stripe bands from neighboring frequencies, including fluctuating lines. "
             "Mask bands shows gaps at stripe frequencies and respects protected bands.", self)
         description.setWordWrap(True)
         layout.addWidget(description)
@@ -296,12 +305,18 @@ def parse_plot_amplitude(text: str, unit: str) -> float:
     if unit in dimensions:
         value = parse_quantity(text, dimensions[unit]).si_value
     elif unit in {"ratio", "linear ratio"}:
-        value = float(text.removesuffix("linear ratio").removesuffix("ratio").strip())
+        cleaned = text.strip().replace(",", ".")
+        if cleaned.endswith("linear ratio"):
+            cleaned = cleaned.removesuffix("linear ratio").strip()
+        elif cleaned.endswith("ratio"):
+            cleaned = cleaned.removesuffix("ratio").strip()
+        value = float(cleaned)
     elif unit == "mW²":
         # Reference multiplication is stored/displayed in mW², not in W.
-        if not text.strip().endswith("mW²"):
+        cleaned = text.strip()
+        if not cleaned.endswith("mW²"):
             raise ValueError("Use the explicit plotted unit mW², e.g. 2e-8 mW².")
-        value = float(text.strip().removesuffix("mW²").strip())
+        value = float(cleaned.removesuffix("mW²").strip().replace(",", "."))
     else:
         raise ValueError(f"Unsupported plot unit: {unit}.")
     if not math.isfinite(value):
@@ -453,8 +468,19 @@ class PlotScaleDialog(StationDialog):
         buttons.addWidget(close)
         root.addLayout(buttons)
         self._spectrogram = spectrogram
+        self._controller_disconnected = False
         controller.changed.connect(self._sync)
-        self.finished.connect(lambda: controller.changed.disconnect(self._sync))
+
+        def _disconnect_controller(_result: int = 0) -> None:
+            if self._controller_disconnected:
+                return
+            self._controller_disconnected = True
+            try:
+                controller.changed.disconnect(self._sync)
+            except (RuntimeError, TypeError):
+                pass
+
+        self.finished.connect(_disconnect_controller)
         self._sync()
 
     def _sync(self) -> None:

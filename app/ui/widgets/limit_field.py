@@ -7,8 +7,8 @@ import math
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
-    QFormLayout,
     QApplication,
+    QFormLayout,
     QHBoxLayout,
     QLineEdit,
     QSpinBox,
@@ -25,9 +25,6 @@ from qfluentwidgets import (
     StrongBodyLabel,
     isDarkTheme,
 )
-from app.safety.keithley_limit_reconciliation import KeithleyLimitProposal
-from app.ui.dialogs import StationDialog
-from app.ui.design_system import apply_validation_style
 
 from app.domain.quantities import (
     DIMENSION_CURRENT,
@@ -37,10 +34,14 @@ from app.domain.quantities import (
     DIMENSION_RESISTANCE,
     DIMENSION_TIME,
     DIMENSION_VOLTAGE,
+    QuantityError,
     format_quantity_auto,
     parse_quantity,
 )
 from app.domain.quick_controls import _QUANTITY, render_quantity_si_like
+from app.safety.keithley_limit_reconciliation import KeithleyLimitProposal
+from app.ui.design_system import apply_validation_style, set_dynamic_property, tokens_for
+from app.ui.dialogs import StationDialog
 
 
 def set_line_edit_text_preserving_edit_state(editor: QLineEdit, text: object) -> None:
@@ -116,9 +117,11 @@ class SafetyRangePill(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            if hasattr(self._field, "edit_button"):
-                if not self._field.edit_button.isVisible() or not self._field.edit_button.isEnabled():
-                    return
+            if hasattr(self._field, "edit_button") and (
+                not self._field.edit_button.isVisible()
+                or not self._field.edit_button.isEnabled()
+            ):
+                return
             self.clicked.emit()
         super().mousePressEvent(event)
 
@@ -204,19 +207,40 @@ class SafetyRangePill(QWidget):
                     fraction = (cur - mn) / (mx - mn)
                 is_violation = cur < mn or cur > mx
 
-        # Color scheme
-        if dark:
-            bg_color = QColor(48, 20, 20) if is_violation else (QColor(48, 48, 54) if self._is_hovered else QColor(36, 36, 40))
-            border_color = QColor(239, 68, 68) if is_violation else (QColor(0, 153, 255) if self._is_hovered else QColor(58, 58, 64))
-            text_color = QColor(248, 113, 113) if is_violation else QColor(230, 230, 235)
-            track_color = QColor(255, 255, 255, 28)
-            zero_color = QColor(255, 255, 255, 75)
+        # Color scheme derived from the shared Catppuccin station tokens.
+        tokens = tokens_for("dark" if dark else "light")
+        base_surface = QColor(tokens.surface_raised if dark else tokens.surface)
+        danger_color = QColor(tokens.danger)
+        accent_color = QColor(tokens.accent)
+        focus_color = QColor(tokens.focus)
+        caution_color = QColor(tokens.caution)
+        border_token = QColor(tokens.border)
+        text_primary = QColor(tokens.text_primary)
+        text_muted = QColor(tokens.text_muted)
+
+        def _blend(base: QColor, tint: QColor, alpha: float) -> QColor:
+            return QColor.fromRgbF(
+                base.redF() * (1.0 - alpha) + tint.redF() * alpha,
+                base.greenF() * (1.0 - alpha) + tint.greenF() * alpha,
+                base.blueF() * (1.0 - alpha) + tint.blueF() * alpha,
+            )
+
+        if is_violation:
+            bg_color = _blend(base_surface, danger_color, 0.18 if dark else 0.12)
+            border_color = danger_color
+            text_color = danger_color
+        elif self._is_hovered:
+            bg_color = _blend(base_surface, accent_color, 0.14 if dark else 0.08)
+            border_color = focus_color
+            text_color = text_primary
         else:
-            bg_color = QColor(254, 242, 242) if is_violation else (QColor(241, 245, 249) if self._is_hovered else QColor(248, 250, 252))
-            border_color = QColor(239, 68, 68) if is_violation else (QColor(0, 120, 212) if self._is_hovered else QColor(218, 224, 233))
-            text_color = QColor(220, 38, 38) if is_violation else QColor(30, 41, 59)
-            track_color = QColor(0, 0, 0, 25)
-            zero_color = QColor(0, 0, 0, 60)
+            bg_color = base_surface
+            border_color = border_token
+            text_color = text_primary
+        track_color = QColor(border_token)
+        track_color.setAlpha(135 if dark else 155)
+        zero_color = QColor(text_muted)
+        zero_color.setAlpha(190)
 
         # Draw rounded pill container
         pen = QPen(border_color, 1.2 if (self._is_hovered or is_violation) else 1.0)
@@ -264,21 +288,21 @@ class SafetyRangePill(QWidget):
                 fill_x = min(ref_x, marker_x)
                 fill_w = max(abs(marker_x - ref_x), 1.0)
 
-                fill_color = QColor(239, 68, 68, 160) if is_violation else (
-                    QColor(2, 132, 199, 140) if dark else QColor(0, 120, 212, 120)
-                )
+                fill_color = QColor(danger_color if is_violation else accent_color)
+                fill_color.setAlpha(170 if is_violation else (160 if dark else 140))
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QBrush(fill_color))
                 painter.drawRoundedRect(fill_x, track_y, fill_w, track_h, 1.0, 1.0)
 
                 # Setpoint marker dot
-                dot_color = QColor(239, 68, 68) if is_violation else (
-                    QColor(245, 158, 11) if (clamped_frac in {0.0, 1.0}) else (
-                        QColor(14, 165, 233) if dark else QColor(2, 132, 199)
-                    )
+                dot_color = (
+                    danger_color
+                    if is_violation
+                    else (caution_color if clamped_frac in {0.0, 1.0} else accent_color)
                 )
                 painter.setBrush(QBrush(dot_color))
-                dot_border = QColor(255, 255, 255, 200) if dark else QColor(255, 255, 255, 220)
+                dot_border = QColor(tokens.background)
+                dot_border.setAlpha(220)
                 painter.setPen(QPen(dot_border, 1))
                 painter.drawEllipse(int(marker_x - 3), int(track_y - 1.5), 6, 6)
 
@@ -377,11 +401,9 @@ class LimitField(QWidget):
         self.range_pill.set_limits(minimum, maximum)
         incomplete = minimum is None or maximum is None
         state = "undefined" if incomplete else "defined"
-        self.setProperty("limitState", state)
+        set_dynamic_property(self, "limitState", state, repolish=False)
         for label in (self.minimum, self.maximum):
-            label.setProperty("limitState", state)
-            label.style().unpolish(label)
-            label.style().polish(label)
+            set_dynamic_property(label, "limitState", state)
         self.setToolTip(
             "Configured laboratory range. The operation is rejected before SCPI is sent "
             "when a value or sweep endpoint is outside this range."
@@ -390,22 +412,19 @@ class LimitField(QWidget):
     def _show_validation_warning(self, message: str) -> None:
         self.validation_warning.setText(f"Warning: {message}")
         self.validation_warning.show()
-        self.editor.setProperty("validationState", "error")
-        self._refresh_editor_style()
+        if set_dynamic_property(self.editor, "validationState", "error"):
+            self._refresh_editor_style()
 
     def _clear_validation_warning(self) -> None:
         self.validation_warning.clear()
         self.validation_warning.hide()
-        self.editor.setProperty("validationState", "normal")
-        self._refresh_editor_style()
+        if set_dynamic_property(self.editor, "validationState", "normal"):
+            self._refresh_editor_style()
 
     def _refresh_editor_style(self) -> None:
         """Re-evaluate the shared token-based validation selector."""
 
         apply_validation_style(self.editor, self.validation_warning)
-        style = self.editor.style()
-        style.unpolish(self.editor)
-        style.polish(self.editor)
         self.editor.update()
 
     def _current_unit(self, dimension: str | None = None) -> str | None:
@@ -430,8 +449,8 @@ class LimitField(QWidget):
                 try:
                     parse_quantity(f"1 {unit}", dimension)
                     return unit
-                except Exception:
-                    pass
+                except (QuantityError, ValueError, TypeError):
+                    continue
         return None
 
     def _quantity_values(
@@ -473,7 +492,7 @@ class LimitField(QWidget):
                 for val in boundaries:
                     val_str = str(val).strip()
                     require_unit = True
-                    if val_str.startswith(">") or val_str.startswith("<"):
+                    if val_str.startswith((">", "<")):
                         val_str = val_str[1:].strip()
                         require_unit = False
                     parsed_bounds.append(
@@ -484,11 +503,11 @@ class LimitField(QWidget):
                 if preferred_unit and _QUANTITY.fullmatch(text) is None:
                     try:
                         current = parse_quantity(f"{text} {preferred_unit}", dimension).si_value
-                    except Exception:
+                    except (QuantityError, ValueError, TypeError):
                         current = parse_quantity(text, dimension, require_unit=False).si_value
                 else:
                     current = parse_quantity(text, dimension, require_unit=False).si_value
-            except Exception:
+            except (QuantityError, ValueError, TypeError):
                 continue
             minimum = parsed_bounds[0] if self._minimum_value is not None else None
             maximum = parsed_bounds[-1] if self._maximum_value is not None else None
@@ -548,8 +567,8 @@ class LimitField(QWidget):
                         minimum,
                         preferred_unit=self._current_unit(dimension),
                     )
-                except Exception:
-                    pass
+                except (QuantityError, ValueError, TypeError):
+                    replacement = str(self._minimum_value)
             self._set_editor_value(replacement)
             self._show_validation_warning(
                 f"Value was below MIN and has been changed to {replacement}."
@@ -565,8 +584,8 @@ class LimitField(QWidget):
                         maximum,
                         preferred_unit=self._current_unit(dimension),
                     )
-                except Exception:
-                    pass
+                except (QuantityError, ValueError, TypeError):
+                    replacement = str(self._maximum_value)
             self._set_editor_value(replacement)
             self._show_validation_warning(
                 f"Value exceeded MAX and has been changed to {replacement}."
@@ -592,7 +611,7 @@ class LimitField(QWidget):
                             preferred_unit=preferred_unit,
                         )
                     )
-                except Exception:
+                except (QuantityError, ValueError, TypeError):
                     normalized = (
                         f"{value:.12g}"
                         if dimension is None

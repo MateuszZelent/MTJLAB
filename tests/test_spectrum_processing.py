@@ -57,6 +57,26 @@ class SpectrumProcessingTests(unittest.TestCase):
         self.assertLessEqual(len(indices), 200)
         self.assertIn(5_123, indices)
 
+    def test_frequency_grid_comparison_preserves_nan_inf_and_empty_semantics(self) -> None:
+        nan_grid = (1e9, float("nan"), 3e9)
+        self.assertFalse(frequency_grids_match(nan_grid, nan_grid))
+        self.assertTrue(frequency_grids_match((float("inf"), 2e9), (float("inf"), 2e9)))
+        self.assertFalse(frequency_grids_match((float("inf"), 2e9), (float("-inf"), 2e9)))
+        self.assertFalse(frequency_grids_match((), ()))
+        self.assertFalse(frequency_grids_match((1e9,), (1e9,)))
+        with self.assertRaises(ValueError):
+            frequency_grids_match((1e9, 2e9), (1e9, 2e9), relative=-1e-9)
+
+    def test_peak_preserving_indices_handles_nan_gaps_and_all_nan_buckets(self) -> None:
+        values = [float("nan")] * 100
+        values[0] = -80.0
+        values[42] = -10.0
+        values[99] = -80.0
+        indices = peak_preserving_indices(values, 10)
+        self.assertEqual(indices[0], 0)
+        self.assertEqual(indices[-1], 99)
+        self.assertIn(42, indices)
+
 
 if __name__ == "__main__":
     unittest.main()

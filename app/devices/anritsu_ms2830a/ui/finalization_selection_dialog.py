@@ -1,17 +1,39 @@
 """Fluent selection of explicit profiles and one continuous archived SIGNAL block."""
 
+from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
-from datetime import datetime, timezone
 
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtWidgets import QAbstractItemView, QFormLayout, QHBoxLayout, QHeaderView, QTableWidgetItem, QWidget
-from qfluentwidgets import BodyLabel, ComboBox, LineEdit, PrimaryPushButton, ProgressBar, PushButton, ScrollArea, TableWidget, TitleLabel
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QTableWidgetItem,
+    QWidget,
+)
+from qfluentwidgets import (
+    BodyLabel,
+    ComboBox,
+    LineEdit,
+    PrimaryPushButton,
+    ProgressBar,
+    PushButton,
+    ScrollArea,
+    TableWidget,
+    TitleLabel,
+)
 
 from app.domain.spectrum_finalization import SpectrumFinalizationBatchRequest
 from app.ui.dialogs import StationDialog, StationFileDialog
 from app.ui.widgets.fluent_ownership import own_fluent_helpers
+
 from .correction_controller import (
-    SpectrumCorrectionController, SpectrumFinalizationRequest, SpectrumFinalizationSourcesRequest,
+    SpectrumCorrectionController,
+    SpectrumFinalizationRequest,
+    SpectrumFinalizationSourcesRequest,
 )
 
 
@@ -42,6 +64,7 @@ class SpectrumFinalizationSelectionDialog(StationDialog):
         layout.addWidget(hint)
         scroll = ScrollArea(self)
         self.form_scroll = scroll
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content = QWidget(scroll)
@@ -106,6 +129,7 @@ class SpectrumFinalizationSelectionDialog(StationDialog):
             self.remove_block.clicked.connect(self._remove_block)
             form.addRow(self.remove_block)
         scroll.setWidget(content)
+        scroll.enableTransparentBackground()
         layout.addWidget(scroll, 1)
         if batch_mode:
             journal_form = QFormLayout()
@@ -120,13 +144,15 @@ class SpectrumFinalizationSelectionDialog(StationDialog):
         self.progress.hide()
         layout.addWidget(self.progress)
         actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addStretch(1)
         self.start = PrimaryPushButton("Finalize selected block", self)
         if batch_mode:
             self.start.setText("Finalize queued blocks")
         self.close_button = PushButton("Cancel", self)
         self.start.setEnabled(False)
-        actions.addWidget(self.start)
         actions.addWidget(self.close_button)
+        actions.addWidget(self.start)
         layout.addLayout(actions)
         self.inspect.clicked.connect(self._inspect)
         self.start.clicked.connect(self._submit)
@@ -261,7 +287,7 @@ class SpectrumFinalizationSelectionDialog(StationDialog):
                     f"Points {block.start_point}–{block.stop_point} · {suffix}", userData=block)
             self.progress.hide()
             self._set_busy(False)
-            self.status.setText("Choose a SIGNAL block; its recorded REF neighbours will be selected explicitly.")
+            self.status.setText("Choose a SIGNAL block; its recorded REF neighbors will be selected explicitly.")
             return
         if operation != "inspect_finalization" or self._closing:
             return
@@ -275,7 +301,7 @@ class SpectrumFinalizationSelectionDialog(StationDialog):
             selector.addItem("Choose a profile…", userData=None)
             for identity, state, count, _start, end, _context in choices:
                 try:
-                    at = datetime.fromtimestamp(end, timezone.utc).isoformat(timespec="milliseconds")
+                    at = datetime.fromtimestamp(end, UTC).isoformat(timespec="milliseconds")
                 except (ValueError, OverflowError, OSError):
                     at = f"{end} s UTC"
                 selector.addItem(f"{identity} · {state.replace(chr(10), ' ')[:80]} · {count} sweeps · {at}",
@@ -308,7 +334,7 @@ class SpectrumFinalizationSelectionDialog(StationDialog):
         for selector, identity in zip(self.profiles,
                 (block.before_profile_id, block.before_profile_id, block.after_profile_id), strict=True):
             selector.setCurrentIndex(selector.findData(identity) if identity is not None else 0)
-        self.status.setText("Recorded REF neighbours selected. Choose a new output for this block." if block.after_profile_id
+        self.status.setText("Recorded REF neighbors selected. Choose a new output for this block." if block.after_profile_id
                             else "This SIGNAL block has no completed REF after it; bracketed finalization is unavailable.")
 
     def _failed(self, operation, error):
@@ -346,7 +372,7 @@ class SpectrumFinalizationSelectionDialog(StationDialog):
                 raise ValueError("Use zero-based nonnegative checkpoint numbers, separated by commas or spaces.")
             if indices is None:
                 indices = tuple(int(part) for part in parts)
-            if any(first >= second for first, second in zip(indices, indices[1:])):
+            if any(first >= second for first, second in pairwise(indices)):
                 raise ValueError("Checkpoint numbers must be unique and strictly ordered from lowest to highest.")
         signal, before, after = self._loaded_sources
         return SpectrumFinalizationRequest(signal, before, after,

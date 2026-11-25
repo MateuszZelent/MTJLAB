@@ -42,6 +42,8 @@ class ThemeTokens:
     danger: str
     neutral: str
     output_active: str
+    output_inactive: str
+    on_output_inactive: str
     compliance: str
     interlock: str
     emergency: str
@@ -62,7 +64,8 @@ _LIGHT = ThemeTokens(
     dialog_surface="#f8f9fc", dialog_chrome="#eff1f5", dialog_border="#7c8199",
     accent="#1e66f5", focus="#7287fd", success="#40a02b",
     caution="#df8e1d", danger="#d20f39", neutral="#7c7f93",
-    output_active="#d20f39", compliance="#df8e1d", interlock="#df8e1d",
+    output_active="#d20f39", output_inactive="#ffffff", on_output_inactive="#4c4f69",
+    compliance="#df8e1d", interlock="#df8e1d",
     emergency="#d20f39", on_emergency="#ffffff", on_accent="#ffffff",
     plot_background="#ffffff", plot_axes="#5c5f77",
     plot_grid="#ccd0da", plot_reference="#8839ef",
@@ -76,7 +79,8 @@ _DARK = ThemeTokens(
     dialog_surface="#292a3b", dialog_chrome="#313244", dialog_border="#7f849c",
     accent="#89b4fa", focus="#b4befe", success="#a6e3a1",
     caution="#f9e2af", danger="#f38ba8", neutral="#9399b2",
-    output_active="#f38ba8", compliance="#f9e2af", interlock="#f9e2af",
+    output_active="#f38ba8", output_inactive="#ffffff", on_output_inactive="#4c4f69",
+    compliance="#f9e2af", interlock="#f9e2af",
     emergency="#f38ba8", on_emergency="#181825", on_accent="#181825",
     plot_background="#181825", plot_axes="#bac2de",
     plot_grid="#45475a", plot_reference="#cba6f7",

@@ -17,14 +17,24 @@ class PlotTheme:
     success: str
 
 
-def plot_theme(tokens: ThemeTokens) -> PlotTheme:
-    """Keep paper figures consistent while the surrounding application changes theme."""
+def plot_theme(tokens: ThemeTokens, *, publication: bool = False) -> PlotTheme:
+    """Resolve plot colours from application tokens on screen and paper style for publication."""
+    if publication:
+        return PlotTheme(
+            background=PAPER_STYLE.colour("figure.facecolor"),
+            axes=PAPER_STYLE.colour("axes.labelcolor"),
+            grid=PAPER_STYLE.colour("grid.color"),
+            reference=PAPER_STYLE.colour_cycle[1],
+            measurement=PAPER_STYLE.colour_cycle[0],
+            danger=PAPER_STYLE.colour_cycle[3],
+            success=PAPER_STYLE.colour_cycle[2],
+        )
     return PlotTheme(
-        background=PAPER_STYLE.colour("figure.facecolor"),
-        axes=PAPER_STYLE.colour("axes.labelcolor"),
-        grid=PAPER_STYLE.colour("grid.color"),
-        reference=PAPER_STYLE.colour_cycle[1],
-        measurement=PAPER_STYLE.colour_cycle[0],
-        danger=PAPER_STYLE.colour_cycle[3],
-        success=PAPER_STYLE.colour_cycle[2],
+        background=tokens.plot_background,
+        axes=tokens.plot_axes,
+        grid=tokens.plot_grid,
+        reference=tokens.plot_reference,
+        measurement=tokens.plot_measurement,
+        danger=tokens.danger,
+        success=tokens.success,
     )

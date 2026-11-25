@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFormLayout, QFrame, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -124,15 +124,15 @@ class ManualSpectrumSaveDialog(StationDialog):
             "Upload only after the local HDF5 save succeeds. eLab uploads use a closed "
             "timestamped file so an append archive cannot change after upload."
         )
-        self.elab_upload_hint = CaptionLabel(
+        self._default_elab_upload_hint = (
             elab_upload_hint
             or (
                 "Configure a template in the eLabFTW tab first."
                 if not elab_upload_available
                 else "A closed timestamped HDF5 will be used for this eLab upload."
-            ),
-            surface,
+            )
         )
+        self.elab_upload_hint = CaptionLabel(self._default_elab_upload_hint, surface)
         self.elab_upload_hint.setObjectName("muted")
         self.elab_upload_hint.setWordWrap(True)
         elab_row = QVBoxLayout()
@@ -183,6 +183,7 @@ class ManualSpectrumSaveDialog(StationDialog):
         values_hint.setObjectName("muted")
         layout.addWidget(values_hint)
         self.values_scroll = ScrollArea(surface)
+        self.values_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.values_scroll.setWidgetResizable(True)
         self.values_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -227,6 +228,7 @@ class ManualSpectrumSaveDialog(StationDialog):
             values_layout.addWidget(empty)
         values_layout.addStretch(1)
         self.values_scroll.setWidget(values_host)
+        self.values_scroll.enableTransparentBackground()
         self.values_scroll.setMinimumHeight(160)
         layout.addWidget(self.values_scroll, 1)
 
@@ -283,7 +285,7 @@ class ManualSpectrumSaveDialog(StationDialog):
 
     def _metadata_scope_changed(self, *_args: object) -> None:
         scope = str(self.metadata_scope.currentData() or "none")
-        for key, checkbox in self._metadata_checks.items():
+        for checkbox in self._metadata_checks.values():
             if scope == "all":
                 checkbox.setChecked(True)
                 checkbox.setEnabled(False)
@@ -306,6 +308,8 @@ class ManualSpectrumSaveDialog(StationDialog):
                 "eLab upload is enabled. The local result will be timestamped and closed "
                 "before the background upload starts."
             )
+        else:
+            self.elab_upload_hint.setText(self._default_elab_upload_hint)
 
     def _elab_mode_changed(self, _index: int) -> None:
         if self.upload_to_elab.isChecked() and self.mode.currentData() == ManualSpectrumSaveMode.APPEND.value:

@@ -5,9 +5,16 @@ from math import ceil
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -38,6 +45,8 @@ class BackgroundAveragingControls(QWidget):
         layout.setColumnStretch(1, 1)
         self.backend = ComboBox(self)
         self.backend.setAccessibleName("Background averaging source")
+        self.backend.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.backend.setMinimumWidth(110)
         self.backend.addItem("PC · record individual sweeps", userData="pc")
         self.target = None
         if allow_instrument:
@@ -58,12 +67,15 @@ class BackgroundAveragingControls(QWidget):
             self.backend.hide()
         self.duration = duration
         self.duration.setAccessibleName("Minimum background collection time")
+        self.duration.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.duration.setMinimumWidth(90)
         self.duration_label = BodyLabel("Duration", self)
         layout.addWidget(self.duration_label, 2, 0)
         layout.addWidget(self.duration, 2, 1)
         self.minimum_sweeps = minimum_sweeps
         self.detail = CaptionLabel(self)
         self.detail.setWordWrap(True)
+        self.detail.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(self.detail, 3, 0, 1, 2)
         self.backend.currentIndexChanged.connect(self._update_fields)
         self._update_fields()
@@ -114,15 +126,19 @@ class BackgroundCorrectionAssistant(StationDialog):
         scroll = ScrollArea(self)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content = QWidget()
         fields = QVBoxLayout(content)
-        fields.setContentsMargins(4, 4, 4, 4)
+        fields.setContentsMargins(4, 4, 12, 4)
         fields.setSpacing(10)
         explanation = BodyLabel(self._record_instructions(), content)
         explanation.setWordWrap(True)
+        explanation.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.explanation = explanation
         self.background_source = ComboBox(content)
         self.background_source.setAccessibleName("Background source")
+        self.background_source.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.background_source.setMinimumWidth(120)
         self.background_source.addItem("Record a new background", userData="record")
         self.background_source.addItem("Load a saved background", userData="load")
         fields.addWidget(BodyLabel("Background source", content))
@@ -167,13 +183,21 @@ class BackgroundCorrectionAssistant(StationDialog):
              "background uncertainty, but cannot remove noise in a single measurement frame. "
              "Averaging does not remove drifting interference lines."), content)
         self.record_note.setWordWrap(True)
+        self.record_note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         fields.addWidget(self.record_note)
-        archive_note = CaptionLabel(f"Raw spectra and background will be saved automatically in:\n{directory}", content)
+        archive_folder = directory.name or str(directory)
+        archive_note = CaptionLabel(
+            f"Raw spectra and background will be saved automatically in folder: {archive_folder}",
+            content,
+        )
+        archive_note.setToolTip(str(directory))
         archive_note.setWordWrap(True)
+        archive_note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         fields.addWidget(archive_note)
         self.archive_note = archive_note
         fields.addStretch()
         scroll.setWidget(content)
+        scroll.enableTransparentBackground()
         root.addWidget(scroll, 1)
         self.form = content
         self.activity = IndeterminateProgressBar(self)
@@ -183,10 +207,12 @@ class BackgroundCorrectionAssistant(StationDialog):
         self.status.setWordWrap(True)
         root.addWidget(self.status)
         actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addStretch(1)
         self.cancel = PushButton("Cancel", self)
         self.next = PrimaryPushButton("Record background", self)
         actions.addWidget(self.cancel)
-        actions.addWidget(self.next, 1)
+        actions.addWidget(self.next)
         root.addLayout(actions)
         self.cancel.clicked.connect(self.reject)
         self.next.clicked.connect(self._advance)
@@ -299,8 +325,10 @@ class BackgroundCorrectionAssistant(StationDialog):
                             else "The saved background is used as a display filter. Start Live from the main window.")
         else:
             contents = "The instrument mean" if self.background_averaging.uses_instrument else "Raw spectra and background"
-            archive_note = f"{contents} will be saved automatically in:\n{self.directory}"
+            archive_folder = self.directory.name or str(self.directory)
+            archive_note = f"{contents} will be saved automatically in folder: {archive_folder}"
         self.archive_note.setText(archive_note)
+        self.archive_note.setToolTip("" if loading else str(self.directory))
         self.next.setText("Load background" if loading else "Record background")
         self.next.setEnabled(bool(self.profile_path.text().strip()) if loading else self.record_available)
         self.status.setText("Choose a saved background. Its age and analyzer settings are checked before correction."
@@ -375,7 +403,8 @@ class BackgroundCorrectionAssistant(StationDialog):
 
     def _cancel_work(self):
         self._prepare_timeout.stop()
-        self.phase = "cancelled"
+        self._ready_timer.stop()
+        self.phase = "canceled"
         if self._owns_recording and self.workspace.running:
             self.workspace.stop_acquisition()
         self._owns_recording = False
@@ -395,4 +424,7 @@ class BackgroundCorrectionAssistant(StationDialog):
             (self.workspace.profile_load_finished, self._profile_loaded),
             (self.workspace.status_changed, self._status_changed),
         ):
-            signal.disconnect(slot)
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass

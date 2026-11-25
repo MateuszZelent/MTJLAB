@@ -10,13 +10,14 @@ as dBm.
 from __future__ import annotations
 
 import math
-from itertools import groupby
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import Sequence
+from itertools import groupby
 
 import numpy as np
 
 from app.domain.spectrum_correction import BackgroundProfile, SpectrumAcquisitionContext
+
 from .processing import frequency_grids_match
 from .streaming_statistics import dbm_to_w
 
@@ -45,23 +46,45 @@ class SpectrumAnalysisParameters:
     peak_measure_filtered: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.denoise_window) is not int or self.denoise_window < 3:
+            raise ValueError("Denoise window must be an integer of at least 3 bins.")
+        if isinstance(self.emi_threshold_db, bool) or not math.isfinite(self.emi_threshold_db) or self.emi_threshold_db <= 0:
+            raise ValueError("EMI elevation threshold must be a positive finite dB value.")
+        if isinstance(self.emi_max_std_db, bool) or not math.isfinite(self.emi_max_std_db) or self.emi_max_std_db < 0:
+            raise ValueError("EMI maximum temporal variation must be a finite nonnegative dB value.")
+        if type(self.emi_min_frames) is not int or self.emi_min_frames < 2:
+            raise ValueError("EMI minimum history frames must be an integer of at least 2.")
+        if isinstance(self.peak_min_snr_db, bool) or not math.isfinite(self.peak_min_snr_db) or self.peak_min_snr_db < 0:
+            raise ValueError("Peak minimum SNR must be a finite nonnegative dB value.")
+        if isinstance(self.peak_min_prominence_db, bool) or not math.isfinite(self.peak_min_prominence_db) or self.peak_min_prominence_db < 0:
+            raise ValueError("Peak minimum prominence must be a finite nonnegative dB value.")
+        if type(self.peak_max_count) is not int or self.peak_max_count < 1:
+            raise ValueError("Maximum peak count must be a positive integer.")
+        if not isinstance(self.peak_fit_models, bool):
+            raise TypeError("peak_fit_models must be a boolean.")
+        if isinstance(self.narrow_max_width_hz, bool) or not math.isfinite(self.narrow_max_width_hz) or self.narrow_max_width_hz <= 0:
+            raise ValueError("Maximum narrow-peak width must be a positive finite frequency.")
+        if isinstance(self.narrow_threshold_sigma, bool) or not math.isfinite(self.narrow_threshold_sigma) or not 3.0 <= self.narrow_threshold_sigma <= 30.0:
+            raise ValueError("Narrow-peak threshold must be between 3 and 30 noise scales.")
         if type(self.temporal_average_frames) is not int or not 1 <= self.temporal_average_frames <= 64:
             raise ValueError("Power averaging requires 1 to 64 received frames.")
-        if not math.isfinite(self.temporal_max_gap_s) or self.temporal_max_gap_s <= 0:
+        if isinstance(self.temporal_max_gap_s, bool) or not math.isfinite(self.temporal_max_gap_s) or self.temporal_max_gap_s <= 0:
             raise ValueError("Averaging reset gap must be a positive finite time.")
+        if not isinstance(self.peak_measure_filtered, bool):
+            raise TypeError("peak_measure_filtered must be a boolean.")
         if len(self.narrow_protected_regions_hz) > 32 or any(
             not (math.isfinite(low) and math.isfinite(high) and 0 <= low < high)
             for low, high in self.narrow_protected_regions_hz
         ):
             raise ValueError("Provide at most 32 ordered, finite protected frequency bands.")
         widths = (self.peak_min_width_hz, self.peak_max_width_hz, self.peak_min_distance_hz)
-        if any(not math.isfinite(value) or value < 0 for value in widths):
+        if any(isinstance(value, bool) or not math.isfinite(value) or value < 0 for value in widths):
             raise ValueError("Peak widths and separation must be finite nonnegative frequencies.")
         if self.peak_max_width_hz and self.peak_max_width_hz < self.peak_min_width_hz:
             raise ValueError("Maximum peak width must be at least the minimum width.")
         if self.peak_polarity not in {"positive", "negative", "both"}:
             raise ValueError("Unsupported peak polarity.")
-        if any(not math.isfinite(value) or value <= 0
+        if any(isinstance(value, bool) or not math.isfinite(value) or value <= 0
                for value in (self.peak_min_snr_sigma, self.peak_min_prominence_sigma)):
             raise ValueError("Linear peak thresholds must be positive finite noise multiples.")
 
@@ -176,56 +199,44 @@ def bilateral_denoise_linear(values: Sequence[float], *, window: int = 9) -> tup
 
 
 def rolling_noise_floor_dbm(values_dbm: Sequence[float], *, window: int = 51) -> np.ndarray:
-    values = np.asarray(values_dbm, dtype=float)
+    values = np.asarray(values_dbm, dtype=np.float64)
     if values.ndim != 1 or values.size < 5 or not np.all(np.isfinite(values)):
         raise ValueError("Noise-floor estimation requires at least five finite dBm values.")
     width = _odd_window(values.size, window)
+    from scipy.ndimage import rank_filter
+
+    # Exact linear interpolation of the 30th percentile matching np.percentile
+    # over nearest-edge padded odd windows, executed in C without holding the GIL.
+    lower, remainder = divmod((width - 1) * 3, 10)
+    if remainder == 0:
+        return rank_filter(values, rank=lower, size=width, mode="nearest")
+    left = rank_filter(values, rank=lower, size=width, mode="nearest")
+    right = rank_filter(values, rank=lower + 1, size=width, mode="nearest")
+    fraction = remainder / 10.0
+    difference = right - left
+    if remainder >= 5:
+        return right - difference * (1.0 - fraction)
+    return left + difference * fraction
+
+
+def _bilateral_denoise_dbm_array(values_dbm: Sequence[float], *, window: int = 9) -> np.ndarray:
+    """Internal NumPy-returning bilateral smoothing in dB."""
+
+    values = np.asarray(values_dbm, dtype=np.float64)
+    if values.ndim != 1 or values.size < 5 or not np.all(np.isfinite(values)):
+        raise ValueError("Denoising requires at least five finite dBm values.")
+    width = _odd_window(values.size, int(window))
     radius = width // 2
     padded = np.pad(values, radius, mode="edge")
-    if width <= 63:
-        frames = np.lib.stride_tricks.sliding_window_view(padded, width)
-        return np.percentile(frames, 30.0, axis=1)
-    # Coordinate-compressed order statistics avoid an N × window temporary
-    # and rescanning a window proportional to N for every frequency bin.
-    levels, ranks = np.unique(padded, return_inverse=True)
-    counts = np.bincount(ranks[:width], minlength=levels.size)
-    tree = [0, *counts.tolist()]
-    for index in range(1, len(tree)):
-        parent = index + (index & -index)
-        if parent < len(tree):
-            tree[parent] += tree[index]
-
-    def update(rank, delta):
-        index = int(rank) + 1
-        while index < len(tree):
-            tree[index] += delta
-            index += index & -index
-
-    highest_bit = 1 << (len(tree).bit_length() - 1)
-
-    def select(rank):
-        index, bit = 0, highest_bit
-        while bit:
-            candidate = index + bit
-            if candidate < len(tree) and tree[candidate] <= rank:
-                rank -= tree[candidate]
-                index = candidate
-            bit >>= 1
-        return levels[index]
-
-    position = (width - 1) * .30
-    lower, upper = math.floor(position), math.ceil(position)
-    fraction = position - lower
-    result = np.empty(values.size, dtype=float)
-    for index in range(values.size):
-        left, right = select(lower), select(upper)
-        difference = right - left
-        result[index] = (right - difference * (1 - fraction) if fraction >= .5
-                         else left + difference * fraction)
-        if index + 1 < values.size:
-            update(ranks[index], -1)
-            update(ranks[index + width], 1)
-    return result
+    frames = np.lib.stride_tricks.sliding_window_view(padded, width)
+    spatial_positions = np.arange(-radius, radius + 1, dtype=np.float64)
+    spatial_sigma = max(radius / 1.8, 1.0)
+    spatial_weights = np.exp(-0.5 * (spatial_positions / spatial_sigma) ** 2)
+    noise_sigma = robust_noise_sigma_db(values)
+    range_sigma = max(2.5 * noise_sigma, 0.35)
+    range_weights = np.exp(-0.5 * ((frames - values[:, None]) / range_sigma) ** 2)
+    weights = range_weights * spatial_weights[None, :]
+    return np.sum(weights * frames, axis=1) / np.maximum(np.sum(weights, axis=1), 1e-15)
 
 
 def bilateral_denoise_dbm(
@@ -233,22 +244,7 @@ def bilateral_denoise_dbm(
 ) -> tuple[float, ...]:
     """Edge-preserving smoothing in dB; strong narrow peaks retain their height."""
 
-    values = np.asarray(values_dbm, dtype=float)
-    if values.ndim != 1 or values.size < 5 or not np.all(np.isfinite(values)):
-        raise ValueError("Denoising requires at least five finite dBm values.")
-    width = _odd_window(values.size, int(window))
-    radius = width // 2
-    padded = np.pad(values, radius, mode="edge")
-    frames = np.lib.stride_tricks.sliding_window_view(padded, width)
-    spatial_positions = np.arange(-radius, radius + 1, dtype=float)
-    spatial_sigma = max(radius / 1.8, 1.0)
-    spatial_weights = np.exp(-0.5 * (spatial_positions / spatial_sigma) ** 2)
-    noise_sigma = robust_noise_sigma_db(values)
-    range_sigma = max(2.5 * noise_sigma, 0.35)
-    range_weights = np.exp(-0.5 * ((frames - values[:, None]) / range_sigma) ** 2)
-    weights = range_weights * spatial_weights[None, :]
-    filtered = np.sum(weights * frames, axis=1) / np.maximum(np.sum(weights, axis=1), 1e-15)
-    return tuple(float(value) for value in filtered)
+    return tuple(_bilateral_denoise_dbm_array(values_dbm, window=window).tolist())
 
 
 def _gaussian_detection_trace(values_dbm: np.ndarray) -> np.ndarray:
@@ -380,7 +376,11 @@ def clean_spectrum_values(
         cleaned = suppress_stationary_lines_dbm(values, interference)
         method = "Conservative stationary-line rejection (display only)"
     elif mode == "auto_clean":
-        denoised = bilateral_denoise_dbm(values, window=params.denoise_window)
+        denoised = (
+            bilateral_denoise_linear(values, window=params.denoise_window)
+            if linear
+            else bilateral_denoise_dbm(values, window=params.denoise_window)
+        )
         cleaned = suppress_stationary_lines_dbm(denoised, interference)
         method = "Bilateral denoise + stationary-line rejection (display only)"
     else:
@@ -556,14 +556,23 @@ def _fit_peak_shape(
     values_dbm: np.ndarray,
     index: int,
     measured_fwhm_hz: float | None,
+    *,
+    spacing: float | None = None,
 ) -> tuple[str, float | None, float | None, float | None]:
-    spacing = float(np.median(np.diff(frequencies)))
-    half_points = min(50, max(5, int(round((measured_fwhm_hz or spacing * 4) / spacing * 2))))
+    if spacing is None:
+        spacing = float(np.median(np.diff(frequencies)))
+    half_points = min(50, max(5, round((measured_fwhm_hz or spacing * 4) / spacing * 2)))
     start, stop = max(0, index - half_points), min(values_dbm.size, index + half_points + 1)
     x = frequencies[start:stop]
-    y_mw = 10.0 ** (values_dbm[start:stop] / 10.0)
     if x.size < 7:
         return "none", None, None, None
+    # Shift by the window peak before exponentiating and clamp the exponent so
+    # extreme dBm values never overflow or underflow float64; the constant shift
+    # cancels identically in the dB residual.
+    window_dbm = values_dbm[start:stop]
+    shift_db = float(np.max(window_dbm))
+    exponents = np.clip((window_dbm - shift_db) / 10.0, -300.0, 300.0)
+    y_rel = 10.0 ** exponents
     initial_width = max(measured_fwhm_hz or spacing * 3.0, spacing * 1.25)
     minimum_width = max(spacing, initial_width / 4.0)
     maximum_width = max(
@@ -577,32 +586,45 @@ def _fit_peak_shape(
     )
     centers = frequencies[index] + np.linspace(-center_span, center_span, 21)
     best: tuple[float, str, float, float] | None = None
-    normalized = (x[None, None, :] - centers[:, None, None]) / widths[None, :, None]
-    measured_dbm = 10.0 * np.log10(np.maximum(y_mw, 1e-300))
+    dx_sq = (x[None, :] - centers[:, None]) ** 2
+    inv_w_sq = 1.0 / (widths ** 2)
+    normalized_sq = (dx_sq[:, None, :] * inv_w_sq[None, :, None]).reshape(-1, x.size)
+    measured_db = 10.0 * np.log10(np.maximum(y_rel, 1e-300))
+    y_mean = float(np.mean(y_rel))
+    dy = y_rel - y_mean
+    var_tol = (max(x.size, 2) * np.finfo(float).eps) ** 2 * x.size
     for model in ("Gaussian", "Lorentzian"):
         shape = (
-            np.exp(-4.0 * math.log(2.0) * normalized**2)
+            np.exp((-4.0 * math.log(2.0)) * normalized_sq)
             if model == "Gaussian"
-            else 1.0 / (1.0 + 4.0 * normalized**2)
-        ).reshape(-1, x.size)
-        # Evaluate the same center/width grid with batched SVD. The window is
-        # bounded to 101 samples, independent of the full spectrum length.
-        # Match lstsq(rcond=None)'s singular-value cutoff rather than forming
-        # less stable normal equations for the two regression coefficients.
-        design = np.stack((np.ones_like(shape), shape), axis=-1)
-        inverse = np.linalg.pinv(design, rcond=max(x.size, 2) * np.finfo(float).eps)
-        coefficients = inverse @ y_mw
-        baseline, amplitude = coefficients[:, 0], coefficients[:, 1]
-        eligible = (baseline >= 0) & (amplitude > 0)
+            else 1.0 / (1.0 + 4.0 * normalized_sq)
+        )
+        # Closed-form centered 2-parameter OLS for [1, shape]:
+        # amplitude = cov(shape, y) / var(shape), baseline = mean(y) - amplitude * mean(shape).
+        s_mean = np.mean(shape, axis=1)
+        ds = shape - s_mean[:, None]
+        var_s = np.einsum("ij,ij->i", ds, ds)
+        valid_var = var_s > var_tol
+        if not np.any(valid_var):
+            continue
+        cov_sy = ds @ dy
+        amplitude = np.where(valid_var, cov_sy / np.where(valid_var, var_s, 1.0), 0.0)
+        baseline = y_mean - amplitude * s_mean
+        eligible = valid_var & (baseline >= 0.0) & (amplitude > 0.0)
         if not np.any(eligible):
             continue
-        predicted_mw = np.maximum(baseline[:, None] + amplitude[:, None] * shape, 1e-300)
-        residual = 10.0 * np.log10(predicted_mw) - measured_dbm
+        eligible_indices = np.flatnonzero(eligible)
+        predicted_rel = np.maximum(
+            baseline[eligible_indices, None]
+            + amplitude[eligible_indices, None] * shape[eligible_indices],
+            1e-300,
+        )
+        residual = 10.0 * np.log10(predicted_rel) - measured_db
         errors = np.sqrt(np.mean(residual**2, axis=1))
-        errors[~eligible] = np.inf
-        winner = int(np.argmin(errors))
-        rmse = float(errors[winner])
+        local_winner = int(np.argmin(errors))
+        rmse = float(errors[local_winner])
         if best is None or rmse < best[0]:
+            winner = int(eligible_indices[local_winner])
             center_index, width_index = divmod(winner, widths.size)
             best = (rmse, model, float(centers[center_index]), float(widths[width_index]))
     if best is None:
@@ -688,11 +710,12 @@ def detect_spectrum_peaks(
         max_peaks = parameters.peak_max_count
         fit = parameters.peak_fit_models
     frequencies, values = _finite_vectors(frequencies_hz, values_dbm)
+    descending = bool(float(frequencies_hz[0]) > float(frequencies_hz[-1]))
     if unit not in {"dBm", "dB"}:
         return _detect_linear_peaks(frequencies, values, parameters or SpectrumAnalysisParameters(
-            peak_max_count=max_peaks), unit, frequencies_hz[0] > frequencies_hz[-1])
+            peak_max_count=max_peaks), unit, descending)
     detection_values = _gaussian_detection_trace(
-        np.asarray(bilateral_denoise_dbm(values, window=11), dtype=float)
+        _bilateral_denoise_dbm_array(values, window=11)
     )
     floor_window = _odd_window(values.size, max(51, values.size // 5))
     floor = rolling_noise_floor_dbm(detection_values, window=floor_window)
@@ -784,11 +807,12 @@ def detect_spectrum_peaks(
         if not fit or unit != "dBm":
             yield from measured
             return
+        spacing = float(np.median(np.diff(frequencies)))
         for _key, group in groupby(measured, key=lambda p: (p.snr_db, p.prominence_db)):
             fitted = []
             for peak in group:
                 model, center, width, rmse = _fit_peak_shape(
-                    frequencies, values, peak.index, peak.fwhm_hz
+                    frequencies, values, peak.index, peak.fwhm_hz, spacing=spacing
                 )
                 effective_center = center if center is not None else peak.frequency_hz
                 effective_width = width if width is not None else peak.fwhm_hz
@@ -818,4 +842,7 @@ def detect_spectrum_peaks(
         accepted.append(peak)
         if len(accepted) >= max(1, int(max_peaks)):
             break
+    if descending:
+        last_index = values.size - 1
+        return tuple(replace(peak, index=last_index - peak.index) for peak in accepted)
     return tuple(accepted)

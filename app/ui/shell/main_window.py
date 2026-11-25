@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from collections import deque
+from collections.abc import Callable, Iterator, Mapping
+from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from PySide6.QtCore import QSettings, QSignalBlocker, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QSettings, QSignalBlocker, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -16,8 +17,8 @@ from PySide6.QtGui import (
     QColor,
     QKeySequence,
     QPalette,
-    QShortcut,
     QResizeEvent,
+    QShortcut,
     QShowEvent,
 )
 from PySide6.QtWidgets import (
@@ -47,22 +48,11 @@ from qfluentwidgets import (
     qrouter,
 )
 from qfluentwidgets.common.style_sheet import styleSheetManager
+from shiboken6 import isValid
 
 from app.audit import AuditLogger
 from app.bootstrap import StationComposition
 from app.contracts import ExecutionTelemetryView
-from app.domain.errors import AuthorizationError, ConfigurationError, SafetyViolation
-from app.domain.manual_metadata import ManualMetadataValue
-from app.domain.quantities import (
-    DIMENSION_CURRENT,
-    DIMENSION_FREQUENCY,
-    DIMENSION_POWER,
-    DIMENSION_RESISTANCE,
-    DIMENSION_TIME,
-    DIMENSION_VOLTAGE,
-    format_quantity_auto,
-    parse_quantity,
-)
 from app.devices.anritsu_ms2830a import (
     AdvancedSpectrumSnapshot,
     AnritsuConfigurationSnapshot,
@@ -72,30 +62,39 @@ from app.devices.keithley_2600.settings_defaults import (
     validate_keithley_default_snapshots,
 )
 from app.devices.simulators import simulated_station_settings
-from shiboken6 import isValid
+from app.domain.errors import AuthorizationError, ConfigurationError, SafetyViolation
+from app.domain.manual_metadata import ManualMetadataValue
+from app.domain.quantities import (
+    DIMENSION_CURRENT,
+    DIMENSION_FREQUENCY,
+    DIMENSION_POWER,
+    DIMENSION_RESISTANCE,
+    DIMENSION_TIME,
+    DIMENSION_VOLTAGE,
+    QuantityError,
+    format_quantity_auto,
+    parse_quantity,
+)
 from app.engine.estimation import PlanEstimator
 from app.engine.runner import ExecutionMode
 from app.inventory import ActiveSampleTarget, InventoryStore, SampleRunRecord
 from app.platform.paths import default_catalogue_root
-from app.settings import SettingsRepository
-from app.settings.models import StationSettings
-from app.settings.validation import format_settings_validation_error
-from app.security import AccessPolicy, Permission
 from app.safety.keithley_limit_reconciliation import (
     propose_keithley_limit_adjustments,
 )
-from app.ui.settings_page import SettingsPage
-from app.ui.settings_guidance import SettingsIssue, settings_issue_for_error
-from app.ui.dialogs import SweepDeviceReadinessDialog, StationMessageBox as QMessageBox
-from app.ui.moke_address_dialog import MokeAddressDialog
-from app.ui.settings_workers import KeithleyDefaultsSaveWorker
-from app.ui.run_worker import RunController, serialize_settings_snapshot
-from app.ui.dashboard import StationDashboardController, DeviceConnectionPanel
-from app.ui.elab import ElabPage
-from app.ui.inventory import SampleInventoryPage
-from app.ui.execution import RunMonitorPage
-from app.ui.results import HeatmapResultsTab, ResultsPage
+from app.security import AccessPolicy, Permission
+from app.settings import SettingsRepository
+from app.settings.models import StationSettings
+from app.settings.validation import format_settings_validation_error
+from app.ui.dashboard import DeviceConnectionPanel, StationDashboardController
 from app.ui.design_system import apply_application_theme, effective_theme
+from app.ui.dialogs import StationMessageBox as QMessageBox
+from app.ui.dialogs import SweepDeviceReadinessDialog
+from app.ui.elab import ElabPage
+from app.ui.execution import RunMonitorPage
+from app.ui.inventory import SampleInventoryPage
+from app.ui.moke_address_dialog import MokeAddressDialog
+from app.ui.quick_controls import QuickControlCoordinator, QuickControlsWindow
 from app.ui.recipes import DeviceParameterDialog, SweepGeneratorDialog  # noqa: F401
 from app.ui.recipes.page import (  # noqa: F401
     AnritsuAcquisitionEditorDialog,
@@ -105,8 +104,13 @@ from app.ui.recipes.page import (  # noqa: F401
     RecipePage,
     SweepLibraryButton,
 )
-from app.ui.shell.page_host import FluentPageHost
+from app.ui.results import HeatmapResultsTab, ResultsPage
+from app.ui.run_worker import RunController, serialize_settings_snapshot
+from app.ui.settings_guidance import SettingsIssue, settings_issue_for_error
+from app.ui.settings_page import SettingsPage
+from app.ui.settings_workers import KeithleyDefaultsSaveWorker
 from app.ui.shell.navigation import StationNavigationTreeWidget
+from app.ui.shell.page_host import FluentPageHost
 from app.ui.shell.safety_strip import StationSafetySnapshot, StationSafetyStrip
 from app.ui.widgets import (
     KeithleyLimitProposalDialog,
@@ -115,8 +119,61 @@ from app.ui.widgets import (
     SpectrumPlotWidget,
     show_toast,
 )
-from app.ui.quick_controls import QuickControlCoordinator, QuickControlsWindow
 from app.ui.workers import DeviceController
+
+
+class _BufferedEventLogEdit(PlainTextEdit):
+    """PlainTextEdit that flushes batched UI log lines before synchronous reads."""
+
+    def __init__(self, flush_callback: Callable[[], None], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._flush_callback = flush_callback
+
+    def toPlainText(self) -> str:
+        self._flush_callback()
+        return super().toPlainText()
+
+
+class _ClosedPageStub:
+    """No-op placeholder returned for unrealized lazy pages after MainWindow closes."""
+
+    def prepare_manual_archive_shutdown(self) -> bool:
+        return True
+
+    def shutdown_analysis(self) -> bool:
+        return True
+
+    def shutdown(self) -> bool:
+        return True
+
+    def confirm_close(self) -> bool:
+        return True
+
+    def cancel_preflight(self) -> bool:
+        return True
+
+    def __getattr__(self, _name: str) -> Any:
+        return lambda *_args, **_kwargs: True
+
+
+class _LazyDevicePages(Mapping[str, QWidget]):
+    """Transparent mapping that realizes device pages only when accessed."""
+
+    _KEYS = ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter")
+
+    def __init__(self, window: MainWindow) -> None:
+        self._window = window
+
+    def __getitem__(self, key: str) -> QWidget:
+        if key not in self._KEYS:
+            raise KeyError(key)
+        return self._window._ensure_device_page(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._KEYS)
+
+    def __len__(self) -> int:
+        return len(self._KEYS)
 
 
 class MainWindow(FluentWindow):
@@ -134,6 +191,7 @@ class MainWindow(FluentWindow):
     ) -> None:
         super().__init__()
         self._repository = SettingsRepository(settings_path)
+        self._closed = False
         self._simulation = simulation
         self._run_upload_to_elab_requested = False
         self._run_elab_upload_config: dict[str, Any] | None = None
@@ -306,11 +364,10 @@ class MainWindow(FluentWindow):
         content_layout.addWidget(self.shell_splitter, 1)
         self.widgetLayout.addWidget(self.fluent_content)
         self.navigationInterface.setExpandWidth(248)
-        # Below the standard Fluent breakpoint the compact 48 px rail leaves
-        # measurement pages enough width to preserve their control hierarchy.
-        # The full panel becomes a temporary MENU overlay only when the operator
-        # explicitly opens it; it must not consume 248 px at the 820 px minimum.
-        self._navigation_expand_threshold = 1_008
+        # Below 1220 px the compact 48 px rail leaves measurement pages enough
+        # horizontal width (e.g. 1024x700 keeps ~950 px content and a single-row
+        # StationSafetyStrip) to preserve their control hierarchy.
+        self._navigation_expand_threshold = 1_220
         self.navigationInterface.setMinimumExpandWidth(self._navigation_expand_threshold)
 
         registry = self._composition.registry
@@ -320,42 +377,21 @@ class MainWindow(FluentWindow):
             parent=self,
             discovery_enabled=not self._simulation,
         )
-        self._device_pages = {
-            key: self._composition.registry.get(key).create_page(
-                self._controllers[key], self._settings
-            )
-            for key in ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter")
-        }
-        self.rigol_page = self._device_pages["rigol"]
-        self.keithley_page = self._device_pages["keithley"]
-        self.keithley_characterization_page = self.keithley_page.characterization_card
-        self.keithley_page.characterization_requested.connect(
-            lambda: self._navigate_to("keithley_characterization")
-        )
-        self.anritsu_page = self._device_pages["anritsu"]
-        self.anritsu_page.correction_workspace.set_simulation_mode(self._simulation)
-        self.moke_box_page = self._device_pages["moke_box"]
-        self.lakeshore_gaussmeter_page = self._device_pages["lakeshore_gaussmeter"]
-        self.moke_box_page.field_workflow.bind_reference(
-            self._controllers["lakeshore_gaussmeter"], simulation=self._simulation,
-            authorize=self._authorize_moke_workflow,
-            pause_live=lambda: (
-                self.moke_box_page.stop_live("Live Hall paused for field control/calibration."),
-                self.lakeshore_gaussmeter_page.stop_live("Live reference paused for field calibration."),
-            ),
-        )
-        self.moke_box_page.field_workflow.busy_changed.connect(lambda _busy: self._refresh_safety_strip())
-        self.anritsu_page.set_manual_archive_context(
-            metadata_provider=self._manual_spectrum_metadata_values,
-            device_idn_provider=self._manual_spectrum_device_idn,
-            settings_source_provider=lambda: serialize_settings_snapshot(
-                self._settings,
-                self._repository.path,
-                simulation=self._simulation,
-            ),
-            operator_context_provider=lambda: self._access.identity.as_context(),
-            simulation=self._simulation,
-        )
+        self._realized_device_pages: dict[str, QWidget] = {}
+        self._device_pages = _LazyDevicePages(self)
+        self._keithley_characterization_page: Any = None
+        self._recipe_page: Any = None
+        self._run_monitor: Any = None
+        self._prepared_execution: tuple[object, bool, str, str, str] | None = None
+        self._results_page: Any = None
+        self._inventory_page: Any = None
+        self._elab_page: Any = None
+        self._settings_page: Any = None
+        self._last_device_capabilities: dict[str, object] = {}
+        self._saved_anritsu_splitter: object = None
+        self._last_selected_result_path: object = None
+        self._building_routes: set[str] = set()
+        self._execution_read_only_locked = False
         self._run_read_only_controls: dict[QWidget, bool] = {}
         self._pending_execution_previews: dict[str, dict[str, object]] = {}
         self._execution_preview_timer = QTimer(self)
@@ -398,6 +434,10 @@ class MainWindow(FluentWindow):
         self._execution_event_timer.timeout.connect(
             lambda: self._drain_execution_events(limit=self._execution_event_drain_batch)
         )
+        self._resize_sync_timer = QTimer(self)
+        self._resize_sync_timer.setSingleShot(True)
+        self._resize_sync_timer.setInterval(0)
+        self._resize_sync_timer.timeout.connect(self._flush_resize_layout)
         self.quick_control_coordinator = QuickControlCoordinator(
             self._controllers, self, settings=self._settings
         )
@@ -414,240 +454,12 @@ class MainWindow(FluentWindow):
             ),
         )
         self.quick_controls_window = QuickControlsWindow(self.quick_control_coordinator, self)
-        self.quick_control_coordinator.bind_moke_workflow(self.moke_box_page.field_workflow)
         self.quick_controls_window.restore_workspace()
         self.quick_controls_window.output_requested.connect(self._request_quick_control_output)
         self.quick_controls_window.output_group_requested.connect(
             self._request_quick_control_output_group
         )
-        self.rigol_page.output_state_changed.connect(
-            lambda channel, state: self.quick_controls_window.set_output_state(
-                "rigol", channel, state
-            )
-        )
-        self.keithley_page.output_state_changed.connect(
-            lambda channel, state: self.quick_controls_window.set_output_state(
-                "keithley", channel, state
-            )
-        )
-
-        self.rigol_page.quick_control_draft_changed.connect(
-            lambda target, text: self.quick_control_coordinator.publish_draft(
-                target, text, source="device_card"
-            )
-        )
-        self.keithley_page.quick_control_draft_changed.connect(
-            lambda target, text: self.quick_control_coordinator.publish_draft(
-                target, text, source="device_card"
-            )
-        )
-        self.quick_control_coordinator.draft_changed.connect(
-            self.rigol_page.quick_control_draft_changed_from_coordinator
-        )
-        self.quick_control_coordinator.draft_changed.connect(
-            self.keithley_page.quick_control_draft_changed_from_coordinator
-        )
-        self.quick_control_coordinator.publish_draft_snapshot(
-            self.rigol_page.quick_control_draft_snapshot(),
-            source="device_card",
-            mark_dirty=False,
-        )
-        self.quick_control_coordinator.publish_draft_snapshot(
-            self.keithley_page.quick_control_draft_snapshot(),
-            source="device_card",
-            mark_dirty=False,
-        )
-
-        self.rigol_page.quick_setpoint_requested.connect(
-            lambda target, text: self.quick_control_coordinator.submit(target, text, live_only=True)
-        )
-        self.keithley_page.quick_setpoint_requested.connect(self.quick_control_coordinator.submit)
-        self.quick_control_coordinator.state_changed.connect(
-            self.rigol_page.quick_setpoint_state_changed
-        )
-        self.quick_control_coordinator.state_changed.connect(
-            self.keithley_page.quick_setpoint_state_changed
-        )
-        self.quick_control_coordinator.configuration_verified.connect(
-            self.rigol_page.quick_control_configuration_verified
-        )
-        self.quick_control_coordinator.configuration_verified.connect(
-            self.keithley_page.quick_control_configuration_verified
-        )
-        self.quick_control_coordinator.value_read.connect(self.rigol_page.quick_setpoint_value_read)
-        self.quick_control_coordinator.value_read.connect(
-            self.keithley_page.quick_setpoint_value_read
-        )
-        self.anritsu_page.quick_controls_requested.connect(self._show_quick_controls)
-        self.rigol_page.quick_controls_requested.connect(self._show_quick_controls)
-        self.keithley_page.quick_controls_requested.connect(self._show_quick_controls)
-        self.connection_panels: dict[str, DeviceConnectionPanel] = {}
-        for key, page in self._device_pages.items():
-            resource, backend = self._device_connection_details(self._settings, key)
-            panel = DeviceConnectionPanel(registry.get(key).display_name, resource)
-            panel.update_resource(resource, backend)
-            if key == "moke_box":
-                panel.test_button.setToolTip(
-                    "Open one TCP session, validate the documented VOUT response, then disconnect. "
-                    "No gain or VOUT-setting command is sent."
-                )
-            # Keithley keeps its compact device title/live controls as the
-            # page anchor; the single authoritative connection surface sits
-            # immediately below it. Other device pages retain their current
-            # connection-first composition.
-            page.layout().insertWidget(2 if key == "keithley" else 0, panel)
-            self.connection_panels[key] = panel
-        self.recipe_page = RecipePage(
-            self._settings,
-            device_registry=self._composition.registry,
-        )
-        self.recipe_page.set_keithley_snapshot_provider(
-            self.keithley_page.configuration_snapshot_for
-        )
-        self.recipe_page.set_rigol_snapshot_provider(
-            self.rigol_page.configuration_snapshot_for,
-            self.rigol_page.configuration_review_snapshot_for,
-        )
-        self.recipe_page.parameter_snapshot_provider = self.moke_box_page.field_workflow.quick_control_drafts
-        self.recipe_page.set_device_comparison_extras(
-            "moke_box", self.moke_box_page.field_workflow.configuration_comparison_values,
-        )
-        self.recipe_page.set_anritsu_snapshot_provider(
-            self.anritsu_page.configuration_panel.configuration_snapshot,
-            self.anritsu_page.advanced_settings_snapshot,
-        )
-        self.recipe_page.set_device_comparison_extras("anritsu", lambda _channel: {
-            "average_count": self.anritsu_page.average_count.value(),
-            "reference_average_count": self.anritsu_page.reference_average_count.value(),
-            "reference_operation": self.anritsu_page.reference_operation.currentData(),
-        })
-        self.recipe_page.set_anritsu_sg_snapshot_provider(
-            self.anritsu_page.signal_generator_snapshot
-        )
-        self.run_monitor = RunMonitorPage()
-        self.results_page = ResultsPage(
-            str(self._results_directory_for_target(self.inventory_store.get_active_target())
-                or self.inventory_store.catalogue_root),
-            catalogue_tree=True,
-        )
-        self.elab_page = ElabPage(
-            self._repository,
-            settings=self._settings,
-            env_path=Path(".env"),
-            simulation=self._simulation,
-        )
-        self.inventory_page = SampleInventoryPage(self.inventory_store, self)
-        self.inventory_page.catalogue_root_changed.connect(
-            self._persist_catalogue_root
-        )
-        self.inventory_page.active_target_changed.connect(self._on_active_sample_target_changed)
-        self.inventory_page.open_result_requested.connect(self._open_inventory_result)
-        self.recipe_page.change_target_requested.connect(lambda: self._navigate_to("inventory"))
-        self._bind_sweep_sample_target(self.inventory_store.get_active_target())
-        self.keithley_characterization_page.set_inventory_store(self.inventory_store)
-        self.inventory_page.active_target_changed.connect(
-            self.keithley_characterization_page.set_active_sample_target
-        )
-        self.inventory_page.samples_updated.connect(
-            self.keithley_characterization_page.refresh_samples_list
-        )
-        self.inventory_page.samples_updated.connect(self._refresh_results_catalogue)
-        self.keithley_characterization_page.active_target_changed.connect(
-            self._on_active_sample_target_changed
-        )
-        self.keithley_characterization_page.browse_samples_requested.connect(
-            lambda: self._navigate_to("inventory")
-        )
-        self.keithley_characterization_page.measurement_saved.connect(
-            lambda _sample_id: self.inventory_page.refresh_samples()
-        )
-        self.elab_page.upload_completed_record.connect(self._on_elab_upload_completed)
-        self.recipe_page.set_elab_context(
-            profile_provider=self.elab_page.current_profile,
-            credentials_provider=self.elab_page.current_credentials,
-            available_templates_provider=self.elab_page.available_templates,
-            refresh_templates_callback=self.elab_page.refresh_templates,
-            navigate_to_elab=lambda: self._navigate_to("elab"),
-        )
-        self.elab_page.configuration_changed.connect(self.recipe_page.sync_elab_context)
-        self.anritsu_page.set_manual_elab_context(
-            configuration_provider=self.elab_page.manual_upload_configuration,
-            upload_callback=self.elab_page.queue_manual_upload,
-        )
-        self._sync_elab_upload_controls()
-        self.settings_page = SettingsPage(
-            self._repository,
-            read_only=self._simulation,
-            access_policy=self._access,
-        )
         self.dashboard.set_assignment_allowed(self._access.allows(Permission.ASSIGN_VISA))
-        roles = ", ".join(sorted(role.value for role in self._access.identity.roles)) or "none"
-
-        def configure_limit_button(
-            field: LimitField,
-            *,
-            device: str,
-            fixed_instrument_range: bool = False,
-        ) -> bool:
-            if fixed_instrument_range:
-                enabled = False
-                reason = (
-                    "This range is fixed by the instrument and is not an editable "
-                    "laboratory safety limit."
-                )
-            elif self._simulation:
-                enabled = False
-                reason = (
-                    "Safety-limit editing is disabled in simulation mode. "
-                    "Open the hardware station settings to edit configured limits."
-                )
-            elif not self._access.allows(Permission.EDIT_SETTINGS):
-                enabled = False
-                reason = (
-                    f"Access denied: current role(s) {roles} do not include "
-                    "EDIT_SETTINGS. Use an engineer or service account."
-                )
-            else:
-                enabled = True
-                reason = "Edit this safety range. Values are validated before saving."
-            field.edit_button.setEnabled(enabled)
-            field.edit_button.setToolTip(reason)
-            field.edit_button.setAccessibleName(f"Edit {device} safety limits")
-            field.edit_button.setAccessibleDescription(reason)
-            if hasattr(field, "range_pill"):
-                if not enabled or not field.edit_button.isVisible():
-                    field.range_pill.setCursor(Qt.CursorShape.ArrowCursor)
-                    field.range_pill.setToolTip(reason)
-                else:
-                    field.range_pill.setCursor(Qt.CursorShape.PointingHandCursor)
-                    field.range_pill.setToolTip(
-                        f"Configured {device} safety envelope. Click to edit laboratory safety limits."
-                    )
-            return enabled
-
-        for field in self.rigol_page.findChildren(LimitField):
-            configure_limit_button(field, device="Rigol")
-            field.edit_requested.connect(
-                lambda field=field: self._edit_device_limit("rigol", field)
-            )
-        keithley_fields = set(self.keithley_page.findChildren(LimitField))
-        if hasattr(self, "keithley_characterization_page") and self.keithley_characterization_page is not None:
-            keithley_fields.update(self.keithley_characterization_page.findChildren(LimitField))
-        for field in keithley_fields:
-            editable = configure_limit_button(
-                field,
-                device="Keithley",
-                fixed_instrument_range=(str(field.property("limitKey")) == "nplc"),
-            )
-            if editable:
-                field.edit_requested.connect(
-                    lambda field=field: self._edit_device_limit("keithley", field)
-                )
-        for field in self.anritsu_page.findChildren(LimitField):
-            configure_limit_button(field, device="Anritsu")
-            field.edit_requested.connect(
-                lambda field=field: self._edit_device_limit("anritsu", field)
-            )
         route_icons = {
             "overview": FluentIcon.HOME,
             "discovery": FluentIcon.SEARCH,
@@ -664,47 +476,24 @@ class MainWindow(FluentWindow):
             "elab": FluentIcon.GLOBE,
             "settings": FluentIcon.SETTING,
         }
-        route_specs = (
-            (self.dashboard.navigation_pages["overview"], "overview", "Overview"),
-            (self.dashboard.navigation_pages["discovery"], "discovery", "Discovery"),
-            (
-                self.rigol_page,
-                "rigol",
-                registry.get("rigol").display_name,
-            ),
-            (
-                self.keithley_page,
-                "keithley",
-                registry.get("keithley").display_name,
-            ),
-            (
-                self.keithley_characterization_page,
-                "keithley_characterization",
-                "Characterization",
-            ),
-            (
-                self.anritsu_page,
-                "anritsu",
-                registry.get("anritsu").display_name,
-            ),
-            (
-                self.moke_box_page,
-                "moke_box",
-                registry.get("moke_box").display_name,
-            ),
-            (
-                self.lakeshore_gaussmeter_page,
-                "lakeshore_gaussmeter",
-                registry.get("lakeshore_gaussmeter").display_name,
-            ),
-            (self.recipe_page, "sweeps", "Sweeps"),
-            (self.run_monitor, "execution", "Execution"),
-            (self.results_page, "results", "Results"),
-            (self.inventory_page, "inventory", "Samples"),
-            (self.elab_page, "elab", "eLabFTW"),
-            (self.settings_page, "settings", "Settings"),
+        route_specs: tuple[tuple[str, str, QWidget | None], ...] = (
+            ("overview", "Overview", self.dashboard.navigation_pages["overview"]),
+            ("discovery", "Discovery", self.dashboard.navigation_pages["discovery"]),
+            ("rigol", registry.get("rigol").display_name, None),
+            ("keithley", registry.get("keithley").display_name, None),
+            ("keithley_characterization", "Characterization", None),
+            ("anritsu", registry.get("anritsu").display_name, None),
+            ("moke_box", registry.get("moke_box").display_name, None),
+            ("lakeshore_gaussmeter", registry.get("lakeshore_gaussmeter").display_name, None),
+            ("sweeps", "Sweeps", None),
+            ("execution", "Execution", None),
+            ("results", "Results", None),
+            ("inventory", "Samples", None),
+            ("elab", "eLabFTW", None),
+            ("settings", "Settings", None),
         )
         self.navigation_routes: dict[str, FluentPageHost] = {}
+        self.connection_panels: dict[str, DeviceConnectionPanel] = {}
         self.apparatus_navigation_item = StationNavigationTreeWidget(
             FluentIcon.DEVELOPER_TOOLS, "Devices", False, self.navigationInterface.panel
         )
@@ -721,7 +510,7 @@ class MainWindow(FluentWindow):
             "moke_box",
             "lakeshore_gaussmeter",
         }
-        for widget, route, display_name in route_specs:
+        for route, display_name, eager_widget in route_specs:
             if route == "settings":
                 self.event_log_navigation_item = self.navigationInterface.addItem(
                     routeKey="eventLogToggle",
@@ -741,9 +530,26 @@ class MainWindow(FluentWindow):
                     position=NavigationItemPosition.BOTTOM,
                     tooltip="Choose application theme",
                 )
-            host = FluentPageHost(widget, self)
+            if eager_widget is not None:
+                host = FluentPageHost(eager_widget, self)
+            else:
+                host = FluentPageHost(
+                    content_factory=lambda target_route=route: self._build_route_content(target_route),
+                    parent=self,
+                )
             host.setObjectName(f"{route}PageHost")
             self.navigation_routes[route] = host
+            if route in apparatus_routes:
+                resource, backend = self._device_connection_details(self._settings, route)
+                panel = DeviceConnectionPanel(registry.get(route).display_name, resource, parent=host)
+                panel.update_resource(resource, backend)
+                if route == "moke_box":
+                    panel.test_button.setToolTip(
+                        "Open one TCP session, validate the documented VOUT response, then disconnect. "
+                        "No gain or VOUT-setting command is sent."
+                    )
+                panel.hide()
+                self.connection_panels[route] = panel
             position = (
                 NavigationItemPosition.BOTTOM if route == "settings" else NavigationItemPosition.TOP
             )
@@ -761,7 +567,7 @@ class MainWindow(FluentWindow):
             self.navigationInterface.addWidget(
                 routeKey=host.objectName(),
                 widget=navigation_item,
-                onClick=lambda checked=False, page=host: self.switchTo(page),
+                onClick=lambda checked=False, page=host: (page.ensure_content(), self.switchTo(page)),
                 position=position,
                 tooltip=display_name,
                 parentRouteKey=parent_key,
@@ -771,7 +577,8 @@ class MainWindow(FluentWindow):
                 self.navigationInterface.setCurrentItem(host.objectName())
                 qrouter.setDefaultRouteKey(self.stackedWidget, host.objectName())
             self._updateStackedBackground()
-            widget._scroll_area = host.scroll_area
+            if eager_widget is not None:
+                eager_widget._scroll_area = host.scroll_area
         # Keep the equipment group open on launch: device controls remain a
         # single click away while the navigation still communicates hierarchy.
         self.apparatus_navigation_item.setExpanded(True, ani=False)
@@ -792,17 +599,17 @@ class MainWindow(FluentWindow):
         self.apparatus_navigation_item.clicked.connect(
             lambda: QTimer.singleShot(0, self._sync_apparatus_navigation_height)
         )
-        self.log = PlainTextEdit()
-        self.log.setObjectName("eventLogText")
-        self.log.setProperty("stationSurface", "raised")
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(500)
-        self.log.setMinimumHeight(50)
         self._event_log_entries: deque[str] = deque(maxlen=2000)
         self._pending_log_ui_entries: list[str] = []
         self._log_ui_flush_timer = QTimer(self)
         self._log_ui_flush_timer.setInterval(50)
         self._log_ui_flush_timer.timeout.connect(self._flush_pending_log_ui)
+        self.log = _BufferedEventLogEdit(self._flush_pending_log_ui)
+        self.log.setObjectName("eventLogText")
+        self.log.setProperty("stationSurface", "raised")
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(500)
+        self.log.setMinimumHeight(50)
         self.event_log_panel = SimpleCardWidget(self.fluent_content)
         self.event_log_panel.setObjectName("eventLogPanel")
         self.event_log_panel.setProperty("stationSurface", "surface")
@@ -848,46 +655,10 @@ class MainWindow(FluentWindow):
         self.dashboard.assignments_requested.connect(self._save_discovered_assignments)
         self.dashboard.moke_assignment_requested.connect(self._save_moke_assignment)
         self.dashboard.status.connect(self._log)
-        self.settings_page.settings_saved.connect(self._settings_saved)
-        self.settings_page.moke_address_change_requested.connect(self._change_moke_address)
-        self.elab_page.settings_saved.connect(self._settings_saved)
-        self.elab_page.configuration_changed.connect(self._sync_elab_upload_controls)
-        self.anritsu_page.settings_readback_requested.connect(self._save_anritsu_readback_defaults)
-        self.keithley_page.settings_assignment_requested.connect(
-            self._queue_keithley_assignment_save
-        )
-        self.keithley_page.settings_defaults_requested.connect(self._stage_keithley_defaults)
-        self.recipe_page.run_requested.connect(self._start_run)
-        self.recipe_page.change_target_requested.connect(lambda: self._navigate_to("inventory"))
-        self.recipe_page.settings_issue_requested.connect(self._open_settings_issue)
-        self.recipe_page.plan_preflight_changed.connect(self.dashboard.update_plan_preflight)
-        self.inventory_page.active_target_changed.connect(self._on_active_sample_target_changed)
-        self.inventory_page.open_result_requested.connect(self._open_inventory_result)
-        self.elab_page.upload_completed_record.connect(self._on_elab_upload_completed)
-        self._bind_sweep_sample_target(self.inventory_store.get_active_target())
-        self.results_page.resume_requested.connect(self._resume_run)
-        self.results_page.open_sweep_requested.connect(self._open_historical_thatec_sweep)
-        self.results_page.result_selected.connect(self.elab_page.set_selected_result)
-        self.run_monitor.stop_requested.connect(self._run_controller.request_stop)
-        self.run_monitor.pause_requested.connect(self._run_controller.request_pause)
-        self.run_monitor.resume_requested.connect(self._run_controller.request_resume)
-        self.run_monitor.manual_next_requested.connect(self._run_controller.advance_manual_step)
         self._run_controller.event.connect(self._run_event)
         self._run_controller.finished.connect(self._run_finished)
         self._run_controller.failed.connect(self._run_failed)
         self._run_controller.emergency_completed.connect(self._run_emergency_completed)
-        for page in (
-            self.rigol_page,
-            self.keithley_page,
-            self.anritsu_page,
-            self.moke_box_page,
-            self.lakeshore_gaussmeter_page,
-            self.recipe_page,
-            self.inventory_page,
-            self.elab_page,
-            self.settings_page,
-        ):
-            page.status.connect(self._log)
         self.theme_group = QActionGroup(self)
         self.theme_group.setExclusive(True)
         self.theme_actions: dict[str, QAction] = {}
@@ -942,8 +713,599 @@ class MainWindow(FluentWindow):
         self._refresh_safety_strip()
         self._sync_event_log_navigation_state(False)
 
+    @staticmethod
+    def _peek_page(shell: Any, attr: str, device_key: str | None = None) -> Any:
+        """Return a page only if already realized (or attached on a test stub)."""
+
+        realized = getattr(shell, "_realized_device_pages", None)
+        if isinstance(realized, dict):
+            if device_key is not None:
+                return realized.get(device_key)
+            return getattr(shell, f"_{attr}", None)
+        return getattr(shell, attr, None)
+
+    def _ensure_route(self, route: str) -> QWidget:
+        host = self.navigation_routes[route]
+        host.ensure_content()
+        return host.content
+
+    def _ensure_device_page(self, key: str) -> Any:
+        page = self._realized_device_pages.get(key)
+        if page is not None:
+            return page
+        if getattr(self, "_closed", False):
+            return _ClosedPageStub()
+        self._ensure_route(key)
+        return self._realized_device_pages[key]
+
+    @property
+    def rigol_page(self) -> Any:
+        return self._ensure_device_page("rigol")
+
+    @rigol_page.setter
+    def rigol_page(self, value: Any) -> None:
+        self._realized_device_pages["rigol"] = value
+
+    @property
+    def keithley_page(self) -> Any:
+        return self._ensure_device_page("keithley")
+
+    @keithley_page.setter
+    def keithley_page(self, value: Any) -> None:
+        self._realized_device_pages["keithley"] = value
+
+    @property
+    def keithley_characterization_page(self) -> Any:
+        if self._keithley_characterization_page is None:
+            if getattr(self, "_closed", False):
+                return _ClosedPageStub()
+            self._ensure_device_page("keithley")
+        return self._keithley_characterization_page
+
+    @keithley_characterization_page.setter
+    def keithley_characterization_page(self, value: Any) -> None:
+        self._keithley_characterization_page = value
+
+    @property
+    def anritsu_page(self) -> Any:
+        return self._ensure_device_page("anritsu")
+
+    @anritsu_page.setter
+    def anritsu_page(self, value: Any) -> None:
+        self._realized_device_pages["anritsu"] = value
+
+    @property
+    def moke_box_page(self) -> Any:
+        return self._ensure_device_page("moke_box")
+
+    @moke_box_page.setter
+    def moke_box_page(self, value: Any) -> None:
+        self._realized_device_pages["moke_box"] = value
+
+    @property
+    def lakeshore_gaussmeter_page(self) -> Any:
+        return self._ensure_device_page("lakeshore_gaussmeter")
+
+    @lakeshore_gaussmeter_page.setter
+    def lakeshore_gaussmeter_page(self, value: Any) -> None:
+        self._realized_device_pages["lakeshore_gaussmeter"] = value
+
+    @property
+    def recipe_page(self) -> Any:
+        if self._recipe_page is None:
+            if getattr(self, "_closed", False):
+                return _ClosedPageStub()
+            self._ensure_route("sweeps")
+        return self._recipe_page
+
+    @recipe_page.setter
+    def recipe_page(self, value: Any) -> None:
+        self._recipe_page = value
+
+    @property
+    def run_monitor(self) -> Any:
+        if self._run_monitor is None:
+            if getattr(self, "_closed", False):
+                return _ClosedPageStub()
+            self._ensure_route("execution")
+        return self._run_monitor
+
+    @run_monitor.setter
+    def run_monitor(self, value: Any) -> None:
+        self._run_monitor = value
+
+    @property
+    def results_page(self) -> Any:
+        if self._results_page is None:
+            if getattr(self, "_closed", False):
+                return _ClosedPageStub()
+            self._ensure_route("results")
+        return self._results_page
+
+    @results_page.setter
+    def results_page(self, value: Any) -> None:
+        self._results_page = value
+
+    @property
+    def inventory_page(self) -> Any:
+        if self._inventory_page is None:
+            if getattr(self, "_closed", False):
+                return _ClosedPageStub()
+            self._ensure_route("inventory")
+        return self._inventory_page
+
+    @inventory_page.setter
+    def inventory_page(self, value: Any) -> None:
+        self._inventory_page = value
+
+    @property
+    def elab_page(self) -> Any:
+        if self._elab_page is None:
+            if getattr(self, "_closed", False):
+                return _ClosedPageStub()
+            self._ensure_route("elab")
+        return self._elab_page
+
+    @elab_page.setter
+    def elab_page(self, value: Any) -> None:
+        self._elab_page = value
+
+    @property
+    def settings_page(self) -> Any:
+        if self._settings_page is None:
+            if getattr(self, "_closed", False):
+                return _ClosedPageStub()
+            self._ensure_route("settings")
+        return self._settings_page
+
+    @settings_page.setter
+    def settings_page(self, value: Any) -> None:
+        self._settings_page = value
+
+    def _configure_limit_buttons_for(self, device_key: str, root: QWidget) -> None:
+        roles = ", ".join(sorted(role.value for role in self._access.identity.roles)) or "none"
+        display_map = {"rigol": "Rigol", "keithley": "Keithley", "anritsu": "Anritsu"}
+        device_label = display_map.get(device_key, device_key)
+        for field in root.findChildren(LimitField):
+            fixed_instrument_range = (
+                device_key == "keithley" and str(field.property("limitKey")) == "nplc"
+            )
+            if fixed_instrument_range:
+                enabled = False
+                reason = (
+                    "This range is fixed by the instrument and is not an editable "
+                    "laboratory safety limit."
+                )
+            elif self._simulation:
+                enabled = False
+                reason = (
+                    "Safety-limit editing is disabled in simulation mode. "
+                    "Open the hardware station settings to edit configured limits."
+                )
+            elif not self._access.allows(Permission.EDIT_SETTINGS):
+                enabled = False
+                reason = (
+                    f"Access denied: current role(s) {roles} do not include "
+                    "EDIT_SETTINGS. Use an engineer or service account."
+                )
+            else:
+                enabled = True
+                reason = "Edit this safety range. Values are validated before saving."
+            field.edit_button.setEnabled(enabled)
+            field.edit_button.setToolTip(reason)
+            field.edit_button.setAccessibleName(f"Edit {device_label} safety limits")
+            field.edit_button.setAccessibleDescription(reason)
+            if hasattr(field, "range_pill"):
+                if not enabled or not field.edit_button.isVisible():
+                    field.range_pill.setCursor(Qt.CursorShape.ArrowCursor)
+                    field.range_pill.setToolTip(reason)
+                else:
+                    field.range_pill.setCursor(Qt.CursorShape.PointingHandCursor)
+                    field.range_pill.setToolTip(
+                        f"Configured {device_label} safety envelope. "
+                        "Click to edit laboratory safety limits."
+                    )
+            if device_key != "keithley" or enabled:
+                field.edit_requested.connect(
+                    lambda field=field, dev=device_key: self._edit_device_limit(dev, field)
+                )
+
+    def _apply_theme_to_subtree(self, root: QWidget) -> None:
+        theme = effective_theme(getattr(self, "_configured_theme_mode", "system"))
+        for plot in root.findChildren(SpectrumPlotWidget):
+            plot.apply_theme(theme)
+        for heatmap in root.findChildren(HeatmapResultsTab):
+            heatmap.apply_theme(theme)
+        from app.ui.results.scalar_tab import ScalarResultsTab
+
+        for scalars in root.findChildren(ScalarResultsTab):
+            scalars.apply_theme(theme)
+
+    def _build_route_content(self, route: str) -> QWidget:
+        self._building_routes.add(route)
+        try:
+            if route in {"rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter"}:
+                widget = self._build_device_page(route)
+            elif route == "keithley_characterization":
+                if self._keithley_characterization_page is None:
+                    self._ensure_device_page("keithley")
+                widget = self._keithley_characterization_page
+            elif route == "sweeps":
+                widget = self._build_recipe_page()
+            elif route == "execution":
+                widget = self._build_run_monitor()
+            elif route == "results":
+                widget = self._build_results_page()
+            elif route == "inventory":
+                widget = self._build_inventory_page()
+            elif route == "elab":
+                widget = self._build_elab_page()
+            elif route == "settings":
+                widget = self._build_settings_page()
+            else:
+                raise KeyError(f"Unknown lazy route: {route!r}")
+            widget._scroll_area = self.navigation_routes[route].scroll_area
+            from app.ui.widgets.fluent_ownership import own_fluent_helpers
+
+            own_fluent_helpers(widget)
+            self._apply_accessibility_to(widget)
+            self._apply_theme_to_subtree(widget)
+            if self._execution_read_only_locked:
+                if route in {
+                    "rigol",
+                    "keithley",
+                    "keithley_characterization",
+                    "anritsu",
+                    "moke_box",
+                    "lakeshore_gaussmeter",
+                }:
+                    self._lock_page_execution_read_only(widget)
+                elif route == "sweeps":
+                    widget.set_execution_controlled(True)
+            return widget
+        finally:
+            self._building_routes.discard(route)
+
+    def _build_device_page(self, key: str) -> QWidget:
+        existing = self._realized_device_pages.get(key)
+        if existing is not None:
+            return existing
+        page = self._composition.registry.get(key).create_page(
+            self._controllers[key], self._settings
+        )
+        self._realized_device_pages[key] = page
+        panel = self.connection_panels[key]
+        # Keithley keeps its compact device title/live controls as the page
+        # anchor; the single authoritative connection surface sits immediately
+        # below it. Other device pages retain connection-first composition.
+        page.layout().insertWidget(2 if key == "keithley" else 0, panel)
+        panel.show()
+        page.status.connect(self._log)
+
+        if key == "rigol":
+            page.output_state_changed.connect(
+                lambda channel, state: self.quick_controls_window.set_output_state(
+                    "rigol", channel, state
+                )
+            )
+            page.quick_control_draft_changed.connect(
+                lambda target, text: self.quick_control_coordinator.publish_draft(
+                    target, text, source="device_card"
+                )
+            )
+            self.quick_control_coordinator.draft_changed.connect(
+                page.quick_control_draft_changed_from_coordinator
+            )
+            self.quick_control_coordinator.publish_draft_snapshot(
+                page.quick_control_draft_snapshot(),
+                source="device_card",
+                mark_dirty=False,
+            )
+            page.quick_setpoint_requested.connect(
+                lambda target, text: self.quick_control_coordinator.submit(
+                    target, text, live_only=True
+                )
+            )
+            self.quick_control_coordinator.state_changed.connect(
+                page.quick_setpoint_state_changed
+            )
+            self.quick_control_coordinator.configuration_verified.connect(
+                page.quick_control_configuration_verified
+            )
+            self.quick_control_coordinator.value_read.connect(page.quick_setpoint_value_read)
+            page.quick_controls_requested.connect(self._show_quick_controls)
+            self._configure_limit_buttons_for("rigol", page)
+            if "rigol" in self._last_device_capabilities:
+                page.set_capabilities(self._last_device_capabilities["rigol"])
+        elif key == "keithley":
+            card = page.characterization_card
+            self._keithley_characterization_page = card
+            page.characterization_requested.connect(
+                lambda: self._navigate_to("keithley_characterization")
+            )
+            page.output_state_changed.connect(
+                lambda channel, state: self.quick_controls_window.set_output_state(
+                    "keithley", channel, state
+                )
+            )
+            page.quick_control_draft_changed.connect(
+                lambda target, text: self.quick_control_coordinator.publish_draft(
+                    target, text, source="device_card"
+                )
+            )
+            self.quick_control_coordinator.draft_changed.connect(
+                page.quick_control_draft_changed_from_coordinator
+            )
+            self.quick_control_coordinator.publish_draft_snapshot(
+                page.quick_control_draft_snapshot(),
+                source="device_card",
+                mark_dirty=False,
+            )
+            page.quick_setpoint_requested.connect(self.quick_control_coordinator.submit)
+            self.quick_control_coordinator.state_changed.connect(
+                page.quick_setpoint_state_changed
+            )
+            self.quick_control_coordinator.configuration_verified.connect(
+                page.quick_control_configuration_verified
+            )
+            self.quick_control_coordinator.value_read.connect(page.quick_setpoint_value_read)
+            page.quick_controls_requested.connect(self._show_quick_controls)
+            page.settings_assignment_requested.connect(self._queue_keithley_assignment_save)
+            page.settings_defaults_requested.connect(self._stage_keithley_defaults)
+            card.set_inventory_store(self.inventory_store)
+            card.set_active_sample_target(self.inventory_store.get_active_target())
+            card.active_target_changed.connect(self._on_active_sample_target_changed)
+            card.browse_samples_requested.connect(lambda: self._navigate_to("inventory"))
+            card.measurement_saved.connect(self._refresh_inventory_if_realized)
+            self._configure_limit_buttons_for("keithley", page)
+            self._configure_limit_buttons_for("keithley", card)
+            if "keithley_characterization" not in self._building_routes:
+                self.navigation_routes["keithley_characterization"].ensure_content()
+        elif key == "anritsu":
+            page.set_manual_archive_context(
+                metadata_provider=self._manual_spectrum_metadata_values,
+                device_idn_provider=self._manual_spectrum_device_idn,
+                settings_source_provider=lambda: serialize_settings_snapshot(
+                    self._settings,
+                    self._repository.path,
+                    simulation=self._simulation,
+                ),
+                operator_context_provider=lambda: self._access.identity.as_context(),
+                simulation=self._simulation,
+            )
+            page.set_manual_elab_context(
+                configuration_provider=lambda: self.elab_page.manual_upload_configuration(),
+                upload_callback=lambda *args, **kwargs: self.elab_page.queue_manual_upload(
+                    *args, **kwargs
+                ),
+            )
+            page.quick_controls_requested.connect(self._show_quick_controls)
+            page.settings_readback_requested.connect(self._save_anritsu_readback_defaults)
+            target = self.inventory_store.get_active_target()
+            manual_directory = (
+                self.inventory_store.measurement_directory_for(
+                    target.sample_id,
+                    "single_measurements",
+                    "Anritsu_MS2830A",
+                    row=target.row,
+                    col=target.col,
+                )
+                if target.is_active
+                else None
+            )
+            page.set_sample_measurement_context(manual_directory, target.as_dict())
+            if self._saved_anritsu_splitter is not None:
+                page.workspace_splitter.restoreState(self._saved_anritsu_splitter)
+            self._configure_limit_buttons_for("anritsu", page)
+            if "anritsu" in self._last_device_capabilities:
+                page.set_capabilities(self._last_device_capabilities["anritsu"])
+        elif key == "moke_box":
+            def _pause_moke_and_lakeshore() -> None:
+                page.stop_live("Live Hall paused for field control/calibration.")
+                lakeshore = self._realized_device_pages.get("lakeshore_gaussmeter")
+                if lakeshore is not None:
+                    lakeshore.stop_live("Live reference paused for field calibration.")
+
+            page.field_workflow.bind_reference(
+                self._controllers["lakeshore_gaussmeter"],
+                simulation=self._simulation,
+                authorize=self._authorize_moke_workflow,
+                pause_live=_pause_moke_and_lakeshore,
+            )
+            page.field_workflow.busy_changed.connect(
+                lambda _busy: self._refresh_safety_strip()
+            )
+            self.quick_control_coordinator.bind_moke_workflow(page.field_workflow)
+            ref_state = self._device_states.get("lakeshore_gaussmeter", "disconnected")
+            if ref_state != "disconnected":
+                self._controllers["lakeshore_gaussmeter"].state_changed.emit(ref_state)
+
+        state = self._device_states.get(key, "disconnected")
+        if state != "disconnected":
+            self._controllers[key].state_changed.emit(state)
+        return page
+
+    def _build_recipe_page(self) -> RecipePage:
+        if self._recipe_page is not None:
+            return self._recipe_page
+        page = RecipePage(
+            self._settings,
+            device_registry=self._composition.registry,
+        )
+        self._recipe_page = page
+        page.set_keithley_snapshot_provider(
+            lambda channel=None, mode=None: self.keithley_page.configuration_snapshot_for(channel, mode)
+        )
+        page.set_rigol_snapshot_provider(
+            lambda channel: self.rigol_page.configuration_snapshot_for(channel),
+            lambda channel: self.rigol_page.configuration_review_snapshot_for(channel),
+        )
+        page.parameter_snapshot_provider = (
+            lambda: self.moke_box_page.field_workflow.quick_control_drafts()
+        )
+        page.set_device_comparison_extras(
+            "moke_box",
+            lambda channel: self.moke_box_page.field_workflow.configuration_comparison_values(
+                channel
+            ),
+        )
+        page.set_anritsu_snapshot_provider(
+            lambda: self.anritsu_page.configuration_panel.configuration_snapshot(),
+            lambda: self.anritsu_page.advanced_settings_snapshot(),
+        )
+        page.set_device_comparison_extras(
+            "anritsu",
+            lambda _channel: {
+                "average_count": self.anritsu_page.average_count.value(),
+                "reference_average_count": self.anritsu_page.reference_average_count.value(),
+                "reference_operation": self.anritsu_page.reference_operation.currentData(),
+            },
+        )
+        page.set_anritsu_sg_snapshot_provider(
+            lambda: self.anritsu_page.signal_generator_snapshot()
+        )
+        page.set_elab_context(
+            profile_provider=lambda: self.elab_page.current_profile(),
+            credentials_provider=lambda: self.elab_page.current_credentials(),
+            available_templates_provider=lambda: self.elab_page.available_templates(),
+            refresh_templates_callback=lambda *args, **kwargs: self.elab_page.refresh_templates(
+                *args, **kwargs
+            ),
+            navigate_to_elab=lambda: self._navigate_to("elab"),
+        )
+        page.execution_preview_requested.connect(self._prepare_execution)
+        page.change_target_requested.connect(lambda: self._navigate_to("inventory"))
+        page.settings_issue_requested.connect(self._open_settings_issue)
+        page.plan_preflight_changed.connect(self.dashboard.update_plan_preflight)
+        page.plan_preflight_changed.connect(self._invalidate_prepared_execution)
+        page.output_directory.textChanged.connect(self._invalidate_prepared_execution)
+        page.output_file_stem.textChanged.connect(self._invalidate_prepared_execution)
+        page.save_to_elab_check.toggled.connect(self._invalidate_prepared_execution)
+        page.status.connect(self._log)
+        target = self.inventory_store.get_active_target()
+        directory = (
+            self.inventory_store.measurement_directory_for(
+                target.sample_id, "sweeps", row=target.row, col=target.col
+            )
+            if target.is_active
+            else None
+        )
+        page.set_active_sample_target(target, output_directory=directory)
+        self._sync_elab_upload_controls()
+        return page
+
+    def _build_run_monitor(self) -> RunMonitorPage:
+        if self._run_monitor is not None:
+            return self._run_monitor
+        page = RunMonitorPage()
+        self._run_monitor = page
+        page.launch_requested.connect(self._launch_prepared_execution)
+        page.stop_requested.connect(self._run_controller.request_stop)
+        page.pause_requested.connect(self._run_controller.request_pause)
+        page.resume_requested.connect(self._run_controller.request_resume)
+        page.manual_next_requested.connect(self._run_controller.advance_manual_step)
+        return page
+
+    def _build_results_page(self) -> ResultsPage:
+        if self._results_page is not None:
+            return self._results_page
+        target = self.inventory_store.get_active_target()
+        page = ResultsPage(
+            str(
+                self._results_directory_for_target(target)
+                or self.inventory_store.catalogue_root
+            ),
+            catalogue_tree=True,
+        )
+        self._results_page = page
+        page.file_browser.set_sample_context(
+            self._results_directory_for_target(target),
+            self.inventory_store.catalogue_root,
+        )
+        page.resume_requested.connect(self._resume_run)
+        page.open_sweep_requested.connect(self._open_historical_thatec_sweep)
+        page.result_selected.connect(self._on_result_selected)
+        return page
+
+    def _build_inventory_page(self) -> SampleInventoryPage:
+        if self._inventory_page is not None:
+            return self._inventory_page
+        page = SampleInventoryPage(self.inventory_store, self)
+        self._inventory_page = page
+        page.catalogue_root_changed.connect(self._persist_catalogue_root)
+        page.active_target_changed.connect(self._on_active_sample_target_changed)
+        page.open_result_requested.connect(self._open_inventory_result)
+        page.samples_updated.connect(self._on_inventory_samples_updated)
+        page.status.connect(self._log)
+        return page
+
+    def _build_elab_page(self) -> ElabPage:
+        if self._elab_page is not None:
+            return self._elab_page
+        page = ElabPage(
+            self._repository,
+            settings=self._settings,
+            env_path=Path(".env"),
+            simulation=self._simulation,
+        )
+        self._elab_page = page
+        page.settings_saved.connect(self._settings_saved)
+        page.configuration_changed.connect(self._on_elab_configuration_changed)
+        page.upload_completed_record.connect(self._on_elab_upload_completed)
+        page.status.connect(self._log)
+        if self._last_selected_result_path is not None:
+            page.set_selected_result(self._last_selected_result_path)
+        return page
+
+    def _build_settings_page(self) -> SettingsPage:
+        if self._settings_page is not None:
+            return self._settings_page
+        page = SettingsPage(
+            self._repository,
+            read_only=self._simulation,
+            access_policy=self._access,
+        )
+        self._settings_page = page
+        page.settings_saved.connect(self._settings_saved)
+        page.moke_address_change_requested.connect(self._change_moke_address)
+        page.status.connect(self._log)
+        return page
+
+    def _on_device_capabilities_changed(self, device: str, capabilities: object) -> None:
+        self._last_device_capabilities[device] = capabilities
+        page = self._realized_device_pages.get(device)
+        if page is not None and hasattr(page, "set_capabilities"):
+            page.set_capabilities(capabilities)
+
+    def _on_result_selected(self, path: object) -> None:
+        self._last_selected_result_path = path
+        if self._elab_page is not None:
+            self._elab_page.set_selected_result(path)
+
+    def _on_inventory_samples_updated(self) -> None:
+        if self._keithley_characterization_page is not None:
+            self._keithley_characterization_page.refresh_samples_list()
+        if self._results_page is not None:
+            self._refresh_results_catalogue()
+
+    def _on_elab_configuration_changed(self) -> None:
+        self._sync_elab_upload_controls()
+        if self._recipe_page is not None:
+            self._recipe_page.sync_elab_context()
+
+    def _refresh_inventory_if_realized(self, _sample_id: object = None) -> None:
+        if self._inventory_page is not None:
+            self._inventory_page.refresh_samples()
+
+    def _flush_resize_layout(self) -> None:
+        if hasattr(self, "apparatus_navigation_item"):
+            self._sync_apparatus_navigation_height()
+        if hasattr(self, "event_log_panel"):
+            self._sync_shell_splitter_layout()
+
     def _navigate_to(self, route: str) -> None:
         target = self.navigation_routes[route]
+        target.ensure_content()
         nav_item = self.navigationInterface.widget(target.objectName())
         if (
             (not self.isVisible() or not self.navigationInterface.panel.isCollapsed())
@@ -1084,7 +1446,9 @@ class MainWindow(FluentWindow):
         ) + sum(state == "unknown" for state in runner_outputs.values())
         # A valid DAC reply verifies communication, never Kepco power-off.
         moke_state = self._device_states.get("moke_box")
-        moke_power_uncertain = moke_state not in {None, "disconnected"} or self.moke_box_page.field_workflow.busy
+        moke_page = MainWindow._peek_page(self, "moke_box_page", "moke_box")
+        moke_busy = bool(moke_page is not None and moke_page.field_workflow.busy)
+        moke_power_uncertain = moke_state not in {None, "disconnected"} or moke_busy
         if moke_power_uncertain and moke_state not in {"unknown", "fault"} and "moke_box" not in runner_devices:
             unknown_outputs += 1
         self.safety_strip.update_snapshot(
@@ -1108,17 +1472,24 @@ class MainWindow(FluentWindow):
         self.theme_actions[mode].setChecked(True)
         self._set_theme_mode(mode)
 
-    def _apply_accessibility(self) -> None:
-        """Ensure controls expose text as well as colour and have screen-reader metadata."""
+    def _apply_accessibility_to(self, root: QWidget) -> None:
+        """Ensure controls inside ``root`` expose screen-reader metadata."""
 
-        for button in self.findChildren(QPushButton):
+        for button in root.findChildren(QPushButton):
             if not button.accessibleName():
                 button.setAccessibleName(button.text().replace("&", ""))
             if not button.accessibleDescription() and button.toolTip():
                 button.setAccessibleDescription(button.toolTip())
-        for editor in self.findChildren(QLineEdit):
+        for editor in root.findChildren(QLineEdit):
             if not editor.accessibleName():
-                editor.setAccessibleName(editor.placeholderText() or "Numeric or text parameter")
+                editor.setAccessibleName(
+                    editor.placeholderText() or "Numeric or text parameter"
+                )
+
+    def _apply_accessibility(self) -> None:
+        """Ensure controls expose text as well as colour and have screen-reader metadata."""
+
+        self._apply_accessibility_to(self)
         self.stackedWidget.setAccessibleName("Application workspace")
         self.log.setAccessibleName("Event log")
 
@@ -1176,7 +1547,7 @@ class MainWindow(FluentWindow):
                 parse_quantity(original_max_abs, dimension)
                 minimum_si = parse_quantity(str(minimum), dimension).si_value
                 maximum_si = parse_quantity(str(maximum), dimension).si_value
-            except Exception:
+            except (QuantityError, ValueError, TypeError):
                 continue
             return format_quantity_auto(max(abs(minimum_si), abs(maximum_si)), dimension)
         raise ValueError(f"Cannot synchronize max_abs={original_max_abs!r} with the edited range.")
@@ -1247,7 +1618,11 @@ class MainWindow(FluentWindow):
             return
         try:
             loaded = self._repository.load()
-            base_raw = self.settings_page._raw if self.settings_page._dirty else loaded.raw
+            base_raw = (
+                self._settings_page._raw
+                if self._settings_page is not None and self._settings_page._dirty
+                else loaded.raw
+            )
             raw = deepcopy(base_raw)
             title, path, maximum_enabled = self._limit_edit_spec(device, field)
             range_data = self._nested_value(raw, path)
@@ -1272,7 +1647,7 @@ class MainWindow(FluentWindow):
                     current_si = parse_quantity(str(minimum), DIMENSION_VOLTAGE).si_value
                     minimum = format_quantity_auto(-abs(current_si), DIMENSION_VOLTAGE)
                     maximum = format_quantity_auto(abs(current_si), DIMENSION_VOLTAGE)
-                except Exception:
+                except (QuantityError, ValueError, TypeError):
                     minimum = f"-{range_data}"
                     maximum = str(range_data)
                 guidance = (
@@ -1433,6 +1808,8 @@ class MainWindow(FluentWindow):
         # global theme is selected. Reapply them across all top-level surfaces
         # even when the application property already names this theme.
         for top_level in QApplication.topLevelWidgets():
+            if not isValid(top_level) or getattr(top_level, "_closed", False):
+                continue
             for plot in top_level.findChildren(SpectrumPlotWidget):
                 plot.apply_theme(theme)
             for heatmap in top_level.findChildren(HeatmapResultsTab):
@@ -1470,10 +1847,11 @@ class MainWindow(FluentWindow):
         except ConfigurationError as exc:
             self._log(f"Theme was applied but could not be saved: {exc}")
             return
-        if self.settings_page._dirty:
-            self.settings_page.accept_external_snapshot(self._settings, loaded.raw)
-        else:
-            self.settings_page.reload()
+        if self._settings_page is not None:
+            if self._settings_page._dirty:
+                self._settings_page.accept_external_snapshot(self._settings, loaded.raw)
+            else:
+                self._settings_page.reload()
 
     def _persist_catalogue_root(self, root: str) -> None:
         """Persist the catalogue locator outside the database it locates."""
@@ -1486,10 +1864,11 @@ class MainWindow(FluentWindow):
         except ConfigurationError as exc:
             self._log(f"Catalogue root is active but could not be saved: {exc}")
             return
-        if self.settings_page._dirty:
-            self.settings_page.accept_external_snapshot(self._settings, loaded.raw)
-        else:
-            self.settings_page.reload()
+        if self._settings_page is not None:
+            if self._settings_page._dirty:
+                self._settings_page.accept_external_snapshot(self._settings, loaded.raw)
+            else:
+                self._settings_page.reload()
         self._log(f"Samples catalogue location saved: {resolved}")
 
     def _restore_workspace(self) -> None:
@@ -1506,8 +1885,9 @@ class MainWindow(FluentWindow):
         self._navigation_layout_initialized = False
         if content_splitter is not None:
             self.shell_splitter.restoreState(content_splitter)
-        if splitter is not None:
-            self.anritsu_page.workspace_splitter.restoreState(splitter)
+        self._saved_anritsu_splitter = splitter
+        if splitter is not None and "anritsu" in self._realized_device_pages:
+            self._realized_device_pages["anritsu"].workspace_splitter.restoreState(splitter)
         route = str(settings.value("main_window/current_route", "overview"))
         if route not in self.navigation_routes:
             route = "overview"
@@ -1530,7 +1910,9 @@ class MainWindow(FluentWindow):
         )
         settings.remove("main_window/navigation_expanded")
         settings.setValue("main_window/current_route", self._current_route())
-        settings.setValue("anritsu/splitter", self.anritsu_page.workspace_splitter.saveState())
+        anritsu_page = self._realized_device_pages.get("anritsu")
+        if anritsu_page is not None:
+            settings.setValue("anritsu/splitter", anritsu_page.workspace_splitter.saveState())
 
     def _connect_controllers(self) -> None:
         for name, controller in self._controllers.items():
@@ -1569,20 +1951,26 @@ class MainWindow(FluentWindow):
                     f"{device.upper()} {'TCP' if device == 'moke_box' else 'VISA'} {message}"
                 )
             )
-            if name == "rigol":
-                controller.capabilities_changed.connect(self.rigol_page.set_capabilities)
-            elif name == "anritsu":
-                controller.capabilities_changed.connect(self.anritsu_page.set_capabilities)
+            if name in {"rigol", "anritsu"}:
+                controller.capabilities_changed.connect(
+                    lambda capabilities, device=name: self._on_device_capabilities_changed(
+                        device, capabilities
+                    )
+                )
 
     def _show_quick_controls(self) -> None:
+        # Ensure quick-control sources are wired before populating rows/output pills.
+        rigol_page = self.rigol_page
+        keithley_page = self.keithley_page
+        _ = self.moke_box_page
         if not self.quick_controls_window._selected:
             self.quick_controls_window.choose_controls()
         # Output controls remain available even when the operator has not
         # pinned a numeric quick-control row yet.
         self.quick_control_coordinator.refresh()
         for device, page in (
-            ("rigol", self.rigol_page),
-            ("keithley", self.keithley_page),
+            ("rigol", rigol_page),
+            ("keithley", keithley_page),
         ):
             for channel, state in page.output_state_snapshot().items():
                 self.quick_controls_window.set_output_state(device, channel, state)
@@ -1617,16 +2005,19 @@ class MainWindow(FluentWindow):
         self._log(f"Rejected Quick controls output group request for {device!r}")
 
     def _manual_spectrum_metadata_values(self) -> tuple[ManualMetadataValue, ...]:
-        """Collect last-confirmed numeric values from the visible device pages."""
+        """Collect last-confirmed numeric values from realized device pages."""
 
         values: list[ManualMetadataValue] = []
-        for page in (
-            self.anritsu_page,
-            self.rigol_page,
-            self.keithley_page,
-            self.moke_box_page,
-            self.lakeshore_gaussmeter_page,
+        for key in (
+            "anritsu",
+            "rigol",
+            "keithley",
+            "moke_box",
+            "lakeshore_gaussmeter",
         ):
+            page = self._realized_device_pages.get(key)
+            if page is None:
+                continue
             provider = getattr(page, "manual_metadata_values", None)
             if callable(provider):
                 values.extend(provider())
@@ -1711,8 +2102,9 @@ class MainWindow(FluentWindow):
                     )
                     restored = self._repository.save_raw(raw)
                     self._apply_settings_to_ui(restored)
-                    self.settings_page.reload()
-                except Exception as exc:
+                    if self._settings_page is not None:
+                        self._settings_page.reload()
+                except (ConfigurationError, KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
                     rollback_error = str(exc)
             detail = error
             if previous is not None and rollback_error is None:
@@ -1861,6 +2253,55 @@ class MainWindow(FluentWindow):
                 "The durable audit log is unavailable. A measurement run cannot start."
             )
 
+    def _prepare_execution(
+        self, plan: object, outputs_forced_off: bool, execution_mode: str,
+        output_dir_override: str, file_stem_override: str,
+    ) -> None:
+        if self._run_controller.running:
+            return
+        try:
+            estimate = PlanEstimator(self._settings).estimate(plan)
+            tree = self.recipe_page.semantic_tree_snapshot(plan.recipe_source, plan, update_editor=False)
+        except (ConfigurationError, ValueError) as exc:
+            self._invalidate_prepared_execution()
+            QMessageBox.warning(self, "Execution preview unavailable", str(exc))
+            return
+        rigol = self._realized_device_pages.get("rigol")
+        self.run_monitor.preview_plan(
+            plan, estimate, tree,
+            execution_mode=execution_mode,
+            output_preview=self.recipe_page.output_file_preview.text(),
+            rigol_level_modes=rigol.voltage_entry_modes() if rigol is not None else None,
+        )
+        self._prepared_execution = (
+            plan, outputs_forced_off, execution_mode, output_dir_override, file_stem_override,
+        )
+        self._navigate_to("execution")
+
+    def _invalidate_prepared_execution(self, *_args: object) -> None:
+        if self._prepared_execution is not None:
+            self._prepared_execution = None
+            self.run_monitor.invalidate_plan_preview()
+
+    def _prepared_execution_is_current(self, request: tuple[object, bool, str, str, str]) -> bool:
+        current = self.recipe_page.execution_request()
+        return (
+            self._prepared_execution is request
+            and not self._run_controller.running
+            and current is not None
+            and current[0] is request[0]
+            and current[1:] == request[1:]
+        )
+
+    def _launch_prepared_execution(self) -> None:
+        request = self._prepared_execution
+        if request is None:
+            return
+        if not self._prepared_execution_is_current(request):
+            self._invalidate_prepared_execution()
+            return
+        self._start_run(*request, prepared_request=request)
+
     def _start_run(
         self,
         plan: object,
@@ -1868,6 +2309,8 @@ class MainWindow(FluentWindow):
         execution_mode: str = "measurement",
         output_dir_override: str = "",
         file_stem_override: str = "",
+        *,
+        prepared_request: tuple[object, bool, str, str, str] | None = None,
     ) -> None:
         selected_execution_mode = ExecutionMode.coerce(execution_mode)
         if outputs_forced_off:
@@ -1902,6 +2345,7 @@ class MainWindow(FluentWindow):
             execution_mode=selected_execution_mode.value,
             output_dir_override=output_dir_override,
             file_stem_override=file_stem_override,
+            prepared_request=prepared_request,
         )
 
     def _open_sweep_readiness(
@@ -1913,6 +2357,7 @@ class MainWindow(FluentWindow):
         output_dir_override: str = "",
         file_stem_override: str = "",
         on_start: Callable[[SweepDeviceReadinessDialog], None] | None = None,
+        prepared_request: tuple[object, bool, str, str, str] | None = None,
     ) -> SweepDeviceReadinessDialog:
         """Show current connection evidence for every device the plan needs."""
 
@@ -1974,6 +2419,7 @@ class MainWindow(FluentWindow):
                     execution_mode=execution_mode,
                     output_dir_override=output_dir_override,
                     file_stem_override=file_stem_override,
+                    prepared_request=prepared_request,
                 )
             )
         def _on_dialog_finished(_result: int = 0, current: SweepDeviceReadinessDialog = dialog) -> None:
@@ -2035,7 +2481,13 @@ class MainWindow(FluentWindow):
         execution_mode: str,
         output_dir_override: str,
         file_stem_override: str,
+        prepared_request: tuple[object, bool, str, str, str] | None = None,
     ) -> None:
+        if prepared_request is not None and not self._prepared_execution_is_current(prepared_request):
+            if self._prepared_execution is prepared_request:
+                self._invalidate_prepared_execution()
+            dialog.reject()
+            return
         if dialog.missing_devices:
             return
         if getattr(self, "_emergency_inhibit", False):
@@ -2083,7 +2535,7 @@ class MainWindow(FluentWindow):
                 device_controllers=active_controllers,
                 sample_target=sample_target,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - UI run-start boundary displays any compile/engine error
             issue = settings_issue_for_error(exc)
             if issue is not None and QMessageBox.settings_guidance(
                 self, "Run not started", str(exc)
@@ -2119,7 +2571,7 @@ class MainWindow(FluentWindow):
             return
         try:
             self.recipe_page.load_reconstructed_thatec_sweep(run, tree)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - UI reconstruction boundary displays any format error
             QMessageBox.warning(self, "THATEC Sweep", f"Cannot reconstruct Sweep tree: {exc}")
             return
         self._navigate_to("sweeps")
@@ -2241,7 +2693,7 @@ class MainWindow(FluentWindow):
                 execution_mode=estimate_execution_mode.value,
                 device_controllers=active_controllers,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - UI resume boundary displays any recovery/engine error
             QMessageBox.critical(self, "Resume not started", str(exc))
             return
         self._leased_run_devices = set(active_controllers)
@@ -2324,7 +2776,7 @@ class MainWindow(FluentWindow):
             }
             else (
                 "warning"
-                if name in {"compliance_detected", "run_aborted", "safe_finally_error"}
+                if name in {"compliance_detected", "sweep_compliance_limited", "run_aborted", "safe_finally_error"}
                 else "info"
             )
         )
@@ -2348,6 +2800,7 @@ class MainWindow(FluentWindow):
             "semantic_operation_started",
             "semantic_operation_applied",
             "semantic_operation_failed",
+            "semantic_operation_skipped",
         }:
             self._audit_record(
                 name.replace("_", " "),
@@ -2367,6 +2820,7 @@ class MainWindow(FluentWindow):
             "semantic_operation_started",
             "semantic_operation_applied",
             "semantic_operation_failed",
+            "semantic_operation_skipped",
         }:
             immediate = (
                 name == "semantic_operation_failed"
@@ -2548,11 +3002,13 @@ class MainWindow(FluentWindow):
             for endpoint, state in output_status.items()
             if isinstance(state, str) and state in {"on", "off", "unknown"}
         }
+        realized = getattr(self, "_realized_device_pages", None)
+        device_pages = realized if isinstance(realized, dict) else self._device_pages
         pages = (
-            (("anritsu", self._device_pages["anritsu"]),)
+            (("anritsu", device_pages["anritsu"]),)
             if event_name in {"spectrum_preview", "reference_preview"}
-            and "anritsu" in self._device_pages
-            else tuple(self._device_pages.items())
+            and "anritsu" in device_pages
+            else tuple(device_pages.items())
         )
         kind = str(payload.get("kind", "")).casefold()
         relevant_module = next(
@@ -2626,12 +3082,21 @@ class MainWindow(FluentWindow):
         result_path = None
         if isinstance(result, dict) and result.get("path"):
             result_path = Path(str(result["path"]))
-        if result_path is not None:
-            self.results_page.offer_completed_result(result_path)
+        if result_path is not None and self._results_page is not None:
+            self._results_page.offer_completed_result(result_path)
         run_result = result["result"]
         state = str(getattr(getattr(run_result, "state", None), "value", "unknown"))
         error = getattr(run_result, "error", None)
-        if result_path is not None:
+        elab_auto_enabled = bool(
+            not self._simulation
+            and getattr(getattr(self._settings, "elab", None), "enabled", False)
+        )
+        if result_path is not None and (
+            self._run_upload_to_elab_requested
+            or self._run_elab_upload_config is not None
+            or self._elab_page is not None
+            or elab_auto_enabled
+        ):
             profile_override = None
             if self._run_elab_upload_config is not None:
                 base_profile = self.elab_page.current_profile()
@@ -2655,33 +3120,46 @@ class MainWindow(FluentWindow):
         self._run_upload_to_elab_requested = False
         self._run_elab_upload_config = None
         sample_target = result.get("sample_target") if isinstance(result, dict) else None
-        if result_path is not None and sample_target is not None:
-            if hasattr(sample_target, "is_active") and sample_target.is_active:
-                point_count = len(getattr(run_result, "points", ())) if hasattr(run_result, "points") else getattr(run_result, "committed_points", 0)
-                spectrum_count = len(getattr(run_result, "spectra", ())) if hasattr(run_result, "spectra") else 0
-                recipe_name = ""
-                if hasattr(self._run_controller, "_plan") and self._run_controller._plan is not None:
-                    recipe_name = getattr(self._run_controller._plan, "recipe_name", "")
-                self.inventory_store.record_run(
-                    SampleRunRecord(
-                        sample_id=sample_target.sample_id,
-                        sample_name=sample_target.sample_name or sample_target.sample_id,
-                        row=str(sample_target.row or ""),
-                        col=str(sample_target.col or ""),
-                        device_label=str(sample_target.device_label or ""),
-                        run_path=str(result_path),
-                        run_sha256="",
-                        created_at_utc="",
-                        status=state,
-                        point_count=point_count,
-                        spectrum_count=spectrum_count,
-                        recipe_name=recipe_name,
-                    )
+        if (
+            result_path is not None
+            and sample_target is not None
+            and hasattr(sample_target, "is_active")
+            and sample_target.is_active
+        ):
+            point_count = (
+                len(getattr(run_result, "points", ()))
+                if hasattr(run_result, "points")
+                else getattr(run_result, "committed_points", 0)
+            )
+            spectrum_count = (
+                len(getattr(run_result, "spectra", ()))
+                if hasattr(run_result, "spectra")
+                else 0
+            )
+            recipe_name = ""
+            if hasattr(self._run_controller, "_plan") and self._run_controller._plan is not None:
+                recipe_name = getattr(self._run_controller._plan, "recipe_name", "")
+            self.inventory_store.record_run(
+                SampleRunRecord(
+                    sample_id=sample_target.sample_id,
+                    sample_name=sample_target.sample_name or sample_target.sample_id,
+                    row=str(sample_target.row or ""),
+                    col=str(sample_target.col or ""),
+                    device_label=str(sample_target.device_label or ""),
+                    run_path=str(result_path),
+                    run_sha256="",
+                    created_at_utc="",
+                    status=state,
+                    point_count=point_count,
+                    spectrum_count=spectrum_count,
+                    recipe_name=recipe_name,
                 )
-                self.inventory_page.refresh_samples()
-                self._log(
-                    f"Sample inventory recorded sweep {result_path.name} under {sample_target.display_text()}"
-                )
+            )
+            if self._inventory_page is not None:
+                self._inventory_page.refresh_samples()
+            self._log(
+                f"Sample inventory recorded sweep {result_path.name} under {sample_target.display_text()}"
+            )
         if state == "fault":
             message = str(error or "The measurement finished in a fault state.")
             self._log(f"Run Engine finished in FAULT: {message}")
@@ -2693,21 +3171,45 @@ class MainWindow(FluentWindow):
 
     def _on_active_sample_target_changed(self, target: ActiveSampleTarget) -> None:
         self._bind_sweep_sample_target(target)
-        self.keithley_characterization_page.set_active_sample_target(target)
+        char_page = MainWindow._peek_page(self, "keithley_characterization_page")
+        if char_page is not None:
+            char_page.set_active_sample_target(target)
         self._refresh_safety_strip()
 
     def _bind_sweep_sample_target(self, target: ActiveSampleTarget) -> None:
-        directory = (self.inventory_store.measurement_directory_for(target.sample_id, "sweeps", row=target.row, col=target.col)
-                     if target.is_active else None)
-        self.recipe_page.set_active_sample_target(target, output_directory=directory)
-        manual_directory = (self.inventory_store.measurement_directory_for(target.sample_id,
-            "single_measurements", "Anritsu_MS2830A", row=target.row, col=target.col) if target.is_active else None)
-        self.anritsu_page.set_sample_measurement_context(manual_directory, target.as_dict())
+        recipe_page = MainWindow._peek_page(self, "recipe_page")
+        if recipe_page is not None:
+            directory = (
+                self.inventory_store.measurement_directory_for(
+                    target.sample_id, "sweeps", row=target.row, col=target.col
+                )
+                if target.is_active
+                else None
+            )
+            recipe_page.set_active_sample_target(target, output_directory=directory)
+        anritsu_page = MainWindow._peek_page(self, "anritsu_page", "anritsu")
+        if anritsu_page is not None:
+            manual_directory = (
+                self.inventory_store.measurement_directory_for(
+                    target.sample_id,
+                    "single_measurements",
+                    "Anritsu_MS2830A",
+                    row=target.row,
+                    col=target.col,
+                )
+                if target.is_active
+                else None
+            )
+            anritsu_page.set_sample_measurement_context(manual_directory, target.as_dict())
         self._set_results_sample_context(target)
 
     def _set_results_sample_context(self, target: ActiveSampleTarget) -> None:
-        self.results_page.file_browser.set_sample_context(
-            self._results_directory_for_target(target), self.inventory_store.catalogue_root)
+        results_page = MainWindow._peek_page(self, "results_page")
+        if results_page is None:
+            return
+        results_page.file_browser.set_sample_context(
+            self._results_directory_for_target(target), self.inventory_store.catalogue_root
+        )
 
     def _results_directory_for_target(self, target: ActiveSampleTarget) -> Path | None:
         active_directory = None
@@ -2727,11 +3229,14 @@ class MainWindow(FluentWindow):
     def _refresh_results_catalogue(self) -> None:
         """Update active-target context without resetting operator navigation."""
 
-        previous_directory = self.results_page.file_browser.output_dir
+        results_page = MainWindow._peek_page(self, "results_page")
+        if results_page is None:
+            return
+        previous_directory = results_page.file_browser.output_dir
         self._set_results_sample_context(self.inventory_store.get_active_target())
         # A changed directory has already started its own index job.
-        if self.results_page.file_browser.output_dir == previous_directory:
-            self.results_page.file_browser.refresh()
+        if results_page.file_browser.output_dir == previous_directory:
+            results_page.file_browser.refresh()
 
     def _on_elab_upload_completed(self, record: object) -> None:
         if hasattr(record, "run_path") and hasattr(record, "experiment_id"):
@@ -2741,7 +3246,8 @@ class MainWindow(FluentWindow):
                 elab_url=getattr(record, "experiment_url", None),
                 elab_status="uploaded",
             )
-            self.inventory_page.refresh_samples()
+            if self._inventory_page is not None:
+                self._inventory_page.refresh_samples()
 
     def _run_failed(self, error: str) -> None:
         self._execution_event_timer.stop()
@@ -2775,7 +3281,9 @@ class MainWindow(FluentWindow):
             self._settings,
             simulation=self._simulation,
         )
-        self.anritsu_page.prepare_acquisition_stop()
+        anritsu_page = MainWindow._peek_page(self, "anritsu_page", "anritsu")
+        if anritsu_page is not None:
+            anritsu_page.prepare_acquisition_stop()
         for controller in self._controllers.values():
             controller.call("emergency_off")
         self._audit_record(
@@ -2891,35 +3399,43 @@ class MainWindow(FluentWindow):
         self._settings = simulated_station_settings(settings) if self._simulation else settings
         self.quick_control_coordinator.set_settings(self._settings)
         self.dashboard.update_settings(self._settings)
-        pages = {
-            "rigol": self.rigol_page,
-            "keithley": self.keithley_page,
-            "anritsu": self.anritsu_page,
-            "moke_box": self.moke_box_page,
-            "lakeshore_gaussmeter": self.lakeshore_gaussmeter_page,
-        }
-        for name, page in pages.items():
+        for name, page in self._realized_device_pages.items():
             if changed_devices is None or name in changed_devices:
                 page.set_settings(self._settings)
-        if hasattr(self, "keithley_characterization_page") and self.keithley_characterization_page is not None:
-            if changed_devices is None or "keithley" in changed_devices:
-                self.keithley_characterization_page.set_settings(self._settings)
+        if (
+            self._keithley_characterization_page is not None
+            and (changed_devices is None or "keithley" in changed_devices)
+        ):
+            self._keithley_characterization_page.set_settings(self._settings)
         for name, panel in self.connection_panels.items():
             if changed_devices is not None and name not in changed_devices:
                 continue
             resource, backend = self._device_connection_details(self._settings, name)
             panel.update_resource(resource, backend)
-        self.recipe_page.set_settings(self._settings)
-        self.elab_page.set_settings(self._settings)
+        if self._recipe_page is not None:
+            self._recipe_page.set_settings(self._settings)
+        if self._elab_page is not None:
+            self._elab_page.set_settings(self._settings)
         self._sync_elab_upload_controls()
 
     def _sync_elab_upload_controls(self) -> None:
         """Refresh per-run/per-save eLab controls from the central policy."""
 
-        if not hasattr(self, "elab_page") or not hasattr(self, "recipe_page"):
+        recipe_page = MainWindow._peek_page(self, "recipe_page")
+        if recipe_page is None:
             return
-        available, default_enabled, hint = self.elab_page.upload_configuration()
-        self.recipe_page.set_elab_upload_state(available, default_enabled, hint)
+        elab_page = MainWindow._peek_page(self, "elab_page")
+        if elab_page is not None:
+            available, default_enabled, hint = elab_page.upload_configuration()
+        elif self._simulation:
+            available, default_enabled, hint = (
+                False,
+                False,
+                "Simulation mode disables external eLab writes.",
+            )
+        else:
+            available, default_enabled, hint = self.elab_page.upload_configuration()
+        recipe_page.set_elab_upload_state(available, default_enabled, hint)
 
     @classmethod
     def _setting_changes(
@@ -2960,9 +3476,11 @@ class MainWindow(FluentWindow):
             return
 
         self._settings = simulated_station_settings(persisted) if self._simulation else persisted
-        self.settings_page.reload()
+        if self._settings_page is not None:
+            self._settings_page.reload()
         self.anritsu_page.set_settings(self._settings)
-        self.recipe_page.set_settings(self._settings)
+        if self._recipe_page is not None:
+            self._recipe_page.set_settings(self._settings)
         self._controllers["anritsu"].call("refresh_station_context", self._settings)
         self._refresh_safety_strip()
         self.anritsu_page.banner.show_message(
@@ -3072,9 +3590,11 @@ class MainWindow(FluentWindow):
             return False
 
         self._settings = simulated_station_settings(persisted) if self._simulation else persisted
-        self.settings_page.reload()
+        if self._settings_page is not None:
+            self._settings_page.reload()
         self.anritsu_page.set_settings(self._settings)
-        self.recipe_page.set_settings(self._settings)
+        if self._recipe_page is not None:
+            self._recipe_page.set_settings(self._settings)
         self._controllers["anritsu"].call("refresh_station_context", self._settings)
         self._refresh_safety_strip()
         self.anritsu_page.banner.show_message(
@@ -3118,9 +3638,11 @@ class MainWindow(FluentWindow):
             return False
 
         self._settings = simulated_station_settings(persisted) if self._simulation else persisted
-        self.settings_page.reload()
+        if self._settings_page is not None:
+            self._settings_page.reload()
         self.rigol_page.set_settings(self._settings)
-        self.recipe_page.set_settings(self._settings)
+        if self._recipe_page is not None:
+            self._recipe_page.set_settings(self._settings)
         self._controllers["rigol"].call("refresh_station_context", self._settings)
         self._refresh_safety_strip()
         self.rigol_page.banner.show_message(
@@ -3154,9 +3676,11 @@ class MainWindow(FluentWindow):
             self._log(f"LAKESHORE FORM SAVE FAILED: {type(exc).__name__}: {exc}")
             return False
         self._settings = simulated_station_settings(persisted) if self._simulation else persisted
-        self.settings_page.reload()
+        if self._settings_page is not None:
+            self._settings_page.reload()
         self.lakeshore_gaussmeter_page.set_settings(self._settings)
-        self.recipe_page.set_settings(self._settings)
+        if self._recipe_page is not None:
+            self._recipe_page.set_settings(self._settings)
         self._refresh_safety_strip()
         self._log("LAKESHORE DISPLAY DEFAULTS SAVED: settings.yml updated")
         return True
@@ -3193,9 +3717,11 @@ class MainWindow(FluentWindow):
             self._log(f"MOKE FORM SAVE FAILED: {type(exc).__name__}: {exc}")
             return False
         self._settings = simulated_station_settings(persisted) if self._simulation else persisted
-        self.settings_page.reload()
+        if self._settings_page is not None:
+            self._settings_page.reload()
         self.moke_box_page.set_settings(self._settings)
-        self.recipe_page.set_settings(self._settings)
+        if self._recipe_page is not None:
+            self._recipe_page.set_settings(self._settings)
         self._refresh_safety_strip()
         self._log("MOKE DISPLAY DEFAULTS SAVED: settings.yml updated")
         return True
@@ -3310,84 +3836,106 @@ class MainWindow(FluentWindow):
         if self._keithley_defaults_in_flight:
             self._log("SAVE SETTINGS ignored: a settings write is already running")
             return
-        # Capture every device page before SettingsPage emits settings_saved.
-        # That signal intentionally reloads all pages and would otherwise erase
-        # unsaved form edits before their device-specific persistence runs.
+        # Capture every realized device page before SettingsPage emits
+        # settings_saved. Unrealized pages cannot hold unsaved edits.
+        rigol_page = self._realized_device_pages.get("rigol")
+        anritsu_page = self._realized_device_pages.get("anritsu")
+        keithley_page = self._realized_device_pages.get("keithley")
+        lakeshore_page = self._realized_device_pages.get("lakeshore_gaussmeter")
+        moke_page = self._realized_device_pages.get("moke_box")
+        rigol_defaults = None
+        preview_defaults = None
+        anritsu_defaults = None
+        keithley_payload = None
+        lakeshore_interval_ms = None
+        moke_defaults = None
         try:
-            rigol_defaults = self.rigol_page.settings_defaults()
-            preview_defaults = self.anritsu_page.preview_settings_snapshot()
-            anritsu_defaults = (
-                self.anritsu_page.configuration_panel.configuration_snapshot(),
-                self.anritsu_page.advanced_settings_snapshot(),
-                self.anritsu_page.signal_generator_snapshot(),
-                self.anritsu_page.average_count.value(),
-                self.anritsu_page.refresh.value(),
+            if rigol_page is not None:
+                rigol_defaults = rigol_page.settings_defaults()
+            if anritsu_page is not None:
+                preview_defaults = anritsu_page.preview_settings_snapshot()
+                anritsu_defaults = (
+                    anritsu_page.configuration_panel.configuration_snapshot(),
+                    anritsu_page.advanced_settings_snapshot(),
+                    anritsu_page.signal_generator_snapshot(),
+                    anritsu_page.average_count.value(),
+                    anritsu_page.refresh.value(),
+                )
+            keithley_snapshots = (
+                {
+                    channel: keithley_page.configuration_snapshot_for(channel)
+                    for channel in ("A", "B")
+                }
+                if keithley_page is not None
+                else None
             )
-            keithley_snapshots = {
-                channel: self.keithley_page.configuration_snapshot_for(channel)
-                for channel in ("A", "B")
-            }
-            lakeshore_interval_ms = int(
-                self.lakeshore_gaussmeter_page.sample_interval.currentData()
-            )
-            moke_defaults = (
-                int(self.moke_box_page.sample_interval.currentData()),
-                int(self.moke_box_page.refresh_interval.currentData()),
-                int(self.moke_box_page.history_window.currentData()),
-            )
+            if lakeshore_page is not None:
+                lakeshore_interval_ms = int(lakeshore_page.sample_interval.currentData())
+            if moke_page is not None:
+                moke_defaults = (
+                    int(moke_page.sample_interval.currentData()),
+                    int(moke_page.refresh_interval.currentData()),
+                    int(moke_page.history_window.currentData()),
+                )
         except (ConfigurationError, SafetyViolation, TypeError, ValueError) as exc:
             QMessageBox.critical(self, "Settings not saved", str(exc))
             self._log(f"SAVE SETTINGS CAPTURE FAILED: {type(exc).__name__}: {exc}")
             return
 
-        try:
-            keithley_payload = self._keithley_snapshot_payload(keithley_snapshots)
-        except (ConfigurationError, SafetyViolation, KeyError, TypeError, ValueError) as exc:
-            QMessageBox.critical(self, "Keithley settings not saved", str(exc))
-            self.keithley_page.banner.show_message(f"Keithley settings not saved: {exc}")
-            self._log(f"SAVE SETTINGS REJECTED: {type(exc).__name__}: {exc}")
-            return
+        if keithley_snapshots is not None:
+            try:
+                keithley_payload = self._keithley_snapshot_payload(keithley_snapshots)
+            except (ConfigurationError, SafetyViolation, KeyError, TypeError, ValueError) as exc:
+                QMessageBox.critical(self, "Keithley settings not saved", str(exc))
+                if keithley_page is not None:
+                    keithley_page.banner.show_message(f"Keithley settings not saved: {exc}")
+                self._log(f"SAVE SETTINGS REJECTED: {type(exc).__name__}: {exc}")
+                return
 
         pending_keithley_defaults = self._pending_keithley_defaults
 
         def merge_device_forms(raw: dict[str, Any]) -> None:
-            for channel, payload in rigol_defaults.items():
-                defaults = raw["devices"]["rigol"]["safety"]["channels"][str(channel)]["defaults"]
-                defaults.clear()
-                defaults.update(deepcopy(payload))
+            if rigol_defaults is not None:
+                for channel, payload in rigol_defaults.items():
+                    defaults = raw["devices"]["rigol"]["safety"]["channels"][str(channel)]["defaults"]
+                    defaults.clear()
+                    defaults.update(deepcopy(payload))
 
-            snapshot, advanced, signal_generator, average_count, refresh_ms = anritsu_defaults
-            self._update_anritsu_defaults(raw, snapshot, advanced)
-            generator = raw["devices"]["anritsu"]["signal_generator"]
-            generator["default_frequency"] = format_quantity_auto(
-                signal_generator.frequency_hz, DIMENSION_FREQUENCY
-            )
-            generator["default_power"] = f"{signal_generator.power_dbm:.9g} dBm"
-            acquisition = raw["devices"]["anritsu"]["acquisition"]
-            acquisition["application_average_count"] = average_count
-            raw["devices"]["anritsu"]["preview"] = preview_defaults
-            acquisition["live_refresh_interval"] = format_quantity_auto(
-                refresh_ms / 1000, DIMENSION_TIME
-            )
+            if anritsu_defaults is not None:
+                snapshot, advanced, signal_generator, average_count, refresh_ms = anritsu_defaults
+                self._update_anritsu_defaults(raw, snapshot, advanced)
+                generator = raw["devices"]["anritsu"]["signal_generator"]
+                generator["default_frequency"] = format_quantity_auto(
+                    signal_generator.frequency_hz, DIMENSION_FREQUENCY
+                )
+                generator["default_power"] = f"{signal_generator.power_dbm:.9g} dBm"
+                acquisition = raw["devices"]["anritsu"]["acquisition"]
+                acquisition["application_average_count"] = average_count
+                raw["devices"]["anritsu"]["preview"] = preview_defaults
+                acquisition["live_refresh_interval"] = format_quantity_auto(
+                    refresh_ms / 1000, DIMENSION_TIME
+                )
 
-            raw["devices"]["lakeshore_gaussmeter"]["live_interval"] = format_quantity_auto(
-                lakeshore_interval_ms / 1000, DIMENSION_TIME
-            )
-            live_ms, refresh_plot_ms, history_seconds = moke_defaults
-            raw["devices"]["moke_box"].update(
-                {
-                    "live_interval": format_quantity_auto(live_ms / 1000, DIMENSION_TIME),
-                    "plot_refresh_interval": format_quantity_auto(
-                        refresh_plot_ms / 1000, DIMENSION_TIME
-                    ),
-                    "history_window": format_quantity_auto(history_seconds, DIMENSION_TIME),
-                }
-            )
+            if lakeshore_interval_ms is not None:
+                raw["devices"]["lakeshore_gaussmeter"]["live_interval"] = format_quantity_auto(
+                    lakeshore_interval_ms / 1000, DIMENSION_TIME
+                )
+            if moke_defaults is not None:
+                live_ms, refresh_plot_ms, history_seconds = moke_defaults
+                raw["devices"]["moke_box"].update(
+                    {
+                        "live_interval": format_quantity_auto(live_ms / 1000, DIMENSION_TIME),
+                        "plot_refresh_interval": format_quantity_auto(
+                            refresh_plot_ms / 1000, DIMENSION_TIME
+                        ),
+                        "history_window": format_quantity_auto(history_seconds, DIMENSION_TIME),
+                    }
+                )
 
             # A pending readback assignment owns all Keithley default fields
             # and is persisted by the background worker below.  Do not let a
             # stale manual form overwrite that snapshot in this transaction.
-            if pending_keithley_defaults is None:
+            if pending_keithley_defaults is None and keithley_payload is not None:
                 candidate = StationSettings.model_validate(raw)
                 validation_snapshots = deepcopy(keithley_payload)
                 channels = raw["devices"]["keithley"]["safety"]["channels"]
@@ -3431,7 +3979,10 @@ class MainWindow(FluentWindow):
                         }
                     )
 
-        if not self.settings_page.save_draft(extra_transform=merge_device_forms):
+        if self._settings_page is not None:
+            if not self._settings_page.save_draft(extra_transform=merge_device_forms):
+                return
+        elif not self._save_device_forms_without_settings_page(merge_device_forms):
             return
         if pending_keithley_defaults is not None:
             # The station-profile transaction has completed; now hand the
@@ -3449,6 +4000,64 @@ class MainWindow(FluentWindow):
         save_feedback.timeout.connect(lambda: self.safety_strip.save_settings.setText("SAVE SETTINGS"))
         save_feedback.timeout.connect(save_feedback.deleteLater)
         save_feedback.start(1_500)
+
+    def _save_device_forms_without_settings_page(
+        self,
+        extra_transform: Callable[[dict[str, Any]], None],
+    ) -> bool:
+        """Persist device-form updates directly without constructing lazy SettingsPage."""
+
+        try:
+            self._access.require(
+                Permission.EDIT_SETTINGS,
+                action="saving station settings",
+            )
+
+            def merge_latest(
+                latest: dict[str, Any], _settings: StationSettings
+            ) -> dict[str, Any]:
+                draft = deepcopy(latest)
+                extra_transform(draft)
+                SettingsPage._sync_moke_vout_permissions(draft)
+                self._repository.repair_known_issues(draft)
+                for channel in ("A", "B"):
+                    path = (
+                        "devices",
+                        "keithley",
+                        "safety",
+                        "channels",
+                        channel,
+                        "defaults",
+                        "source_autorange",
+                    )
+                    if (
+                        SettingsPage._get_path(draft, path[:-1]).get(
+                            "source_autorange", False
+                        )
+                        is True
+                        and SettingsPage._get_path(latest, path[:-1]).get(
+                            "source_autorange", False
+                        )
+                        is not True
+                    ):
+                        raise AuthorizationError(
+                            "Source AUTO requires explicit operator confirmation in Settings."
+                        )
+                return draft
+
+            settings, _draft = self._repository.update_raw(merge_latest)
+        except AuthorizationError as exc:
+            QMessageBox.critical(self, "Changes not saved", str(exc))
+            return False
+        except (ConfigurationError, ValueError) as exc:
+            QMessageBox.critical(
+                self,
+                "Changes not saved",
+                format_settings_validation_error(exc),
+            )
+            return False
+        self._settings_saved(settings)
+        return True
 
     def _start_keithley_defaults_save(self) -> None:
         if self._keithley_defaults_in_flight:
@@ -3470,26 +4079,35 @@ class MainWindow(FluentWindow):
         self._active_keithley_defaults = None
         self.safety_strip.save_settings.setEnabled(True)
         self.safety_strip.save_settings.setText("SAVED")
-        QTimer.singleShot(
-            1_500,
-            lambda: self.safety_strip.save_settings.setText("SAVE SETTINGS"),
+        save_feedback = QTimer(self.safety_strip.save_settings)
+        save_feedback.setSingleShot(True)
+        save_feedback.timeout.connect(
+            lambda: self.safety_strip.save_settings.setText("SAVE SETTINGS")
         )
+        save_feedback.timeout.connect(save_feedback.deleteLater)
+        save_feedback.start(1_500)
         if isinstance(persisted, StationSettings) and isinstance(raw, dict):
             self._settings = (
                 simulated_station_settings(persisted) if self._simulation else persisted
             )
-            self.settings_page.accept_external_snapshot(persisted, raw)
-            self.keithley_page.set_settings(self._settings)
-            self.recipe_page.set_settings(self._settings)
+            if self._settings_page is not None:
+                self._settings_page.accept_external_snapshot(persisted, raw)
+            keithley_page = self._realized_device_pages.get("keithley")
+            if keithley_page is not None:
+                keithley_page.set_settings(self._settings)
+            if self._recipe_page is not None:
+                self._recipe_page.set_settings(self._settings)
             self.quick_control_coordinator.set_settings(self._settings)
             self._controllers["keithley"].call("refresh_station_context", self._settings)
             self._refresh_safety_strip()
-        self.keithley_page.banner.show_message(
-            "Keithley defaults saved after explicit SAVE SETTINGS. The live instrument and "
-            "OUTPUT state were not changed.",
-            severity="success",
-            timeout_ms=4_000,
-        )
+        keithley_page = self._realized_device_pages.get("keithley")
+        if keithley_page is not None:
+            keithley_page.banner.show_message(
+                "Keithley defaults saved after explicit SAVE SETTINGS. The live instrument and "
+                "OUTPUT state were not changed.",
+                severity="success",
+                timeout_ms=4_000,
+            )
         self._log(f"KEITHLEY SETTINGS SAVE COMPLETED: generation {generation}")
 
     def _keithley_defaults_save_failed(self, generation: int, error: str) -> None:
@@ -3603,12 +4221,13 @@ class MainWindow(FluentWindow):
                             f"persisting detected baud_rate={detected_baud}"
                         )
             settings = self._repository.save_raw(raw)
-        except Exception as exc:
+        except (ConfigurationError, KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
             self._log(f"VISA ASSIGN FAILED: {type(exc).__name__}: {exc}")
             QMessageBox.critical(self, "VISA assignments not saved", str(exc))
             return
         self._log("VISA ASSIGN SAVED: settings.yml updated atomically")
-        self.settings_page.reload()
+        if self._settings_page is not None:
+            self._settings_page.reload()
         self._settings_saved(settings)
         self.dashboard.mark_assignments_saved(assignments)
         for device, (resource, backend, _idn) in assignments.items():
@@ -3619,7 +4238,10 @@ class MainWindow(FluentWindow):
     def _change_moke_address(self) -> None:
         if not self._access.allows(Permission.ASSIGN_VISA):
             return
-        if self._run_controller.running or self.moke_box_page.field_workflow.busy:
+        moke_page = self._realized_device_pages.get("moke_box")
+        if self._run_controller.running or (
+            moke_page is not None and moke_page.field_workflow.busy
+        ):
             QMessageBox.warning(self, "MOKE Box is in use", "Stop the active workflow before testing a new address.")
             return
         if not self._simulation and self._device_states["moke_box"] in {"connected", "verified", "armed"}:
@@ -3644,15 +4266,18 @@ class MainWindow(FluentWindow):
         except AuthorizationError as exc:
             QMessageBox.warning(self, "Access denied", str(exc))
             return
-        if self._run_controller.running or self.moke_box_page.field_workflow.busy:
+        moke_page = self._realized_device_pages.get("moke_box")
+        if self._run_controller.running or (
+            moke_page is not None and moke_page.field_workflow.busy
+        ):
             QMessageBox.warning(self, "MOKE Box is in use", "Stop the active workflow before changing its address.")
             return
         existing = self._settings.moke_box
         if existing.enabled and existing.protocol_qualified and existing.endpoint == endpoint:
             message = f"MOKE Box is already assigned to {endpoint}."
             self.dashboard.tcp_discovery_info.setText(message)
-            if confirmed:
-                show_toast(self.settings_page, message, severity="info", title="MOKE Box")
+            if confirmed and self._settings_page is not None:
+                show_toast(self._settings_page, message, severity="info", title="MOKE Box")
             return
         if not confirmed:
             answer = QMessageBox.question(
@@ -3678,28 +4303,35 @@ class MainWindow(FluentWindow):
         except (ConfigurationError, OSError, ValueError) as exc:
             QMessageBox.critical(self, "MOKE Box assignment not saved", str(exc))
             return
-        self.settings_page.accept_external_snapshot(settings, raw)
+        if self._settings_page is not None:
+            self._settings_page.accept_external_snapshot(settings, raw)
         self._settings_saved(settings)
         output_status = ("VOUT control permitted." if settings.moke_box.allow_vout_control else
                          "Read-only access. Review VOUT permissions in Settings → MOKE Box.")
         self.dashboard.tcp_discovery_info.setText(f"MOKE Box assigned to {endpoint}. {output_status}")
-        if confirmed:
-            show_toast(self.settings_page, output_status, severity="success", title=f"Assigned {endpoint}")
+        if confirmed and self._settings_page is not None:
+            show_toast(self._settings_page, output_status, severity="success", title=f"Assigned {endpoint}")
         self._log(f"MOKE BOX ASSIGN SUCCESS: endpoint={endpoint!r}; {output_status}")
 
     def _set_run_ui_locked(self, locked: bool) -> None:
+        self._execution_read_only_locked = bool(locked)
         self.quick_controls_window.setEnabled(not locked)
         if locked:
+            self._prepared_execution = None
             self.quick_control_coordinator.cancel_all("Recipe run owns the instruments")
-        if locked:
-            self.moke_box_page.stop_live(
-                "Live Hall readout paused while a recipe run owns the MOKE Box."
-            )
-            self.lakeshore_gaussmeter_page.stop_live(
-                "Live field readout paused while a recipe run owns the Lake Shore 475."
-            )
+            moke_page = self._realized_device_pages.get("moke_box")
+            if moke_page is not None:
+                moke_page.stop_live(
+                    "Live Hall readout paused while a recipe run owns the MOKE Box."
+                )
+            lakeshore_page = self._realized_device_pages.get("lakeshore_gaussmeter")
+            if lakeshore_page is not None:
+                lakeshore_page.stop_live(
+                    "Live field readout paused while a recipe run owns the Lake Shore 475."
+                )
         self._set_device_pages_execution_read_only(locked)
-        self.recipe_page.set_execution_controlled(locked)
+        if self._recipe_page is not None:
+            self._recipe_page.set_execution_controlled(locked)
         # Device routes remain available during a run so the operator can
         # inspect their last verified values, output state and plots. Recipe
         # editing and station-profile changes remain unavailable.
@@ -3708,6 +4340,30 @@ class MainWindow(FluentWindow):
         # page itself switches to an explicit read-only state while the
         # navigation item stays discoverable and clickable.
         self._set_route_enabled("sweeps", True)
+
+    def _lock_page_execution_read_only(self, page: QWidget) -> None:
+        controls: set[QWidget] = set()
+        for widget_type in (
+            QAbstractButton,
+            QAbstractSpinBox,
+            QComboBox,
+            QLineEdit,
+        ):
+            controls.update(page.findChildren(widget_type))
+        # Preserve the widget's own disabled flag before page handlers
+        # or the lock disable its ancestors. isEnabled() includes
+        # inherited state, which cannot be restored with setEnabled().
+        enabled_states = {
+            control: not control.testAttribute(Qt.WidgetAttribute.WA_ForceDisabled)
+            for control in controls
+        }
+        if isinstance(page, ExecutionTelemetryView):
+            page.set_execution_controlled(True)
+        for control, enabled in enabled_states.items():
+            if not isValid(control) or control.property("executionReadOnlyNavigation") is True:
+                continue
+            self._run_read_only_controls.setdefault(control, enabled)
+            control.setEnabled(False)
 
     def _set_device_pages_execution_read_only(self, locked: bool) -> None:
         """Keep device pages inspectable while the Run Engine owns I/O.
@@ -3719,41 +4375,23 @@ class MainWindow(FluentWindow):
         that can initiate an edit or command.
         """
 
+        realized = getattr(self, "_realized_device_pages", None)
+        device_pages = realized if isinstance(realized, dict) else self._device_pages
         if locked:
             if self._run_read_only_controls:
                 return
-            pages_to_lock = list(self._device_pages.values())
-            if hasattr(self, "keithley_characterization_page") and self.keithley_characterization_page is not None:
-                pages_to_lock.append(self.keithley_characterization_page)
+            pages_to_lock = list(device_pages.values())
+            char_page = MainWindow._peek_page(self, "keithley_characterization_page")
+            if char_page is not None:
+                pages_to_lock.append(char_page)
             for page in pages_to_lock:
-                controls: set[QWidget] = set()
-                for widget_type in (
-                    QAbstractButton,
-                    QAbstractSpinBox,
-                    QComboBox,
-                    QLineEdit,
-                ):
-                    controls.update(page.findChildren(widget_type))
-                # Preserve the widget's own disabled flag before page handlers
-                # or the lock disable its ancestors. isEnabled() includes
-                # inherited state, which cannot be restored with setEnabled().
-                enabled_states = {
-                    control: not control.testAttribute(Qt.WidgetAttribute.WA_ForceDisabled)
-                    for control in controls
-                }
-                if isinstance(page, ExecutionTelemetryView):
-                    page.set_execution_controlled(True)
-                for control, enabled in enabled_states.items():
-                    if not isValid(control) or control.property("executionReadOnlyNavigation") is True:
-                        continue
-                    self._run_read_only_controls[control] = enabled
-                    control.setEnabled(False)
+                MainWindow._lock_page_execution_read_only(self, page)
             return
         for control, enabled in self._run_read_only_controls.items():
             if control is not None and isValid(control):
                 control.setEnabled(enabled)
         self._run_read_only_controls.clear()
-        for page in self._device_pages.values():
+        for page in device_pages.values():
             if isinstance(page, ExecutionTelemetryView):
                 page.set_execution_controlled(False)
 
@@ -3874,9 +4512,7 @@ class MainWindow(FluentWindow):
         )
         self._event_log_entries.append(message)
         if not self.traffic_only_button.isChecked() or self._is_transport_log(message):
-            if critical or severity in {"error", "critical"} or (
-                getattr(self, "_simulation", False) and not self._run_controller.running
-            ):
+            if critical or severity in {"error", "critical"}:
                 self._flush_pending_log_ui()
                 self.log.appendPlainText(message)
             else:
@@ -3965,10 +4601,15 @@ class MainWindow(FluentWindow):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
+        if hasattr(self, "event_log_panel"):
+            self._sync_shell_splitter_layout()
+        timer = getattr(self, "_resize_sync_timer", None)
+        if timer is not None:
+            if not timer.isActive():
+                timer.start()
+            return
         if hasattr(self, "apparatus_navigation_item"):
             QTimer.singleShot(0, self._sync_apparatus_navigation_height)
-        if hasattr(self, "event_log_panel"):
-            QTimer.singleShot(0, self._sync_shell_splitter_layout)
 
     def _sync_apparatus_navigation_height(self) -> None:
         """Prevent QFluent's expanded tree from overlapping sibling routes."""
@@ -4027,12 +4668,12 @@ class MainWindow(FluentWindow):
         for widget in self._owned_floating_windows():
             widget.close()
 
-    def nativeEvent(self, event_type, message) -> tuple[bool, int]:  # noqa: N802 - Qt override
+    def nativeEvent(self, event_type, message) -> tuple[bool, int]:
         import sys
         if sys.platform == "win32":
             try:
                 import win32con
-                from qframelesswindow.windows import MSG, LPNCCALCSIZE_PARAMS, cast
+                from qframelesswindow.windows import LPNCCALCSIZE_PARAMS, MSG, cast
                 msg = MSG.from_address(message.__int__())
                 if msg.message == win32con.WM_NCCALCSIZE:
                     handled, result = super().nativeEvent(event_type, message)
@@ -4045,15 +4686,18 @@ class MainWindow(FluentWindow):
                         if new_w == old_w and new_h == old_h:
                             return True, 0
                     return handled, result
-            except Exception:
-                pass
+            except (ImportError, OSError, AttributeError, ValueError, TypeError):
+                return super().nativeEvent(event_type, message)
         return super().nativeEvent(event_type, message)
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        # RecipePage is hosted inside the Fluent stack, so its own closeEvent
-        # is not delivered when the application window closes. Ask it before
-        # persisting workspace state or beginning the shutdown sequence.
-        if not self.recipe_page.confirm_close():
+        if getattr(self, "_closed", False):
+            event.accept()
+            return
+        # Phase 1: non-destructive confirmation and active-work checks. Any
+        # rejected close returns before irreversible shell thread teardown.
+        recipe_page = MainWindow._peek_page(self, "recipe_page")
+        if recipe_page is not None and not recipe_page.confirm_close():
             event.ignore()
             return
         preparation = getattr(self, "_resume_preparation", None)
@@ -4061,17 +4705,28 @@ class MainWindow(FluentWindow):
             self._log("Application close is waiting for recovery archive inspection to finish.")
             event.ignore()
             return
-        if not self.moke_box_page.field_workflow.prepare_application_shutdown():
+        moke_page = MainWindow._peek_page(self, "moke_box_page", "moke_box")
+        if moke_page is not None and not moke_page.field_workflow.prepare_application_shutdown():
             self._navigate_to("moke_box")
-            self.moke_box_page.views.setCurrentIndex(3)
+            moke_page.views.setCurrentIndex(3)
             event.ignore()
             return
-        if not self.keithley_page.characterization_card.prepare_application_shutdown():
+        keithley_page = MainWindow._peek_page(self, "keithley_page", "keithley")
+        if (
+            keithley_page is not None
+            and not keithley_page.characterization_card.prepare_application_shutdown()
+        ):
             self._navigate_to("keithley_characterization")
-            self.keithley_page.characterization_card.banner.show_message(
+            keithley_page.characterization_card.banner.show_message(
                 "Application close is waiting for characterization shutdown, policy restoration or reporting. "
                 "Complete any displayed recovery step, then close again.",
-                severity="warning", timeout_ms=0)
+                severity="warning",
+                timeout_ms=0,
+            )
+            event.ignore()
+            return
+        if getattr(self, "_keithley_defaults_in_flight", False):
+            self._log("Application close is waiting for Keithley settings persistence to finish.")
             event.ignore()
             return
         self._audit_record(
@@ -4085,13 +4740,26 @@ class MainWindow(FluentWindow):
             self._log("Application close is waiting for read-only discovery workers to finish.")
             event.ignore()
             return
-        if self.anritsu_page._background_assistant is not None:
-            self.anritsu_page._background_assistant.reject()
-        if not self.anritsu_page.correction_workspace.shutdown():
-            self._log("Application close is waiting for spectrum correction checkpoints and processing to finish.")
-            event.ignore()
-            return
-        if not self.recipe_page.cancel_preflight():
+        anritsu_page = MainWindow._peek_page(self, "anritsu_page", "anritsu")
+        if anritsu_page is not None:
+            if getattr(anritsu_page, "_background_assistant", None) is not None:
+                anritsu_page._background_assistant.reject()
+            correction_ws = getattr(anritsu_page, "_correction_workspace", None)
+            if correction_ws is not None and not correction_ws.shutdown():
+                self._log(
+                    "Application close is waiting for spectrum correction checkpoints and processing to finish."
+                )
+                event.ignore()
+                return
+            if not anritsu_page.prepare_manual_archive_shutdown():
+                self._log("Application close is waiting for manual spectrum archive I/O to finish.")
+                event.ignore()
+                return
+            if not anritsu_page.shutdown_analysis():
+                self._log("Application close is waiting for spectrum analysis threads to finish.")
+                event.ignore()
+                return
+        if recipe_page is not None and not recipe_page.cancel_preflight():
             self._audit_record(
                 "Application close blocked: recipe validation is still stopping",
                 severity="error",
@@ -4124,11 +4792,13 @@ class MainWindow(FluentWindow):
             )
             event.ignore()
             return
-        if not self.results_page.shutdown():
+        results_page = MainWindow._peek_page(self, "results_page")
+        if results_page is not None and not results_page.shutdown():
             self._log("Application close is waiting for result readers to finish.")
             event.ignore()
             return
-        if not self.elab_page.shutdown():
+        elab_page = MainWindow._peek_page(self, "elab_page")
+        if elab_page is not None and not elab_page.shutdown():
             self._audit_record(
                 "Application close blocked: eLab network work is still stopping",
                 severity="error",
@@ -4144,21 +4814,9 @@ class MainWindow(FluentWindow):
             )
             event.ignore()
             return
-        self._keithley_defaults_timer.stop()
-        self._pending_keithley_defaults = None
-        self._keithley_defaults_thread.quit()
-        self._keithley_defaults_thread.wait(5_000)
-        self._close_owned_floating_windows()
         self.quick_control_coordinator.cancel_all("Application closing")
-        self.anritsu_page._timer.stop()
-        if not self.anritsu_page.prepare_manual_archive_shutdown():
-            self._log("Application close is waiting for manual spectrum archive I/O to finish.")
-            event.ignore()
-            return
-        if not self.anritsu_page.shutdown_analysis():
-            self._log("Application close is waiting for spectrum analysis threads to finish.")
-            event.ignore()
-            return
+        if anritsu_page is not None:
+            anritsu_page._timer.stop()
         if not DeviceController.close_all(self._controllers.values()):
             self._audit_record(
                 "Application close delayed: background device threads did not terminate cleanly within timeout",
@@ -4175,6 +4833,30 @@ class MainWindow(FluentWindow):
             )
             event.ignore()
             return
+
+        # Phase 2: irreversible teardown (all shutdown guards have succeeded).
+        self._closed = True
+        for timer_attr in (
+            "_audit_health_timer",
+            "_log_ui_flush_timer",
+            "_resize_sync_timer",
+            "_execution_preview_timer",
+            "_execution_readback_timer",
+            "_execution_event_timer",
+            "_keithley_defaults_timer",
+        ):
+            timer = getattr(self, timer_attr, None)
+            if timer is not None:
+                timer.stop()
+        self._pending_keithley_defaults = None
+        self._keithley_defaults_thread.quit()
+        self._keithley_defaults_thread.wait(5_000)
+        self._close_owned_floating_windows()
+        for plot in self.findChildren(SpectrumPlotWidget):
+            plot.cleanup_plot()
+        for managed_widget, _source in list(styleSheetManager.items()):
+            if not isValid(managed_widget) or managed_widget is self or self.isAncestorOf(managed_widget):
+                styleSheetManager.deregister(managed_widget)
         try:
             self._audit.close()
         except (OSError, RuntimeError):

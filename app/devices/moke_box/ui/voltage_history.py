@@ -7,13 +7,13 @@ import time
 from collections import deque
 
 import pyqtgraph as pg
-from app.ui.widgets.plot_ownership import create_plot_widget, own_viewbox_menu
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import CaptionLabel, ComboBox, isDarkTheme, qconfig
 
 from app.domain.errors import ConfigurationError
 from app.ui.design_system import plot_theme, tokens_for
+from app.ui.widgets.plot_ownership import create_plot_widget, own_viewbox_menu
 
 
 class MokeVoltageHistory(QWidget):
@@ -76,11 +76,23 @@ class MokeVoltageHistory(QWidget):
         self._window_timer = QTimer(self)
         self._window_timer.setInterval(50)
         self._window_timer.timeout.connect(self._refresh_visible_window)
-        self._window_timer.start()
+
+    def _sync_window_timer(self) -> None:
+        active = self.isVisible() and bool(self.points or self.requested_points)
+        if active:
+            if not self._window_timer.isActive():
+                self._window_timer.start()
+        elif self._window_timer.isActive():
+            self._window_timer.stop()
 
     def showEvent(self, event):
         super().showEvent(event)
         self._refresh_window()
+        self._sync_window_timer()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._sync_window_timer()
 
     def _window_changed(self, _index):
         self._window_s = self.window_selector.currentData()
@@ -89,6 +101,8 @@ class MokeVoltageHistory(QWidget):
     def _refresh_visible_window(self):
         if self.isVisible():
             self._refresh_window()
+        else:
+            self._sync_window_timer()
 
     def _refresh_window(self):
         now_s = time.monotonic() - self._origin
@@ -115,6 +129,8 @@ class MokeVoltageHistory(QWidget):
                 curve.clear()
         self.plot.setXRange(-self._window_s, 0, padding=0)
         self._sync_geometry()
+        if not self.points and not self.requested_points:
+            self._sync_window_timer()
 
     def _sync_geometry(self):
         self.field_view.setGeometry(self.item.vb.sceneBoundingRect())
@@ -140,11 +156,13 @@ class MokeVoltageHistory(QWidget):
         for curve in (self.voltage_curve, self.requested_curve, self.ascending_curve, self.descending_curve):
             curve.clear()
         self.plot.setXRange(-self._window_s, 0, padding=0)
+        self._sync_window_timer()
 
     def append_requested(self, voltage_v):
         """A draft is never a DAC measurement or a basis for field prediction."""
         value = voltage_v if voltage_v is not None and math.isfinite(voltage_v) else float("nan")
         self.requested_points.append((time.monotonic() - self._origin, value))
+        self._sync_window_timer()
         # The timer draws at a fixed cadence; editor events never redraw plots.
 
     def append(self, voltage_v, model=None):
@@ -168,3 +186,6 @@ class MokeVoltageHistory(QWidget):
             cutoff_s = time.monotonic() - self._origin - self.WINDOW_S
             while self.points and self.points[0][0] < cutoff_s:
                 self.points.popleft()
+        else:
+            self._refresh_window()
+            self._sync_window_timer()

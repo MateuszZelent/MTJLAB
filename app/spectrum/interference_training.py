@@ -1,11 +1,12 @@
 """Offline local basis from bounded REF samples; no signal-driven training."""
 
-from dataclasses import dataclass, replace
 import json
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from app.domain.spectrum_interference import SpectrumInterferenceCalibration
+
 from .background_profile import BackgroundProfileBuilder
 from .interference_model import calibrated_interference_model
 
@@ -33,9 +34,12 @@ def training_buffer_bytes(size, count, config):
     return (8 * selected_count * size + 32 * size + 8 * selected_count**2) * 8
 
 
+_DEFAULT_TRAINING_CONFIG = InterferenceTrainingConfig()
+
+
 def train_interference_basis(context, profile, frame_factory, *, model_id, nuisance_mask,
                              control_mask, protected_mask, control_sigma_w,
-                             config=InterferenceTrainingConfig(), provenance=None,
+                             config=_DEFAULT_TRAINING_CONFIG, provenance=None,
                              signal_control_regions_qualified=False, qualification_evidence="",
                              cancellation_check=None):
     """frame_factory supplies fresh iterators of accepted REF (envelope, W).

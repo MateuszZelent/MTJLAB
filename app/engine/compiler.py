@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, is_dataclass, replace
-from collections.abc import Iterable, Mapping
 import hashlib
 import json
 import math
 import re
-from typing import TYPE_CHECKING, Any, Callable, Final
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
+from typing import TYPE_CHECKING, Any, Final
 
 from app.devices.anritsu_ms2830a.adapter import (
     AdvancedSpectrumConfig,
@@ -16,6 +16,7 @@ from app.devices.anritsu_ms2830a.adapter import (
     SpectrumConfig,
 )
 from app.devices.anritsu_ms2830a.averaging import instrument_average_count_for_duration
+from app.devices.keithley_2600.adapter import build_keithley_ramp_levels
 from app.devices.rigol_dg1000z.adapter import RigolChannelConfig, RigolOutputConfig
 from app.domain.errors import ConfigurationError, ExecutionError, SafetyViolation
 from app.domain.immutable import freeze_configuration
@@ -36,22 +37,24 @@ from app.domain.spectrum_averaging import (
 from app.recipes.models import Recipe, RecipeNode, validate_action_fields
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.recipes.semantic_tree import (
-    AxisPointContext, SemanticMeasurementTree, axis_update_matches, normalize_recipe_tree,
+    AxisPointContext,
+    SemanticMeasurementTree,
+    axis_update_matches,
+    normalize_recipe_tree,
 )
 from app.recipes.sweep_points import generate_sweep_points
-if TYPE_CHECKING:
-    from app.contracts import DeviceModuleRegistry
-from app.safety.keithley import (
-    KeithleySourceRequest,
-    quantize_keithley_value,
-    validate_keithley_source,
-)
 from app.safety.anritsu import (
     validate_anritsu_advanced_spectrum,
     validate_anritsu_signal_generator,
     validate_anritsu_spectrum,
     validate_anritsu_trace_name,
 )
+from app.safety.keithley import (
+    KeithleySourceRequest,
+    quantize_keithley_value,
+    validate_keithley_source,
+)
+from app.safety.moke_box import MokeVoltagePlan, control_profile_from_settings
 from app.safety.rigol_current import (
     quantize_rigol_frequency,
     quantize_rigol_level_pair,
@@ -60,8 +63,10 @@ from app.safety.rigol_current import (
     validate_rigol_waveform,
 )
 from app.settings.models import StationSettings
-from app.safety.moke_box import MokeVoltagePlan, control_profile_from_settings
 from app.storage.moke_calibration_store import MokeCalibrationRepository
+
+if TYPE_CHECKING:
+    from app.contracts import DeviceModuleRegistry
 
 
 _REFERENCE_RE: Final = re.compile(r"^\$\{([A-Za-z0-9_.-]+)}$")
@@ -95,6 +100,10 @@ class ExecutionPlan:
     recipe_dut_limits: dict[str, Any] = field(default_factory=dict)
     elab_upload_config: dict[str, Any] | None = None
     total_control_points: int = 0
+
+    @property
+    def may_skip_compliance_points(self) -> bool:
+        return any("_compliance_scope_ends" in action.payload for action in self.actions)
 
     @property
     def retained_outputs(self) -> frozenset[str]:
@@ -228,12 +237,17 @@ class RecipeCompiler:
                 )
                 action.payload["request"] = replace(merged, changed_fields=request.changed_fields)
                 self._planned_keithley_requests[request.channel] = merged
-            elif action.kind in {"update_keithley_level", "update_keithley_compliance"}:
+            elif action.kind in {"update_keithley_level", "update_keithley_compliance", "ramp_keithley_current"}:
                 channel = action.payload["channel"]
                 previous = self._planned_keithley_requests.get(channel)
                 if previous is not None:
-                    field = "level_si" if action.kind == "update_keithley_level" else "compliance_si"
+                    field = "compliance_si" if action.kind == "update_keithley_compliance" else "level_si"
                     self._planned_keithley_requests[channel] = replace(previous, **{field: action.payload[field]})
+            elif action.kind == "ramp_keithley_to_zero":
+                channel = action.payload["channel"]
+                previous = self._planned_keithley_requests.get(channel)
+                if previous is not None:
+                    self._planned_keithley_requests[channel] = replace(previous, level_si=0.0)
             if action.kind == "configure_rigol":
                 config = action.payload["config"]
                 previous = self._planned_rigol_configs.get(config.channel)
@@ -463,6 +477,37 @@ class RecipeCompiler:
             axis_context=axis_context,
         )
 
+    def _append_keithley_transition(self, actions: list[PlanAction], point: PlanAction) -> None:
+        """Insert physical source updates between two authored acquisition points."""
+        channel = point.payload["channel"]
+        channel_settings = self._settings.keithley.safety.channels[channel]
+        request = self._planned_keithley_requests[channel]
+        start = self._quantize_keithley_request(request).level_si
+        target = point.payload["level_si"]
+        max_step = parse_quantity(
+            channel_settings.lab_limits.ramp_current_step_max, DIMENSION_CURRENT
+        ).si_value
+        levels = build_keithley_ramp_levels(
+            start, target, max_step, max_points=channel_settings.lab_limits.sweep_points_max,
+        )
+        if len(actions) + len(levels) > self._max_actions:
+            raise SafetyViolation("Keithley transitions exceed the expanded action limit.")
+        previous = start
+        for index, level in enumerate(levels[:-1], start=1):
+            applied = self._quantize_keithley_request(replace(request, level_si=level)).level_si
+            if abs(applied - previous) > max_step + 1e-12:
+                raise SafetyViolation("Quantized Keithley transition exceeds the station ramp step.")
+            actions.append(PlanAction(
+                f"{point.node_id}.transition.{index}",
+                "update_keithley_level",
+                {"channel": channel, "mode": "current", "level_si": applied},
+                {**point.setpoints_si, point.payload["target"]: applied},
+                source_node_id=point.source_node_id,
+            ))
+            previous = applied
+        if abs(target - previous) > max_step + 1e-12:
+            raise SafetyViolation("Quantized Keithley transition exceeds the station ramp step.")
+
     def compile(self, recipe: Recipe) -> ExecutionPlan:
         self._check_cancelled()
         actions: list[PlanAction] = []
@@ -636,7 +681,7 @@ class RecipeCompiler:
                 validate_keithley_source(self._settings.keithley.safety.channels[request.channel], merged)
                 action.payload["request"] = replace(merged, changed_fields=request.changed_fields)
                 configured[request.channel] = merged
-            elif action.kind == "update_keithley_level":
+            elif action.kind in {"update_keithley_level", "ramp_keithley_current"}:
                 channel = action.payload["channel"]
                 request = configured.get(channel)
                 if request is not None:
@@ -729,6 +774,10 @@ class RecipeCompiler:
             if kind == "configure_anritsu" and payload["config"].is_complete_configuration:
                 if output_enabled.get(("anritsu_sg", "RF"), False):
                     raise ConfigurationError(f"{action.node_id}: turn SG RF OFF explicitly before selecting Spectrum Analyzer mode.")
+                if anritsu_mode == "sg":
+                    # Returning from SG mode must always run the full mode transition
+                    # and physically confirm RF OFF rather than a partial field patch.
+                    payload["config"] = replace(payload["config"], changed_fields=None)
                 anritsu_mode = "spectrum"
                 configured.discard(("anritsu_sg", "RF"))
             elif kind == "configure_anritsu_advanced":
@@ -812,7 +861,7 @@ class RecipeCompiler:
 
             update_device: str | None = None
             update_channel: str | None = None
-            if kind in {"update_keithley_level", "update_keithley_compliance"}:
+            if kind in {"update_keithley_level", "update_keithley_compliance", "ramp_keithley_current"}:
                 update_device = "keithley"
                 update_channel = str(payload["channel"])
             elif kind in {"update_rigol_frequency", "update_rigol_levels"}:
@@ -828,6 +877,8 @@ class RecipeCompiler:
                         f"{action.node_id}: {kind} requires an earlier configuration "
                         f"for {update_device} channel {update_channel}."
                     )
+                if kind == "ramp_keithley_current" and not output_enabled.get(update_key, False):
+                    raise ConfigurationError(f"{action.node_id}: Keithley ramp requires an earlier OUTPUT ON.")
                 if kind == "update_rigol_levels":
                     before = rigol_carriers[update_channel]
                     high, low = payload["high_level_v"], payload["low_level_v"]
@@ -843,6 +894,8 @@ class RecipeCompiler:
 
             output_device: str | None = None
             output_channel: str | None = None
+            if kind == "ramp_keithley_to_zero":
+                output_enabled[("keithley", str(payload["channel"]))] = False
             if kind == "set_keithley_output":
                 output_device, output_channel = "keithley", str(payload["channel"])
             elif kind == "set_rigol_output":
@@ -853,12 +906,11 @@ class RecipeCompiler:
                 continue
             output_key = (output_device, output_channel)
             enabled = bool(payload["enabled"])
-            if enabled:
-                if output_key not in configured:
-                    raise ConfigurationError(
-                        f"{action.node_id}: {kind} requires an earlier configuration "
-                        f"for {output_device} channel {output_channel}."
-                    )
+            if enabled and output_key not in configured:
+                raise ConfigurationError(
+                    f"{action.node_id}: {kind} requires an earlier configuration "
+                    f"for {output_device} channel {output_channel}."
+                )
             output_enabled[output_key] = enabled
 
     @staticmethod
@@ -912,9 +964,8 @@ class RecipeCompiler:
             device = allowed[action]
             if device == "storage":
                 continue
-            if device in required_devices:
-                if action not in result:
-                    result.append(action)
+            if device in required_devices and action not in result:
+                result.append(action)
         required_actions = {
             "keithley": "keithley.outputs_off",
             "rigol": "rigol.outputs_off",
@@ -1296,8 +1347,14 @@ class RecipeCompiler:
                     f"{node.id}: DeviceNode provider compilation is not implemented "
                     f"for {node.data.get('device_module', 'unknown')!r}."
                 )
+            child_spans = []
             for child in node.children:
+                start = len(actions)
                 self._visit(child, context, actions, is_finally=is_finally)
+                if len(actions) > start:
+                    child_spans.append((child, start, len(actions)))
+            if not is_finally:
+                self._mark_current_scan_approach(actions, child_spans)
             return
         if node.type in {"enable_rigol_output", "enable_anritsu_sg_output"}:
             if is_finally:
@@ -1408,8 +1465,12 @@ class RecipeCompiler:
                     raise ConfigurationError(
                         f"{node.id}: physical sweep {target!r} requires explicit device configuration before its points."
                     )
+            respect_ramp_step = node.data.get("respect_ramp_step", False)
+            if respect_ramp_step and (not configured or authored_configuration or is_finally):
+                raise ConfigurationError(f"{node.id}: bounded transitions require a preconfigured Keithley source.")
             for point_index, value in enumerate(self._node_sweep_values(node, dimension, context)):
                 self._check_cancelled()
+                point_start = len(actions)
                 nested = dict(context)
                 nested[target] = value
                 binding = self._semantic_axes_by_source.get(node.id)
@@ -1430,6 +1491,8 @@ class RecipeCompiler:
                         len(binding.points),
                         self._active_axis_path,
                     )
+                    if respect_ramp_step:
+                        self._append_keithley_transition(actions, point_action)
                     actions.append(point_action)
                     generated_kind = point_action.kind
                 previous_path = self._active_axis_path
@@ -1445,6 +1508,12 @@ class RecipeCompiler:
                 finally:
                     self._active_axis_path = previous_path
                     self._active_axis_context = previous_context
+                if generated_kind == "update_keithley_level" and point_action.payload["mode"] == "current":
+                    channel = point_action.payload["channel"]
+                    self._mark_current_sweep_point(
+                        actions, point_start, node.id, self._planned_keithley_requests[channel],
+                        point_action.payload["level_si"],
+                    )
             return
         if node.type == "repeat":
             for index in range(int(node.data["count"])):
@@ -1466,6 +1535,73 @@ class RecipeCompiler:
         actions.append(action)
         if not is_finally:
             self._remember_literal_configuration(action, context)
+
+    def _mark_current_sweep_point(
+        self, actions: list[PlanAction], start: int, owner: str,
+        request: KeithleySourceRequest, destination: float,
+    ) -> None:
+        point_actions = actions[start:]
+        if not all(
+            item.kind in {
+                "update_keithley_level", "wait", "measure_keithley", "acquire_spectrum",
+                "measure_lakeshore_field", "measure_moke_hall", "checkpoint", "assert_output_on",
+            }
+            and (item.kind != "update_keithley_level" or
+                 item.source_node_id == owner or "_compliance_reentry" in item.payload)
+            for item in point_actions
+        ):
+            # Advancing past a point must never bypass configuration, reference
+            # acquisition, output changes, or mandatory cleanup.
+            return
+        limits = self._settings.keithley.safety.channels[request.channel].lab_limits
+        step = parse_quantity(limits.ramp_current_step_max, DIMENSION_CURRENT).si_value
+        settle = request.settle_time_s
+        if limits.point_settle_time is not None and limits.point_settle_time.enabled:
+            settle = max(settle, parse_quantity(limits.point_settle_time.min, DIMENSION_TIME).si_value)
+        for index, item in enumerate(point_actions):
+            item.payload.setdefault("_compliance_scope_ends", {})[request.channel] = len(actions)
+            if item.kind == "update_keithley_level" and item.source_node_id == owner:
+                item.payload["_compliance_reentry"] = (step, settle, destination)
+                # Reuse the planned, settled I/V or the spectrum's safety
+                # read if it occurs before another mutation or checkpoint.
+                next_check = next((
+                    following for following in point_actions[index + 1:]
+                    if following.kind != "wait"
+                    and not (following.kind == "measure_keithley" and
+                             following.payload["channel"] != request.channel)
+                ), None)
+                item.payload["_compliance_check_after_update"] = (
+                    next_check is None or next_check.kind not in {"measure_keithley", "acquire_spectrum"}
+                )
+
+    @staticmethod
+    def _mark_current_scan_approach(actions, child_spans) -> None:
+        """Bind a scan to its immediately preceding, independently ramped bias."""
+        for index, (child, start, end) in enumerate(child_spans):
+            if child.type != "sweep":
+                continue
+            target = child.data["target"]
+            if target not in {"keithley.A.current", "keithley.B.current",
+                              "keithley.A.level", "keithley.B.level"}:
+                continue
+            swept_channel = target.split(".")[1]
+            if not all(swept_channel in item.payload.get("_compliance_scope_ends", {})
+                       for item in actions[start:end]):
+                continue
+            # A current ramp directly before the scan may approach its first
+            # point. If curtailed, the scan can still enter on its inward leg.
+            for previous, ramp_start, ramp_end in reversed(child_spans[:index]):
+                if previous.type != "ramp_keithley_current" or ramp_end != start:
+                    break
+                ramp = actions[ramp_start]
+                channel = ramp.payload["channel"]
+                if channel == swept_channel:
+                    ramp.payload["_compliance_scan_approach"] = True
+                    start = ramp_start
+                    continue
+                for item in actions[ramp_start:end]:
+                    item.payload.setdefault("_compliance_scope_ends", {})[channel] = end
+                break
 
     def _visit_keithley_device_node(
         self,
@@ -1753,6 +1889,7 @@ class RecipeCompiler:
         )
         for point_index, value in enumerate(sweep_values or (None,)):
             self._check_cancelled()
+            point_start = len(actions)
             previous_context = self._active_axis_context
             point_context = self._legacy_axis_context(node, value, point_index)
             if point_context is not None:
@@ -1836,6 +1973,10 @@ class RecipeCompiler:
                 actions.append(wait_action)
             for child in node.children:
                 self._visit(child, nested, actions, is_finally=False)
+            if mode == "current" and sweep_parameter == "source.level" and value is not None:
+                self._mark_current_sweep_point(
+                    actions, point_start, node.id, configured_request, previous_applied_signature,
+                )
             self._active_axis_context = previous_context
 
         if output_policy == "on":
@@ -2669,7 +2810,7 @@ class RecipeCompiler:
                     request.level_si, dimension
                 )
             return
-        if action.kind == "update_keithley_level":
+        if action.kind in {"update_keithley_level", "ramp_keithley_current"}:
             mode = action.payload["mode"]
             dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
             context[f"keithley.{action.payload['channel']}.{mode}"] = Quantity(action.payload["level_si"], dimension)
@@ -3016,12 +3157,13 @@ class RecipeCompiler:
             ))
         elif node.type == "configure_anritsu_advanced":
             payload = self._compile_anritsu_advanced(data, node.id)
-        elif node.type == "configure_anritsu_sg":
-            payload = self._compile_anritsu_signal_generator(data)
-        elif node.type == "update_anritsu_sg":
+        elif node.type in {"configure_anritsu_sg", "update_anritsu_sg"}:
             payload = self._compile_anritsu_signal_generator(data)
         elif node.type == "update_keithley_level":
             payload = self._compile_keithley_level_update(data, node.id)
+        elif node.type == "ramp_keithley_current":
+            payload = self._compile_keithley_current_ramp(data, node.id)
+            setpoints[payload["target"]] = payload["requested_si"]
         elif node.type == "update_keithley_compliance":
             channel, mode = data.get("channel"), data.get("mode")
             request = self._planned_keithley_requests.get(channel)
@@ -3322,7 +3464,7 @@ class RecipeCompiler:
             is_finally=is_finally,
             semantic_id=semantic_id,
             source_node_id=node.id if semantic_id else None,
-            axis_context=self._active_axis_context,
+            axis_context=None if action_kind == "ramp_keithley_current" else self._active_axis_context,
         )
 
     @staticmethod
@@ -3402,6 +3544,46 @@ class RecipeCompiler:
                     f"the station range [{minimum:g}, {maximum:g}]."
                 )
         return {"channel": channel, "mode": mode, "level_si": level}
+
+    def _compile_keithley_current_ramp(self, data: dict[str, Any], node_id: str) -> dict[str, Any]:
+        channel = str(data.get("channel", ""))
+        previous = self._planned_keithley_requests.get(channel)
+        if previous is None or previous.mode != "current":
+            raise ConfigurationError(f"{node_id}: ramp requires a configured Keithley current source.")
+        station_channel = self._settings.keithley.safety.channels[channel]
+        limits = station_channel.lab_limits
+        requested = self._resolve_quantity(data.get("level"), DIMENSION_CURRENT, {}).si_value
+        maximum_step = parse_quantity(limits.ramp_current_step_max, DIMENSION_CURRENT).si_value
+        step = self._resolve_quantity(data.get("step", limits.ramp_current_step_max), DIMENSION_CURRENT, {}).si_value
+        settle = self._resolve_quantity(data.get("settle_time"), DIMENSION_TIME, {}).si_value
+        deadline = self._resolve_quantity(data.get("deadline", "30 s"), DIMENSION_TIME, {}).si_value
+        if not 0 < step <= maximum_step:
+            raise SafetyViolation(f"{node_id}: ramp step must be positive and at most {limits.ramp_current_step_max}.")
+        if not 0 < deadline <= 120:
+            raise SafetyViolation(f"{node_id}: ramp deadline must be in the range (0, 120] s.")
+        settle_limits = limits.point_settle_time
+        if settle < 0 or (settle_limits is not None and settle_limits.enabled and not
+                parse_quantity(settle_limits.min, DIMENSION_TIME).si_value <= settle <=
+                parse_quantity(settle_limits.max, DIMENSION_TIME).si_value):
+            raise SafetyViolation(f"{node_id}: settling time is outside the station ramp limits.")
+        target_request = replace(previous, level_si=requested)
+        validate_keithley_source(station_channel, target_request)
+        target = self._quantize_keithley_request(target_request)
+        validate_keithley_source(station_channel, target)
+        start = self._quantize_keithley_request(previous).level_si
+        levels = build_keithley_ramp_levels(start, target.level_si, step, max_points=limits.sweep_points_max)
+        if len(levels) * settle >= deadline:
+            raise SafetyViolation(f"{node_id}: ramp settling time alone reaches or exceeds its deadline.")
+        for level in levels:
+            applied = self._quantize_keithley_request(replace(previous, level_si=level)).level_si
+            if abs(applied - start) > step + 1e-12:
+                raise SafetyViolation(f"{node_id}: quantized level exceeds the requested ramp step.")
+            start = applied
+        return {
+            "channel": channel, "mode": "current", "target": f"keithley.{channel}.current",
+            "level_si": target.level_si, "requested_si": requested, "step_si": step,
+            "settle_time_s": settle, "deadline_s": deadline, "planned_step_count": len(levels),
+        }
 
     def _compile_rigol_frequency_update(
         self, data: dict[str, Any], node_id: str

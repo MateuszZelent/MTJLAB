@@ -11,7 +11,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import median_filter
 
 from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto
 
@@ -34,6 +33,8 @@ def _median(values, window):
     SciPy's 1-D implementation maintains the moving rank instead of copying
     and partitioning every overlapping window (three passes per spectrum).
     """
+    from scipy.ndimage import median_filter
+
     return median_filter(values, size=window, mode="nearest")
 
 

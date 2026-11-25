@@ -45,8 +45,10 @@ from app.ui.design_system import SPACING, tokens_for
 from app.ui.widgets import FluentTabView, SpectrumPlotWidget
 from app.recipes.parameter_registry import PARAMETERS_BY_TARGET
 from app.recipes.semantic_tree import AxisPointContext, SemanticMeasurementTree, SemanticNodeKind
-from app.domain.quantities import DIMENSION_TIME, format_quantity_auto
+from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_TIME, format_quantity_auto
 from app.domain.execution_state import SemanticOperationState
+from app.engine.compiler import ExecutionPlan
+from app.engine.estimation import PlanEstimate
 from app.spectrum.processing import peak_preserving_indices
 from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeView, TreeInteractionMode
 from app.ui.execution.plan_timeline import ExecutionPlanTimeline
@@ -189,7 +191,7 @@ class ManualStageDialog(StationDialog):
 class SweepCompletionDialog(MessageBoxBase):
     """Show the completion acknowledgement inside the Execute viewport."""
 
-    def __init__(self, parent: QWidget, count: int, *, holding: bool) -> None:
+    def __init__(self, parent: QWidget, count: int, *, holding: bool, compliance_skipped: int = 0) -> None:
         super().__init__(parent)
         self.setObjectName("sweepCompletionDialog")
         self.setWindowFlags(Qt.WindowType.Widget)
@@ -201,6 +203,8 @@ class SweepCompletionDialog(MessageBoxBase):
         self.setAccessibleName(self.title.text())
         points = "measurement point" if count == 1 else "measurement points"
         summary = f"{count} {points} saved to HDF5."
+        if compliance_skipped:
+            summary += f"\nKeithley compliance skipped {compliance_skipped} planned point(s)."
         if holding:
             summary += "\nThe requested final outputs remain active."
         self.summary = BodyLabel(summary, self.widget)
@@ -230,6 +234,7 @@ class SweepCompletionDialog(MessageBoxBase):
 
 
 class RunMonitorPage(QWidget):
+    launch_requested = Signal()
     stop_requested = Signal()
     pause_requested = Signal()
     resume_requested = Signal()
@@ -260,6 +265,33 @@ class RunMonitorPage(QWidget):
         self.state.setObjectName("readout")
         self.state.setProperty("deviceState", "compliance")
         hero_layout.addWidget(self.state)
+        self.launch_card = CardWidget(self)
+        self.launch_card.setObjectName("executionPlanReview")
+        launch_layout = QGridLayout(self.launch_card)
+        launch_layout.setContentsMargins(18, 12, 18, 12)
+        launch_layout.setColumnStretch(0, 1)
+        self.plan_preview_name = StrongBodyLabel(self.launch_card)
+        self.plan_preview_name.setTextFormat(Qt.TextFormat.PlainText)
+        self.plan_preview_name.setWordWrap(True)
+        self.plan_preview_summary = BodyLabel(self.launch_card)
+        self.plan_preview_summary.setWordWrap(True)
+        self.plan_preview_output = CaptionLabel(self.launch_card)
+        self.plan_preview_output.setTextFormat(Qt.TextFormat.PlainText)
+        self.plan_preview_output.setWordWrap(True)
+        self.plan_preview_output.setObjectName("muted")
+        self.launch_button = PrimaryPushButton("Run", self.launch_card)
+        self.launch_button.setEnabled(False)
+        self.launch_button.clicked.connect(lambda: self.launch_requested.emit())
+        self._first_spectrum: tuple[int, str] | None = None
+        self.first_spectrum_button = PushButton("Show first spectrum", self.launch_card)
+        self.first_spectrum_button.hide()
+        self.first_spectrum_button.clicked.connect(self._show_first_spectrum)
+        launch_layout.addWidget(self.plan_preview_name, 0, 0)
+        launch_layout.addWidget(self.plan_preview_summary, 1, 0)
+        launch_layout.addWidget(self.plan_preview_output, 2, 0, 1, 3)
+        launch_layout.addWidget(self.first_spectrum_button, 0, 1, 2, 1)
+        launch_layout.addWidget(self.launch_button, 0, 2, 2, 1)
+        self.launch_card.hide()
         self.heartbeat = BodyLabel("Heartbeat: —")
         self.heartbeat.setObjectName("muted")
         self.eta = BodyLabel("ETA: —")
@@ -502,16 +534,16 @@ class RunMonitorPage(QWidget):
         workspace_title = StrongBodyLabel("Measurement workspace", self.workspace_card)
         workspace_title.setObjectName("executionSectionTitle")
         workspace_header.addWidget(workspace_title)
-        workspace_hint = BodyLabel(
+        self.workspace_hint = BodyLabel(
             "The highlighted tree row is the operation shown above.",
             self.workspace_card,
         )
-        workspace_hint.setObjectName("muted")
-        workspace_hint.setMinimumWidth(0)
-        workspace_hint.setSizePolicy(
+        self.workspace_hint.setObjectName("muted")
+        self.workspace_hint.setMinimumWidth(0)
+        self.workspace_hint.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
-        workspace_header.addWidget(workspace_hint, 1)
+        workspace_header.addWidget(self.workspace_hint, 1)
         workspace_layout.addLayout(workspace_header)
         workspace_layout.addWidget(self.monitor_splitter, 1)
         self.completion_card = CardWidget(self)
@@ -542,6 +574,7 @@ class RunMonitorPage(QWidget):
         self.completion_card.hide()
         self._completion_dialog: SweepCompletionDialog | None = None
         layout.addWidget(self.hero_card)
+        layout.addWidget(self.launch_card)
         layout.addWidget(self.completion_card)
         layout.addWidget(self.current_operation_card)
         monitor_layout.addLayout(meta_row)
@@ -749,14 +782,16 @@ class RunMonitorPage(QWidget):
             return None
         if node.axis is not None:
             return node.axis.target
+        raw_target = node.data.get("target")
+        if isinstance(raw_target, str) and raw_target:
+            return raw_target
         parent_id = tree.parent_by_id.get(semantic_id)
         while parent_id:
             parent = tree.by_id.get(parent_id)
             if parent is not None and parent.axis is not None:
                 return parent.axis.target
             parent_id = tree.parent_by_id.get(parent_id)
-        raw_target = node.data.get("target")
-        return str(raw_target) if raw_target else None
+        return None
 
     def _semantic_state_from_event(
         self,
@@ -814,6 +849,7 @@ class RunMonitorPage(QWidget):
             "semantic_operation_started": "running",
             "semantic_operation_applied": "applied",
             "semantic_operation_failed": "failed",
+            "semantic_operation_skipped": "skipped",
         }
         phase = phases.get(name)
         if phase is None:
@@ -865,7 +901,9 @@ class RunMonitorPage(QWidget):
         if state.phase == "applied":
             self._apply_live_snapshot(data)
         target = self._semantic_target(state.semantic_id)
-        is_setpoint = node is not None and node.kind is SemanticNodeKind.SET_ROI_VALUE
+        is_setpoint = node is not None and (
+            node.kind is SemanticNodeKind.SET_ROI_VALUE or state.kind == "ramp_keithley_current"
+        )
         if is_setpoint and target:
             value = (
                 state.applied_si
@@ -981,6 +1019,79 @@ class RunMonitorPage(QWidget):
             f"snapshot: {semantic_id}. The technical event remains durable."
         )
 
+    def _show_plan_review(self, reviewing: bool) -> None:
+        self.launch_card.setVisible(reviewing)
+        for widget in (self.current_operation_card, self.monitor_card, self.preview_tabs,
+                       self.events, self.live_state_card, self.plan_timeline.follow):
+            widget.setVisible(not reviewing)
+        self.workspace_hint.setText(
+            "Review the compiled sequence before starting."
+            if reviewing else "The highlighted tree row is the operation shown above."
+        )
+
+    def _show_first_spectrum(self) -> None:
+        if self._first_spectrum is None:
+            return
+        step, semantic_id = self._first_spectrum
+        index = self.tree_model.index_for_semantic_id(semantic_id)
+        self.measurement_tree.setCurrentIndex(index)
+        self.measurement_tree.follow_semantic_id(semantic_id, force=True)
+        self.plan_timeline.inspect_step(step)
+
+    def preview_plan(
+        self,
+        plan: ExecutionPlan,
+        estimate: PlanEstimate,
+        semantic_tree: SemanticMeasurementTree,
+        *,
+        execution_mode: str,
+        output_preview: str,
+        rigol_level_modes: dict[int, str] | None = None,
+    ) -> None:
+        """Render an accepted plan without initializing live run state."""
+        labels = {
+            "measurement": ("Measurement", "Run"),
+            "dry_run": ("Dry run · outputs forced OFF", "Run dry run"),
+            "manual_step": ("Manual stages", "Start manual stages"),
+        }
+        mode_label, action_label = labels[execution_mode]
+        self.completion_card.hide()
+        self.warnings.hide()
+        self.plan_preview_name.setText(plan.recipe_name)
+        self._first_spectrum = next((
+            (step, action.semantic_id) for step, action in enumerate(plan.actions, 1)
+            if action.kind == "acquire_spectrum" and action.semantic_id in semantic_tree.by_id
+        ), None)
+        self.first_spectrum_button.setVisible(self._first_spectrum is not None)
+        first_spectrum_text = f" • First spectrum at action {self._first_spectrum[0]:,}" if self._first_spectrum else ""
+        self.plan_preview_summary.setText(
+            f"{mode_label} • {plan.total_points:,} checkpoints • {plan.total_spectra:,} spectra "
+            f"• Estimated {_human_duration(estimate.nominal_duration_s)}{first_spectrum_text}"
+        )
+        self.plan_preview_output.setText(output_preview)
+        self.launch_button.setText(action_label)
+        self.launch_button.setEnabled(True)
+        self.state.setText("PLAN READY")
+        self.state.setToolTip("Plan compiled. Device readiness is checked before starting.")
+        self.tree_model.replace_tree(semantic_tree)
+        self.tree_model.set_outputs_forced_off(execution_mode == "dry_run")
+        self.plan_timeline.set_plan(
+            plan.actions, shutdown_actions=plan.safe_shutdown_actions,
+            execution_mode=execution_mode, rigol_level_modes=rigol_level_modes,
+        )
+        self._show_plan_review(True)
+
+    def invalidate_plan_preview(self) -> None:
+        self.launch_button.setEnabled(False)
+        self._first_spectrum = None
+        self.first_spectrum_button.hide()
+        self.state.setText("PLAN NEEDS REVIEW")
+        self.state.setToolTip("")
+        self.plan_preview_summary.setText("Return to Sweeps and open the updated plan with Go to Execute.")
+        self.plan_preview_output.clear()
+        self.tree_model.replace_tree(SemanticMeasurementTree((), {}))
+        self.plan_timeline.set_plan(())
+
     def run_started(
         self,
         actions: int,
@@ -994,6 +1105,9 @@ class RunMonitorPage(QWidget):
         timeline_action_offset: int = 0,
         rigol_level_modes: dict[int, str] | None = None,
     ) -> None:
+        if not self.launch_card.isHidden():
+            self._show_plan_review(False)
+        self.launch_button.setEnabled(False)
         self.plan_timeline.set_plan(plan_actions, shutdown_actions=safe_shutdown_actions,
                                     execution_mode=execution_mode, rigol_level_modes=rigol_level_modes)
         self._timeline_action_offset = timeline_action_offset
@@ -1562,6 +1676,7 @@ class RunMonitorPage(QWidget):
             "semantic_operation_started": "running",
             "semantic_operation_applied": "applied",
             "semantic_operation_failed": "failed",
+            "semantic_operation_skipped": "skipped",
         }
         phase = phases.get(name)
         if phase is None:
@@ -1693,6 +1808,7 @@ class RunMonitorPage(QWidget):
                 "running": "semantic_operation_started",
                 "applied": "semantic_operation_applied",
                 "failed": "semantic_operation_failed",
+                "skipped": "semantic_operation_skipped",
             }.get(state.phase, "semantic_operation_applied")
             self._apply_semantic_event(
                 name,
@@ -1720,6 +1836,17 @@ class RunMonitorPage(QWidget):
     def _event_summary(name: str, data: dict[str, object]) -> str:
         """Render a bounded diagnostic line without dumping state arrays."""
 
+        if name == "sweep_compliance_limited":
+            currents = data.get("source_current_a") or {}
+            channels = ", ".join(
+                f"{channel} ({format_quantity_auto(current, DIMENSION_CURRENT)})"
+                if isinstance(current, (int, float)) else channel
+                for channel, current in currents.items()
+            )
+            count = data.get("skipped_points", 0)
+            if count:
+                return f"Keithley {channels} reached compliance. Skipped {count} planned point(s)."
+            return f"Keithley {channels} reached compliance. Current ramp ended early."
         fields: list[str] = []
         for key, value in data.items():
             if key == "state_snapshot":
@@ -1771,6 +1898,7 @@ class RunMonitorPage(QWidget):
             "semantic_operation_started",
             "semantic_operation_applied",
             "semantic_operation_failed",
+            "semantic_operation_skipped",
         }:
             self._apply_semantic_event(name, data)
             if self._should_append_event_log(name, data):
@@ -1889,6 +2017,10 @@ class RunMonitorPage(QWidget):
         elif name == "watchdog_timeout":
             self.state.setText("FAULT • WATCHDOG TIMEOUT")
             self._set_current_operation_state("WATCHDOG TIMEOUT")
+        elif name == "sweep_compliance_limited":
+            next_action_index = int(data.get("next_action_index", self.progress.value()))
+            self.progress.setValue(min(self.progress.maximum(), max(self.progress.value(), next_action_index)))
+            self._set_current_operation_state("COMPLIANCE")
         elif name == "run_completed":
             self.plan_timeline.set_current_step(len(self.plan_timeline.actions))
             self.tree_model.apply_state({"semantic_id": "__finally__", "phase": "applied"})
@@ -1898,6 +2030,7 @@ class RunMonitorPage(QWidget):
         if name in {
             "action_retry",
             "compliance_detected",
+            "sweep_compliance_limited",
             "run_fault",
             "watchdog_timeout",
             "safe_finally_error",
@@ -1966,9 +2099,8 @@ class RunMonitorPage(QWidget):
                 "single_sweep": "PyLab triggered",
             }.get(data.get("acquisition_mode"))
             subject = "reference average" if preview_kind == "reference" else "average"
-            trace_label = f"{method} {subject}" if method else subject.capitalize()
-            if corrected:
-                trace_label += " − Reference"
+            average_label = f"{method} {subject}" if method else subject.capitalize()
+            trace_label = "Raw − Reference" if corrected else average_label
         elif preview_kind == "reference":
             trace_label = "Stored reference"
         else:
@@ -1988,6 +2120,8 @@ class RunMonitorPage(QWidget):
             self.spectrum_preview.auto_range()
         title = trace_label if preview_kind == "reference" or corrected or averaged else "Current spectrum"
         if averaged:
+            if corrected:
+                title += f" · {average_label}"
             title += f" · {sweep_count} sweeps"
         if preview_kind != "reference":
             title += f" · Point {data.get('point_index', '—')}"
@@ -2041,12 +2175,13 @@ class RunMonitorPage(QWidget):
         self.resume_button.setEnabled(False)
         run_result = result["result"]
         self._stored_points = int(getattr(run_result, "stored_points", self._stored_points))
+        compliance_skipped = int(getattr(run_result, "compliance_points_skipped", 0))
         self.spectrogram_preview.set_stored_points(self._stored_points)
         state = run_result.state.value.upper()
         if run_result.error and state == "SAFE":
             state = "STOPPED SAFELY"
         path = str(result["path"])
-        completed = state in {"SAFE", "HOLDING"} and not run_result.error
+        completed = state in {"SAFE", "HOLDING", "UNKNOWN"} and not run_result.error
         holding = completed and state == "HOLDING"
         stopped_safely = state == "STOPPED SAFELY"
         safe_state_unconfirmed = self._shutdown_failed or state == "UNKNOWN"
@@ -2066,6 +2201,13 @@ class RunMonitorPage(QWidget):
             "the run ended before normal completion. "
             + ("" if stopped_safely else "Check shutdown results before operating the instruments.")
         )
+        if completed:
+            summary = self.completion_summary.text()
+            if compliance_skipped:
+                summary += f" Keithley compliance skipped {compliance_skipped} planned point(s)."
+            if state == "UNKNOWN":
+                summary += " MOKE DAC zero was confirmed. Kepco power state is unknown."
+            self.completion_summary.setText(summary)
         self.completion_path.setText(path)
         self.open_result_folder_button.setEnabled(Path(path).parent.exists())
         self.completion_card.show()
@@ -2073,7 +2215,9 @@ class RunMonitorPage(QWidget):
         self._set_current_operation_state("COMPLETE" if completed else state)
         self.events.appendPlainText(f"File: {result['path']}")
         if completed and not safe_state_unconfirmed and self._completion_dialog is None:
-            dialog = SweepCompletionDialog(dialog_parent or self, self._stored_points, holding=holding)
+            dialog = SweepCompletionDialog(
+                dialog_parent or self, self._stored_points, holding=holding, compliance_skipped=compliance_skipped,
+            )
             dialog.cancelButton.setEnabled(self.open_result_folder_button.isEnabled())
             dialog.cancelButton.clicked.connect(self._open_result_folder)
             self._completion_dialog = dialog

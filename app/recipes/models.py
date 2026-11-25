@@ -48,6 +48,11 @@ def validate_action_fields(kind: str, data: dict[str, Any], where: str) -> None:
             raise ConfigurationError(f"{where}: {name} requires a numeric value, not a boolean.")
     if "checkpoint" in data and type(data["checkpoint"]) is not bool:
         raise ConfigurationError(f"{where}: checkpoint requires a boolean.")
+    if kind == "sweep" and "respect_ramp_step" in data:
+        if type(data["respect_ramp_step"]) is not bool:
+            raise ConfigurationError(f"{where}: respect_ramp_step requires a boolean.")
+        if data.get("target") not in ("keithley.A.current", "keithley.B.current"):
+            raise ConfigurationError(f"{where}: respect_ramp_step requires a Keithley current sweep.")
     if kind == "sequence" and data.get("operation") == "configure_selected_parameters" and isinstance(data.get("configuration"), dict):
         fields = {
             "keithley": _KEITHLEY_FIELDS | {"source_mode", "source_level"},

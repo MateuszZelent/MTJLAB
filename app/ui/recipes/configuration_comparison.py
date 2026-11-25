@@ -156,6 +156,8 @@ class ConfigurationComparison(TableWidget):
                     status, color = "Not set by this block" if self._recipe_context is not None else "Not programmed", tokens.text_muted
             elif row.action == "Sweep":
                 status, color = "Changes over ROI", tokens.caution
+            elif row.action == "Timing":
+                status, color = "PyLab wait", tokens.text_muted
             elif row.action == "Derived":
                 if self._recipe_context is not None and row.current is not None:
                     same = equivalent_setting(row.current, row.planned)
@@ -208,7 +210,7 @@ class ConfigurationComparison(TableWidget):
                     counts["unknown"] += 1
                 elif row.current is not None:
                     counts["same" if equivalent_setting(row.current, row.planned) else "changed"] += 1
-            elif row.action == "Set" and (row.current is not None or self._recipe_context is None):
+            elif row.action in {"Set", "Edit"} and (row.current is not None or self._recipe_context is None):
                 counts["unknown" if row.current is None else
                        "same" if equivalent_setting(row.current, row.planned) else "changed"] += 1
             missing = "Unknown" if self._recipe_context is None else (
@@ -235,15 +237,23 @@ class ConfigurationComparison(TableWidget):
         self.counts = counts
         noun = "parameter" if counts["changed"] == 1 else "parameters"
         parts = [f"{counts['changed']} {noun} changed", f"{counts['same']} same"]
+        if rows and all(row.action == "Edit" for row in rows):
+            noun = "value" if counts["changed"] == 1 else "values"
+            parts = [f"{counts['changed']} recipe {noun} edited", f"{counts['same']} same as saved"]
         if self._recipe_context is not None:
             specified = sum(row.action == "Set" for row in rows)
+            noun = "parameter" if specified == 1 else "parameters"
             parts = [f"{counts['same']} same as device tab", f"{counts['changed']} different from device tab",
-                     f"{specified} parameters to set"]
+                     f"{specified} {noun} to set"]
             if self._recipe_differences:
                 parts.append(f"{len(self._recipe_differences)} recipe-order changes")
             derived = sum(row.action == "Derived" for row in rows)
             if derived:
                 parts.append(f"{derived} automatic effects")
+        timing = sum(row.action == "Timing" for row in rows)
+        if timing:
+            noun = "setting" if timing == 1 else "settings"
+            parts.append(f"{timing} PyLab timing {noun}")
         for key, label in (("sweep", "varied by ROI"), ("preserved", "preserved"),
                            ("unknown", "unknown"), ("blocked", "blocked / mismatch")):
             if counts[key]:

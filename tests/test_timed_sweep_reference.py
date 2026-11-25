@@ -56,11 +56,17 @@ def test_invalid_timed_acquisition_rejected(tmp_path, extra):
         compile_source(audit_settings(tmp_path), f"    - {{id: background, type: acquire_reference, {extra}}}\n")
 
 
-def test_timed_background_and_reference_are_both_durable(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("mode", "minimum_sweeps"), [("single_sweep", 3), ("continuous_live", 1)])
+def test_timed_background_and_reference_are_both_durable(tmp_path, monkeypatch, mode, minimum_sweeps):
     settings = audit_settings(tmp_path)
-    plan = compile_source(settings, """    - {id: ref, type: acquire_reference, purpose: reference, average_count: 2}
-    - {id: bg, type: acquire_reference, purpose: background, average_count: 3, minimum_duration: '200 ms'}
-    - {id: signal, type: acquire_spectrum, average_count: 2}
+    plan = compile_source(settings, f"""    - {{id: ref, type: acquire_reference, purpose: reference, average_count: 2}}
+    - id: bg
+      type: acquire_reference
+      purpose: background
+      acquisition_mode: {mode}
+      average_count: {minimum_sweeps}
+      minimum_duration: 200 ms
+    - {{id: signal, type: acquire_spectrum, average_count: 2}}
 """)
     path = tmp_path / "timed.h5"
     result, _ = execute(settings, plan, path, monkeypatch)
@@ -72,11 +78,12 @@ def test_timed_background_and_reference_are_both_durable(tmp_path, monkeypatch):
         assert ref.attrs["purpose"] == "reference" and bg.attrs["purpose"] == "background"
         metadata = json.loads(bg.attrs["acquisition_metadata_json"])
         assert metadata["collection_elapsed_s"] >= .2
+        assert metadata["acquisition_mode"] == mode
         assert "spectrum" in metadata["device_states"]["anritsu"]
         assert "advanced_spectrum" in metadata["device_states"]["anritsu"]
         assert "output_status" in metadata
         indices = list(bg["source_recipe_sweep_indices"][:])
-        assert len(indices) == bg.attrs["average_count"] >= 3
+        assert len(indices) == bg.attrs["average_count"] >= minimum_sweeps
         selected = [records[int(i)][2] for i in indices]
         assert all(record.average_count is None and record.minimum_duration_s == .2 for record in selected)
         expected_w = np.mean([10 ** ((record.powers_dbm - 30) / 10) for record in selected], axis=0)

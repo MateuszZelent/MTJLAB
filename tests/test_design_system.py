@@ -28,7 +28,8 @@ class DesignSystemTests(unittest.TestCase):
                 "background", "surface", "surface_raised", "border",
                 "text_primary", "text_muted", "accent", "focus",
                 "success", "caution", "danger", "neutral",
-                "output_active", "compliance", "interlock", "emergency",
+                "output_active", "output_inactive", "on_output_inactive",
+                "compliance", "interlock", "emergency",
                 "plot_background", "plot_axes", "plot_grid",
                 "plot_reference", "plot_measurement",
             ):

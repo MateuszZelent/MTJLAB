@@ -177,7 +177,7 @@ QWidget#settingsPage QLabel#muted {{
 }}
 QWidget#settingsPage QScrollArea#settingsForm,
 QWidget#settingsPage QScrollArea#settingsForm > QWidget > QWidget {{
-    background: transparent;
+    background: {tokens.background};
     border: none;
 }}
 QScrollArea#quickControlsScroll,
@@ -231,14 +231,20 @@ QWidget#elabPage QTableWidget#elabHistoryTable {{
     selection-background-color: {tokens.accent};
     selection-color: #ffffff;
 }}
-QLabel[deviceState="verified"], QLabel[outputState="off"],
+QLabel[deviceState="verified"], QLabel[deviceState="connected"], QLabel[outputState="off"],
+QLabel[safetyState="ready"], QLabel[liveState="on"],
 QLabel#quickOutputState[quickOutputState="on"],
 QLabel#quickOutputState[quickOutputState="off"],
 QLabel[stationState="connected"], QLabel[stationState="verified"],
 QLabel[stationState="output_off"] {{
     color: {tokens.success};
 }}
-QLabel[outputState="neutral"] {{
+QLabel#anritsuLiveIndicator[liveState="on"] {{
+    color: {tokens.success};
+    font-weight: 600;
+}}
+QLabel[outputState="neutral"], QLabel[liveState="off"],
+QLabel[deviceState="disconnected"] {{
     color: {tokens.text_muted};
 }}
 QLabel#quickOutputState[quickOutputState="unknown"] {{
@@ -246,15 +252,23 @@ QLabel#quickOutputState[quickOutputState="unknown"] {{
 }}
 QLabel[deviceState="fault"], QLabel[safetyState="danger"],
 QLabel[outputState="active"], QLabel[stationState="fault"],
-QLabel[stationState="unknown"], QLabel[stationState="output_on"] {{
+QLabel[stationState="unknown"], QLabel[stationState="output_on"],
+QLabel[liveState="error"], QLabel[liveState="fault"],
+QLabel[connectionState="error"], QLabel#errorText {{
     color: {tokens.danger};
 }}
 QLabel[stationState="disconnected"] {{
     color: {tokens.text_muted};
 }}
 QLabel[safetyState="caution"], QLabel[deviceState="compliance"],
-QLabel[deviceState="active"] {{
+QLabel[deviceState="active"], QLabel[outputState="unknown"],
+QLabel[liveState="starting"], QLabel[liveState="paused"] {{
     color: {tokens.caution};
+}}
+QLabel#anritsuLiveIndicator[liveState="starting"],
+QLabel#anritsuLiveIndicator[liveState="paused"] {{
+    color: {tokens.caution};
+    font-weight: 600;
 }}
 QLabel#inlineValidationWarning {{
     color: {tokens.danger};

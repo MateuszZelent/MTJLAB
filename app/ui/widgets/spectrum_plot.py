@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import BodyLabel, FlowLayout, TransparentPushButton, isDarkTheme
+from shiboken6 import isValid
 
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.design_system.paper_plot_style import PAPER_STYLE
@@ -26,12 +28,23 @@ from app.ui.widgets.plot_ownership import (
 )
 from app.ui.widgets.plot_style import apply_scientific_style
 
+_UNIT_CSV_COLUMNS = {
+    "dBm": "power_dbm",
+    "dB": "delta_db",
+    "W": "power_w",
+    "ratio": "ratio_linear",
+    "linear ratio": "ratio_linear",
+    "mW²": "power_mw2",
+    "W²": "power_w2",
+}
+
 
 class SpectrumPlotWidget(QWidget):
     """Reusable live/results plot with markers, holds and data export."""
 
     status_changed = Signal(str)
     peak_selected = Signal(int)
+    traces_updated = Signal()
 
     def __init__(
         self,
@@ -67,9 +80,14 @@ class SpectrumPlotWidget(QWidget):
         self._marker_x: float | None = None
         self._x_label = "Frequency"
         self._x_unit = "Hz"
+        self._y_label = "Power"
         self._y_unit = "dBm"
         self._theme_name = "dark" if isDarkTheme() else "light"
         self._user_curve_visibility: dict[str, bool] = {}
+        self._batch_depth = 0
+        self._batch_dirty = False
+        self._batch_legend_dirty = False
+        self._cleaned_up = False
         self.toolbar_buttons: list[TransparentPushButton] = []
 
         root = QVBoxLayout(self)
@@ -124,6 +142,7 @@ class SpectrumPlotWidget(QWidget):
         root.addWidget(self.plot, 1)
 
         initial_tokens = tokens_for(self._theme_name)
+        marker_label_opts = self._marker_label_opts(self._theme_name)
         self.crosshair_x = pg.InfiniteLine(
             angle=90, movable=False, pen=pg.mkPen(initial_tokens.plot_grid, width=1)
         )
@@ -131,10 +150,18 @@ class SpectrumPlotWidget(QWidget):
             angle=0, movable=False, pen=pg.mkPen(initial_tokens.plot_grid, width=1)
         )
         self.marker = pg.InfiniteLine(
-            angle=90, movable=True, pen=pg.mkPen(initial_tokens.plot_reference, width=2), label="M1"
+            angle=90,
+            movable=True,
+            pen=pg.mkPen(initial_tokens.plot_reference, width=2),
+            label="M1",
+            labelOpts=dict(marker_label_opts),
         )
         self.delta_marker = pg.InfiniteLine(
-            angle=90, movable=True, pen=pg.mkPen(initial_tokens.plot_reference, width=2), label="Δ"
+            angle=90,
+            movable=True,
+            pen=pg.mkPen(initial_tokens.plot_reference, width=2),
+            label="Δ",
+            labelOpts={**marker_label_opts, "position": 0.84},
         )
         for item in (self.crosshair_x, self.crosshair_y, self.marker, self.delta_marker):
             self.plot.addItem(item, ignoreBounds=True)
@@ -168,6 +195,73 @@ class SpectrumPlotWidget(QWidget):
         self.delta_marker.sigPositionChanged.connect(self._marker_changed)
         self.apply_theme(self._theme_name)
 
+    @staticmethod
+    def _marker_label_opts(theme: str) -> dict[str, object]:
+        tokens = tokens_for(theme)
+        fill = pg.mkColor(tokens.surface_raised if theme == "dark" else tokens.surface)
+        fill.setAlpha(235)
+        border = pg.mkColor(tokens.plot_reference)
+        return {
+            "color": tokens.text_primary,
+            "fill": pg.mkBrush(fill),
+            "border": pg.mkPen(border, width=1),
+            "position": 0.92,
+        }
+
+    def _apply_marker_label_style(self, theme: str) -> None:
+        opts = self._marker_label_opts(theme)
+        for line in (self.marker, self.delta_marker):
+            label = getattr(line, "label", None)
+            if label is None:
+                continue
+            label.setColor(opts["color"])
+            label.fill = opts["fill"]
+            label.border = opts["border"]
+            label.update()
+
+    @property
+    def in_batch(self) -> bool:
+        return self._batch_depth > 0
+
+    def begin_batch(self) -> None:
+        if self._batch_depth == 0:
+            self._batch_dirty = False
+            self._batch_legend_dirty = False
+            self.plot.setUpdatesEnabled(False)
+        self._batch_depth += 1
+
+    def end_batch(self) -> None:
+        if self._batch_depth == 0:
+            return
+        self._batch_depth -= 1
+        if self._batch_depth > 0:
+            return
+        if self._batch_legend_dirty:
+            legend = self.plot.getPlotItem().legend
+            if legend is not None:
+                legend.updateSize()
+                legend.setVisible(len(legend.items) > 0)
+            self._batch_legend_dirty = False
+        self.plot.setUpdatesEnabled(True)
+        if self._batch_dirty:
+            self._batch_dirty = False
+            self.traces_updated.emit()
+
+    @contextmanager
+    def batch_updates(self):
+        """Coalesce multiple trace/label mutations into one repaint and update signal."""
+        self.begin_batch()
+        try:
+            yield
+        finally:
+            self.end_batch()
+
+    def _notify_traces_updated(self) -> None:
+        if self._batch_depth > 0:
+            self._batch_dirty = True
+        else:
+            self.traces_updated.emit()
+
     def set_labels(
         self,
         *,
@@ -176,11 +270,19 @@ class SpectrumPlotWidget(QWidget):
         y: str = "Power",
         y_unit: str = "dBm",
     ) -> None:
+        if (
+            x == self._x_label
+            and x_unit == self._x_unit
+            and y == self._y_label
+            and y_unit == self._y_unit
+        ):
+            return
         units_changed = x_unit != self._x_unit or y_unit != self._y_unit
         if units_changed:
             self.clear_holds()
         self._x_label = x
         self._x_unit = x_unit
+        self._y_label = y
         self._y_unit = y_unit
         self._last_readout_position = None
         self.plot.setLabel("bottom", x, units=x_unit)
@@ -197,26 +299,35 @@ class SpectrumPlotWidget(QWidget):
         self._preferred_height = height
         self.updateGeometry()
 
-    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+    def sizeHint(self) -> QSize:
         default = super().sizeHint()
         if self._preferred_height is not None:
             return QSize(default.width(), self._preferred_height)
         return default
 
-    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+    def minimumSizeHint(self) -> QSize:
         default = super().minimumSizeHint()
         min_h = 100 if self._compact_toolbar else 120
         return QSize(min(default.width(), 200), min_h)
 
     def apply_theme(self, theme: str) -> None:
         self._theme_name = theme
+        if getattr(self, "_cleaned_up", False):
+            return
+        plot = getattr(self, "plot", None)
+        if plot is None or not isValid(plot):
+            return
+        plot_item = getattr(plot, "plotItem", None)
+        if plot_item is None or not isValid(plot_item):
+            return
         palette = plot_theme(tokens_for(theme))
-        self.plot.setBackground(palette.background)
-        apply_scientific_style(self.plot.plotItem, theme)
+        plot.setBackground(palette.background)
+        apply_scientific_style(plot_item, theme)
         self.crosshair_x.setPen(pg.mkPen(palette.grid, width=1))
         self.crosshair_y.setPen(pg.mkPen(palette.grid, width=1))
         self.marker.setPen(pg.mkPen(palette.reference, width=2))
         self.delta_marker.setPen(pg.mkPen(palette.reference, width=2))
+        self._apply_marker_label_style(theme)
         self._style_peak_markers()
         self.replacement_markers.setPen(pg.mkPen(palette.reference))
         estimate_brush = self._estimated_band_brush()
@@ -285,19 +396,35 @@ class SpectrumPlotWidget(QWidget):
         if x_values.ndim != 1 or y_values.ndim != 1 or x_values.size != y_values.size:
             raise ValueError("Spectrum X and Y must be equally-sized one-dimensional arrays.")
         finite = np.isfinite(x_values) & np.isfinite(y_values)
+        all_finite = bool(np.all(finite))
         # Missing samples are gaps, not permission to join their neighbours.
-        y_values = np.where(finite, y_values, np.nan)
+        if not all_finite:
+            y_values = np.where(finite, y_values, np.nan)
         self._traces[name] = (x_values, y_values)
         self._legend_labels[name] = legend_label or name
         line_width = self._trace_line_width(name)
+        pen = pg.mkPen(color, width=line_width)
+        data_kwargs: dict[str, object] = {
+            "connect": "finite",
+            "symbol": "o" if show_points else None,
+        }
+        if show_points:
+            data_kwargs["symbolSize"] = 6
+            data_kwargs["symbolPen"] = pg.mkPen(color, width=1)
+            data_kwargs["symbolBrush"] = pg.mkBrush(color)
         curve = self._curves.get(name)
         if curve is None:
-            curve = self.plot.plot(name=name, pen=pg.mkPen(color, width=line_width))
-            curve.setDownsampling(auto=True, method="peak")
-            curve.setClipToView(True)
+            curve = pg.PlotDataItem(name=name)
+            data_kwargs["pen"] = pen
+            self.plot.addItem(curve)
             self._curves[name] = curve
         elif token_owned_primary or caller_supplied_color or curve.opts["pen"].widthF() != line_width:
-            curve.setPen(pg.mkPen(color, width=line_width))
+            data_kwargs["pen"] = pen
+        # Clipping needs the parent ViewBox, which is only set after addItem.
+        curve.opts["autoDownsample"] = all_finite
+        curve.opts["downsampleMethod"] = "peak"
+        curve.opts["clipToView"] = all_finite
+        curve.setData(x_values, y_values, **data_kwargs)
         if opacity is not None:
             curve.setOpacity(opacity)
         if z_value is not None:
@@ -306,22 +433,16 @@ class SpectrumPlotWidget(QWidget):
             self._token_owned_primary_curves.add(name)
         elif caller_supplied_color:
             self._token_owned_primary_curves.discard(name)
-        curve.setDownsampling(auto=bool(np.all(finite)), method="peak")
-        curve.setClipToView(bool(np.all(finite)))
-        curve.setData(x_values, y_values, connect="finite")
-        curve.setSymbol("o" if show_points else None)
-        if show_points:
-            curve.setSymbolSize(6)
-            curve.setSymbolPen(pg.mkPen(color, width=1))
-            curve.setSymbolBrush(pg.mkBrush(color))
         effective_visible = self._user_curve_visibility.get(name, visible)
-        curve.setVisible(effective_visible)
+        if curve.isVisible() != effective_visible:
+            curve.setVisible(effective_visible)
         self._sync_legend(name, curve, effective_visible)
         if primary or self._hold_source is None:
             if self._hold_source is not None and self._hold_source != name:
                 self.clear_holds()
             self._hold_source = name
             self._update_holds(x_values, y_values)
+        self._notify_traces_updated()
 
     def _trace_line_width(self, name: str) -> float:
         # A one-pixel pen enables Qt's fast path for dense scientific traces.
@@ -339,16 +460,24 @@ class SpectrumPlotWidget(QWidget):
             text = self._legend_labels.get(name, name)
             if entry is None:
                 legend.addItem(curve, text)
+                if self._batch_depth > 0:
+                    self._batch_legend_dirty = True
             elif entry.text != text:
                 entry.setText(text, color=legend.opts["labelTextColor"], size=legend.opts["labelTextSize"])
-                legend.updateSize()
+                if self._batch_depth > 0:
+                    self._batch_legend_dirty = True
+                else:
+                    legend.updateSize()
         else:
             if entry is not None:
                 legend.removeItem(curve)
-        if len(legend.items) == 0:
-            legend.hide()
-        else:
-            legend.show()
+                if self._batch_depth > 0:
+                    self._batch_legend_dirty = True
+        if self._batch_depth == 0:
+            if len(legend.items) == 0:
+                legend.hide()
+            else:
+                legend.show()
 
     def set_trace_visibility(self, name: str, visible: bool) -> None:
         self._user_curve_visibility[name] = visible
@@ -371,7 +500,7 @@ class SpectrumPlotWidget(QWidget):
         for curve, label in ordered:
             legend.addItem(curve, label)
 
-    def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
+    def changeEvent(self, event: QEvent) -> None:
         super().changeEvent(event)
         if event.type() in {
             QEvent.Type.ApplicationPaletteChange,
@@ -383,6 +512,7 @@ class SpectrumPlotWidget(QWidget):
                 self.apply_theme(target_theme)
 
     def clear_trace(self, name: str) -> None:
+        had_trace = name in self._traces
         self._traces.pop(name, None)
         self._legend_labels.pop(name, None)
         self._token_owned_primary_curves.discard(name)
@@ -392,6 +522,8 @@ class SpectrumPlotWidget(QWidget):
             curve.clear()
             curve.hide()
             self._user_curve_visibility.pop(name, None)
+        if had_trace:
+            self._notify_traces_updated()
 
     def trace_point_count(self, name: str) -> int:
         """Return the finite point count for GUI tests and status reporting."""
@@ -451,16 +583,20 @@ class SpectrumPlotWidget(QWidget):
         if frequencies.ndim != 1 or values.ndim != 1 or frequencies.size != values.size:
             raise ValueError("Peak marker frequencies and amplitudes must be equally-sized vectors.")
         finite = np.isfinite(frequencies) & np.isfinite(values)
+        valid_indices = np.flatnonzero(finite)
         spots = [
-            {"pos": (float(frequency), float(value)), "data": int(index) if interactive else None}
-            for index, (frequency, value) in enumerate(
-                zip(frequencies[finite], values[finite], strict=True)
-            )
+            {
+                "pos": (float(frequencies[orig_index]), float(values[orig_index])),
+                "data": int(orig_index) if interactive else None,
+            }
+            for orig_index in valid_indices
         ]
         self.peak_markers.setData(spots)
-        if not interactive:
-            self._selected_peak_index = None
-        if self._selected_peak_index is not None and self._selected_peak_index >= len(spots):
+        if not interactive or self._selected_peak_index is not None and (
+            self._selected_peak_index < 0
+            or self._selected_peak_index >= frequencies.size
+            or not bool(finite[self._selected_peak_index])
+        ):
             self._selected_peak_index = None
         self._style_peak_markers()
 
@@ -489,7 +625,12 @@ class SpectrumPlotWidget(QWidget):
         palette = plot_theme(tokens_for(self._theme_name))
         points = self.peak_markers.points()
         for point_index, point in enumerate(points):
-            selected = point_index == self._selected_peak_index
+            point_data = point.data()
+            selected = self._selected_peak_index is not None and (
+                point_data == self._selected_peak_index
+                if point_data is not None
+                else point_index == self._selected_peak_index
+            )
             point.setSize(14 if selected else 10)
             point.setPen(
                 pg.mkPen(palette.reference if selected else palette.axes, width=2)
@@ -613,7 +754,7 @@ class SpectrumPlotWidget(QWidget):
                 self._export_figure(path)
             else:
                 self._export_csv(Path(path))
-        except Exception as exc:
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
             self.status_changed.emit(f"Spectrum export failed: {exc}")
             return
         self.status_changed.emit(f"Spectrum exported to {path}")
@@ -621,21 +762,48 @@ class SpectrumPlotWidget(QWidget):
     def _export_figure(self, path):
         from app.ui.widgets.figure_export import export_spectrum_figure
 
+        screen_palette = plot_theme(tokens_for(self._theme_name))
+        pub_palette = plot_theme(tokens_for("light"), publication=True)
+        screen_to_pub = {
+            screen_palette.measurement.lower(): pub_palette.measurement,
+            screen_palette.reference.lower(): pub_palette.reference,
+            screen_palette.danger.lower(): pub_palette.danger,
+            screen_palette.success.lower(): pub_palette.success,
+        }
+
+        def publication_color(raw_color: str, *, curve_name: str | None = None) -> str:
+            if curve_name in self._token_owned_primary_curves:
+                return pub_palette.measurement
+            if curve_name == "Max hold":
+                return pub_palette.danger
+            if curve_name == "Min hold":
+                return pub_palette.success
+            return screen_to_pub.get(raw_color.lower(), raw_color)
+
         traces = []
         for name, (x, y) in self._traces.items():
             curve = self._curves.get(name)
             if curve is not None and curve.isVisible():
                 pen = pg.mkPen(curve.opts["pen"])
-                traces.append({"name": self._legend_labels.get(name, name), "x": x, "y": y,
-                               "color": pen.color().name(), "width": pen.widthF(),
-                               "symbol": curve.opts.get("symbol"), "symbol_size": curve.opts.get("symbolSize", 6)})
+                traces.append({
+                    "name": self._legend_labels.get(name, name),
+                    "x": x,
+                    "y": y,
+                    "color": publication_color(pen.color().name(), curve_name=name),
+                    "width": pen.widthF(),
+                    "symbol": curve.opts.get("symbol"),
+                    "symbol_size": curve.opts.get("symbolSize", 6),
+                })
         markers = []
         marker_pairs = [(self.marker, "M1"), (self.delta_marker, "Δ")]
         marker_pairs.extend((line, name) for name, line in getattr(self, "frequency_markers", {}).items())
         for line, label in marker_pairs:
             if line.isVisible():
-                markers.append({"position": float(line.value()), "label": label,
-                                "color": line.pen.color().name()})
+                markers.append({
+                    "position": float(line.value()),
+                    "label": label,
+                    "color": publication_color(line.pen.color().name()),
+                })
         band = (tuple(self.band.getRegion()) if getattr(self, "band_enabled", None) is not None
                 and self.band_enabled.isChecked() else None)
         points = []
@@ -646,7 +814,8 @@ class SpectrumPlotWidget(QWidget):
                     symbol = point.symbol()
                     # Open crosses are drawn entirely by their pen.
                     paint = point.pen() if symbol in {"x", "+"} else point.brush()
-                    key = (paint.color().name(), symbol, point.size())
+                    resolved_color = publication_color(paint.color().name())
+                    key = (resolved_color, symbol, point.size())
                     group = groups.setdefault(key, {"x": [], "y": [], "color": key[0],
                                                     "symbol": key[1], "size": key[2]})
                     group["x"].append(point.pos().x())
@@ -659,6 +828,19 @@ class SpectrumPlotWidget(QWidget):
             log_mode=(self.plot.plotItem.ctrl.logXCheck.isChecked(), self.plot.plotItem.ctrl.logYCheck.isChecked()),
             inverted_axes=(bool(self.plot.getViewBox().state["xInverted"]),
                            bool(self.plot.getViewBox().state["yInverted"])))
+
+    def _resolved_csv_value_column(self) -> str:
+        if self._csv_value_column and self._csv_value_column != "value":
+            return self._csv_value_column
+        if self._y_unit in _UNIT_CSV_COLUMNS:
+            return _UNIT_CSV_COLUMNS[self._y_unit]
+        if self._y_unit:
+            sanitized_unit = "".join(
+                ch if ch.isalnum() else "_" for ch in self._y_unit
+            ).strip("_")
+            if sanitized_unit:
+                return f"value_{sanitized_unit}"
+        return self._csv_value_column or "value"
 
     def _export_csv(self, path: Path) -> None:
         visible = [
@@ -673,7 +855,7 @@ class SpectrumPlotWidget(QWidget):
             x_header = self._x_label.lower().replace(" ", "_")
             if self._x_unit:
                 x_header += f"_{self._x_unit}"
-            writer.writerow(["trace", x_header, self._csv_value_column])
+            writer.writerow(["trace", x_header, self._resolved_csv_value_column()])
             for name, x_values, y_values in visible:
                 writer.writerows(zip([name] * x_values.size, x_values, y_values, strict=True))
 
@@ -715,10 +897,69 @@ class SpectrumPlotWidget(QWidget):
             setattr(self, attribute, held)
             self._traces[name] = (x_values, held)
             finite = np.isfinite(x_values) & np.isfinite(held)
-            curve.setDownsampling(auto=bool(np.all(finite)), method="peak")
-            curve.setClipToView(bool(np.all(finite)))
-            curve.setData(x_values, held, connect="finite")
-            curve.setPen(pg.mkPen(color, width=1.3))
+            all_finite = bool(np.all(finite))
+            curve.opts["autoDownsample"] = all_finite
+            curve.opts["downsampleMethod"] = "peak"
+            curve.opts["clipToView"] = all_finite
+            curve.setData(
+                x_values,
+                held,
+                connect="finite",
+                pen=pg.mkPen(color, width=1.3),
+            )
+
+    def _stop_mouse_proxy_timer(self) -> None:
+        proxy = getattr(self, "_mouse_proxy", None)
+        if proxy is None or not isValid(proxy):
+            return
+        timer = getattr(proxy, "timer", None)
+        if timer is not None and isValid(timer):
+            timer.stop()
+
+    def cleanup_plot(self) -> None:
+        """Explicitly disconnect scene signals and release graphics items on teardown."""
+        if self._cleaned_up:
+            return
+        self._cleaned_up = True
+        self._stop_mouse_proxy_timer()
+        proxy = getattr(self, "_mouse_proxy", None)
+        if proxy is not None and isValid(proxy):
+            try:
+                proxy.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+        plot = getattr(self, "plot", None)
+        if plot is not None and isValid(plot):
+            plot.hide()
+            plot.setUpdatesEnabled(False)
+            plot_item = getattr(plot, "plotItem", None)
+            if plot_item is not None and isValid(plot_item):
+                grid = getattr(plot_item, "_paper_grid", None)
+                if grid is not None and isValid(grid):
+                    try:
+                        plot_item.removeItem(grid)
+                        grid.deleteLater()
+                    except (RuntimeError, TypeError):
+                        pass
+                plot_item._paper_grid = None
+                try:
+                    plot.close()
+                except RuntimeError:
+                    pass
+            # PyQtGraph drops the QWidget parent in PlotWidget.close().
+            # Release the detached view while the Qt event dispatcher is alive.
+            if isValid(plot):
+                plot.deleteLater()
+
+    def hideEvent(self, event) -> None:
+        self._stop_mouse_proxy_timer()
+        super().hideEvent(event)
+
+    def closeEvent(self, event) -> None:
+        self._stop_mouse_proxy_timer()
+        if self.testAttribute(Qt.WidgetAttribute.WA_DeleteOnClose):
+            self.cleanup_plot()
+        super().closeEvent(event)
 
     def _mouse_moved(self, event: tuple[object, ...]) -> None:
         position = event[0]

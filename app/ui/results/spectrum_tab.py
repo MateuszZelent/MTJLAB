@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import math
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from math import prod
 from pathlib import Path
 
@@ -30,6 +32,7 @@ from qfluentwidgets import (
     TreeView,
 )
 
+from app.domain.errors import ExecutionError
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_DB,
@@ -80,6 +83,8 @@ from app.ui.results.spectrum_workbench import ResultSpectrumWorkbench
 from app.ui.results.state_card import ResultsStateCard
 from app.ui.results.workers import ResultReadTask
 
+_LOGGER = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True, slots=True)
 class PublicCheckpoint:
@@ -120,9 +125,10 @@ def build_public_checkpoints(path, run, *, cancelled=None) -> tuple[PublicCheckp
             scalar_values[label] = ThatecRunReader.scalar_series(
                 path, row.id
             ) if path is not None else ((), ())
-        except Exception:
+        except (ExecutionError, OSError, KeyError, ValueError, TypeError) as exc:
             # A malformed scalar row must not prevent the spectrum rows
             # from being browseable; the row remains visible in the tree.
+            _LOGGER.debug("Skipping unreadable public scalar row %s: %s", row.id, exc)
             continue
 
     checkpoints: list[PublicCheckpoint] = []
@@ -145,7 +151,7 @@ def build_public_checkpoints(path, run, *, cancelled=None) -> tuple[PublicCheckp
                     timestamp = float(timestamps[index])
                     if math.isfinite(timestamp):
                         timestamp_utc = datetime.fromtimestamp(
-                            timestamp, timezone.utc
+                            timestamp, UTC
                         ).isoformat()
                 except (TypeError, ValueError, OverflowError, OSError):
                     pass
@@ -174,11 +180,11 @@ class CheckpointModel(QAbstractTableModel):
         self.records = records
         self.endResetModel()
 
-    def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self.records)
+    def rowCount(self, parent: QModelIndex | None = None):
+        return 0 if parent is not None and parent.isValid() else len(self.records)
 
-    def columnCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else 4
+    def columnCount(self, parent: QModelIndex | None = None):
+        return 0 if parent is not None and parent.isValid() else 4
 
     def find_checkpoint(self, checkpoint, record_type):
         for row, record in enumerate(self.records):
@@ -561,8 +567,11 @@ class SpectrumResultsTab(QWidget):
         self.view_controls.set_references(references)
         self.baseline_controls.set_references(references)
         self._selected_path = path
-        stat = path.stat()
-        self._batch_identity = (path, stat.st_mtime_ns, stat.st_size)
+        try:
+            stat = path.stat()
+            self._batch_identity = (path, stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            self._batch_identity = (path, None, None)
         self._session = ResultReadSession(path, references=references)
         self._run = run
         self._stored_points = points
@@ -818,12 +827,12 @@ class SpectrumResultsTab(QWidget):
             cls._signatures_equal, cancelled=cancelled,
         )
         series = {}
-        for key in sorted({key for signature in signatures for key, _ in signature}):
+        for series_key in sorted({item_key for signature in signatures for item_key, _ in signature}):
             values = unique_signatures(
-                (((key, dict(signature)[key]),) for signature in signatures if key in dict(signature)),
+                (((series_key, dict(signature)[series_key]),) for signature in signatures if series_key in dict(signature)),
                 cls._signatures_equal, cancelled=cancelled)
-            series[key] = tuple(sorted((s[0][1] for s in values), key=lambda v: (0, float(v))
-                                      if isinstance(v, (int, float)) else (1, str(v))))
+            series[series_key] = tuple(sorted((s[0][1] for s in values), key=lambda v: (0, float(v))
+                                       if isinstance(v, (int, float)) else (1, str(v))))
         return sorted(keys), sorted(signatures, key=cls._format_signature), series
 
     def _cancel_filter_read(self):
@@ -1542,20 +1551,32 @@ class SpectrumResultsTab(QWidget):
     def _go_next(self) -> None:
         self._go_spectrum(1)
 
-    def _spectrum_rows(self):
+    def _spectrum_rows(self) -> tuple[int, ...]:
         return tuple(i for i, p in enumerate(self.points_model.records)
                      if not isinstance(p, StoredPoint) or p.has_spectrum)
 
-    def _go_spectrum(self, direction):
+    def _navigation_rows(self) -> tuple[tuple[int, ...] | range, bool]:
+        rows = self._spectrum_rows()
+        if rows:
+            return rows, True
+        return range(len(self.points_model.records)), False
+
+    def _go_spectrum(self, direction: int) -> None:
         current = self.points.currentIndex()
         if not current.isValid():
             return
         index = current.row()
-        candidates = self._spectrum_rows()
-        following = [i for i in candidates if (i - index) * direction > 0]
-        if following:
-            target = min(following) if direction > 0 else max(following)
-            self.points.setCurrentIndex(self.points_model.index(target, 0))
+        candidates, _has_spectra = self._navigation_rows()
+        if not candidates:
+            return
+        if isinstance(candidates, range):
+            target = index + direction
+            if 0 <= target < len(candidates):
+                self.points.setCurrentIndex(self.points_model.index(target, 0))
+            return
+        pos = bisect_right(candidates, index) if direction > 0 else bisect_left(candidates, index) - 1
+        if 0 <= pos < len(candidates):
+            self.points.setCurrentIndex(self.points_model.index(candidates[pos], 0))
 
     def _update_nav_buttons(self) -> None:
         if self.baseline_controls.viewing:
@@ -1572,14 +1593,21 @@ class SpectrumResultsTab(QWidget):
             self.position_label.setText("No spectrum selected")
             return
         index = current.row()
-        rows = self._spectrum_rows()
-        self.prev_button.setEnabled(any(i < index for i in rows))
-        self.next_button.setEnabled(any(i > index for i in rows))
+        rows, has_spectra = self._navigation_rows()
+        self.prev_button.setEnabled(bool(rows) and rows[0] < index)
+        self.next_button.setEnabled(bool(rows) and rows[-1] > index)
         record = current.siblingAtColumn(0).data(Qt.ItemDataRole.UserRole)
         if isinstance(record, (StoredPoint, PublicCheckpoint)):
-            self.position_label.setText(
-                f"Spectrum {rows.index(index) + 1 if index in rows else '—'} / {len(rows)} · checkpoint {record.index}"
-            )
+            if has_spectra:
+                pos = bisect_left(rows, index)
+                display_pos = pos + 1 if pos < len(rows) and rows[pos] == index else "—"
+                self.position_label.setText(
+                    f"Spectrum {display_pos} / {len(rows)} · checkpoint {record.index}"
+                )
+            else:
+                self.position_label.setText(
+                    f"Checkpoint {index + 1} / {len(rows)} · checkpoint {record.index}"
+                )
             values = dict(self._record_parameter_signature(record))
             self.position_label.setToolTip(self._format_signature(tuple(values.items())))
             self.filter_summary.setToolTip(self._format_signature(tuple(values.items())))
@@ -1614,7 +1642,7 @@ class SpectrumResultsTab(QWidget):
         for label, value in options:
             self.spectrum_variant_combo.addItem(label, userData=value)
         selected = self.spectrum_variant_combo.findData(current)
-        self.spectrum_variant_combo.setCurrentIndex(selected if selected >= 0 else 0)
+        self.spectrum_variant_combo.setCurrentIndex(max(selected, 0))
         self.spectrum_variant_combo.setEnabled(trace is not None and not self.processing_controls.state.active
                                                and not self.view_controls.state.active)
         self.spectrum_variant_combo.blockSignals(False)

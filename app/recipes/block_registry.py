@@ -50,7 +50,7 @@ ACTION_FIELDS: Final = {
         "channel", "source_mode", "output_policy", "configuration_required", "trace", "post_configuration_operation",
         "text", "roi_required", "acquire_single", "managed_acquisition_id",
         "acquisition_average_count", "acquisition_reference_operation"}),
-    "sweep": frozenset({"target", "binding", "start", "stop", "points", "spacing", "segments"}),
+    "sweep": frozenset({"target", "binding", "start", "stop", "points", "spacing", "segments", "respect_ramp_step"}),
     "repeat": frozenset({"count"}),
     "if": frozenset({"condition", "left", "operator", "right"}),
     "configure_keithley": _KEITHLEY_FIELDS,
@@ -74,6 +74,7 @@ ACTION_FIELDS: Final = {
     "set_rigol_output": frozenset({"channel", "enabled"}),
     "enable_rigol_output": frozenset({"channel"}),
     "set_keithley_output": frozenset({"channel", "enabled"}),
+    "ramp_keithley_current": frozenset({"channel", "level", "step", "settle_time", "deadline"}),
     "ramp_keithley_to_zero": frozenset({"channel", "deadline"}),
     "set_anritsu_sg_output": frozenset({"enabled"}),
     "enable_anritsu_sg_output": frozenset(),
@@ -94,6 +95,32 @@ ACTION_FIELDS: Final = {
 
 ACTION_FIELDS = MappingProxyType(ACTION_FIELDS)
 ACTION_TYPES: Final = frozenset(ACTION_FIELDS)
+
+# Control fields may be editable and affect execution without being device writes.
+ACTION_CONTROL_ROLES: Final = MappingProxyType({
+    ("ramp_keithley_current", "step"): "constraint",
+    ("ramp_keithley_current", "settle_time"): "timing",
+    ("ramp_keithley_current", "deadline"): "timing",
+    ("ramp_keithley_to_zero", "deadline"): "timing",
+    ("configure_keithley", "settle_time"): "timing",
+    ("configure_keithley", "settling_time"): "timing",
+    ("configure_moke_box", "minimum_voltage"): "constraint",
+    ("configure_moke_box", "maximum_voltage"): "constraint",
+    ("configure_moke_box", "calibration_id"): "constraint",
+    ("configure_rigol", "dut_min_impedance"): "constraint",
+    ("update_keithley_level", "mode"): "require",
+    ("update_keithley_compliance", "mode"): "require",
+})
+
+
+def device_review_fields(kind: str) -> frozenset[str]:
+    """Authored settings and prerequisites for a device-tab comparison."""
+    if not kind.startswith(("configure_", "update_", "set_", "enable_", "ramp_", "stop_")):
+        return frozenset()
+    return frozenset(
+        field for field in ACTION_FIELDS.get(kind, ())
+        if field != "channel" and ACTION_CONTROL_ROLES.get((kind, field)) in {None, "require"}
+    )
 
 # These identities are permanent, unlike a block's position in the tree.
 DEVICE_MODULES = frozenset({"moke_box", "keithley", "rigol", "anritsu", "anritsu_sg"})

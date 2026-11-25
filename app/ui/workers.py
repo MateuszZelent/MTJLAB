@@ -6,26 +6,28 @@ QObject/QThread pair.  GUI code only emits queued operation requests.
 
 from __future__ import annotations
 
-from contextlib import contextmanager, ExitStack
+import logging
 import math
 import time
 from collections.abc import Callable, Iterable
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from threading import Event, RLock
 
-from PySide6.QtCore import QEventLoop, QMetaObject, QObject, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QEventLoop, QMetaObject, QObject, Qt, QThread, QTimer, Signal, Slot
 
+from app.contracts import DeviceModuleRegistry, OperationDispatcher
 from app.devices.anritsu_ms2830a.adapter import AnritsuAdapter
 from app.devices.base import DeviceAdapter
 from app.devices.keithley_2600.adapter import KeithleyAdapter
 from app.devices.rigol_dg1000z.adapter import RigolAdapter
-from app.contracts import OperationDispatcher
-from app.contracts import DeviceModuleRegistry
+from app.domain.errors import RunInterrupted, SafetyViolation
 from app.engine.compiler import RecipeCompiler
 from app.engine.estimation import PlanEstimator
 from app.recipes import parse_recipe_text
 from app.settings.models import StationSettings
-from app.domain.errors import RunInterrupted, SafetyViolation
+
+_logger = logging.getLogger(__name__)
 
 
 class _RunAccess:
@@ -89,11 +91,15 @@ class _RunAccess:
                 if not safe:
                     raise SafetyViolation("Instrument is reserved by characterization; operation blocked.")
                 self.interrupted.set()
-            if self.owner is not None and self.interrupted.is_set() and not safe:
-                if operation not in {"state", "identity", "capabilities", "connected",
-                                     "compliance_policy", "read_configuration", "last_source_request",
-                                     "set_compliance_policy"}:
-                    raise RunInterrupted("Characterization was interrupted by an output-off action.")
+            if (
+                self.owner is not None
+                and self.interrupted.is_set()
+                and not safe
+                and operation not in {"state", "identity", "capabilities", "connected",
+                                      "compliance_policy", "read_configuration", "last_source_request",
+                                      "set_compliance_policy"}
+            ):
+                raise RunInterrupted("Characterization was interrupted by an output-off action.")
             self.in_flight += 1
         try:
             yield
@@ -151,7 +157,7 @@ class RunDeviceAdapter:
     returns to the dedicated InstrumentWorker thread that owns the transport.
     """
 
-    def __init__(self, controller: "DeviceController", owner: object | None = None,
+    def __init__(self, controller: DeviceController, owner: object | None = None,
                  interruption_event: Event | None = None) -> None:
         self._controller = controller
         self._owner = owner
@@ -271,7 +277,7 @@ class RecipePreflightWorker(QObject):
                 self.cancelled.emit()
                 return
             self.succeeded.emit(recipe, plan, estimate)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - worker thread boundary converts all errors to signals
             if thread.isInterruptionRequested():
                 self.cancelled.emit()
             else:
@@ -300,6 +306,16 @@ class InstrumentWorker(QObject):
         self._last_published_state: str | None = None
         self._attach_traffic_logger()
 
+    _READ_ONLY_POLL_OPERATIONS = frozenset({
+        "measure",
+        "single_sweep",
+        "unaveraged_sweep",
+        "instrument_average_live",
+        "quick_readback",
+        "capture_screen",
+        "get_control_profile",
+    })
+
     def _publish_state(self, *, force: bool = False) -> None:
         state = self._adapter.state.value
         if force or state != self._last_published_state:
@@ -312,6 +328,13 @@ class InstrumentWorker(QObject):
         if callable(setter):
             setter(self.traffic.emit)
 
+    @classmethod
+    def _is_read_only_poll(cls, operation: str) -> bool:
+        return (
+            operation in cls._READ_ONLY_POLL_OPERATIONS
+            or operation.startswith(("read_", "fetch_", "poll_"))
+        )
+
     @Slot(str, object)
     def execute(self, operation: str, payload: object) -> None:
         try:
@@ -321,13 +344,15 @@ class InstrumentWorker(QObject):
                 args = payload if isinstance(payload, tuple) else (payload,)
                 with self._run_access.enter(None, operation, args):
                     result = self._dispatch(operation, payload)
-            self._publish_state(force=True)
+            # Avoid emitting redundant state_changed storms on steady-state
+            # Live/readback polls when the instrument state did not change.
+            self._publish_state(force=not self._is_read_only_poll(operation))
             if operation == "connect":
                 self.capabilities_changed.emit(self._adapter.capabilities)
             elif operation in {"disconnect", "replace_adapter"}:
                 self.capabilities_changed.emit(None)
             self.completed.emit(operation, result)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - worker thread boundary converts all errors to signals
             self._publish_state(force=True)
             self.failed.emit(operation, str(exc))
 
@@ -338,11 +363,11 @@ class InstrumentWorker(QObject):
         try:
             self._adapter.emergency_off()
         except Exception:
-            pass
+            _logger.debug("Worker shutdown emergency_off failed", exc_info=True)
         try:
             self._adapter.disconnect()
         except Exception:
-            pass
+            _logger.debug("Worker shutdown disconnect failed", exc_info=True)
         self.shutdown_complete.emit()
 
     @Slot(object)
@@ -357,12 +382,12 @@ class InstrumentWorker(QObject):
                     self._invoke_member(request)
             else:
                 self._invoke_member(request)
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - relay any error back to RunWorker thread
             request.error = exc
         finally:
             try:
                 self._publish_state(force=request.error is not None)
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - capture state publish error on relay
                 if request.error is None:
                     request.error = exc
             finally:
@@ -396,11 +421,11 @@ class InstrumentWorker(QObject):
             failure: Exception | None = None
             try:
                 self._adapter.emergency_off()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - capture fault before swapping adapter
                 failure = exc
             try:
                 self._adapter.disconnect()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - capture disconnect fault before swap
                 failure = failure or exc
             self._adapter = payload
             self._attach_traffic_logger()
@@ -427,11 +452,11 @@ class InstrumentWorker(QObject):
                 try:
                     self._adapter.emergency_off()
                 except Exception:
-                    pass
+                    _logger.debug("Communication test cleanup emergency_off failed", exc_info=True)
                 try:
                     self._adapter.disconnect()
                 except Exception:
-                    pass
+                    _logger.debug("Communication test cleanup disconnect failed", exc_info=True)
         if operation == "connect":
             return self._adapter.connect()
         if operation == "disconnect":
@@ -492,6 +517,10 @@ class InstrumentWorker(QObject):
             if operation == "ramp_to_level":
                 return self._adapter.ramp_to_level(payload)  # type: ignore[arg-type]
         if isinstance(self._adapter, AnritsuAdapter):
+            if operation in {"read_sweep_timing", "configure_sweep_timing", "poll_synchronized_live"}:
+                from app.devices.anritsu_ms2830a.module import MODULE
+
+                return MODULE.dispatch(self._adapter, operation, payload)
             if operation == "read_acquisition_configuration":
                 return self._adapter.read_acquisition_configuration()
             if operation == "read_configuration":
@@ -503,7 +532,7 @@ class InstrumentWorker(QObject):
             if operation == "configure":
                 return self._adapter.configure_spectrum(payload)  # type: ignore[arg-type]
             if operation == "start_live":
-                return self._adapter.start_live(bool(payload))
+                return self._adapter.start_live(bool(payload), allow_synchronized=True)
             if operation == "stop_live":
                 return self._adapter.stop_live()
             if operation == "fetch_trace":
@@ -568,7 +597,7 @@ class DeviceController(QObject):
         if self._operation_guard is not None:
             try:
                 self._operation_guard(operation, payload)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - convert guard violation to error signal
                 self.error.emit(operation, str(exc))
                 return
         self.request.emit(operation, payload)

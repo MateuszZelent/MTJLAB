@@ -2,14 +2,35 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QAbstractItemView, QFormLayout, QHBoxLayout, QTableWidgetItem, QWidget
-from qfluentwidgets import BodyLabel, ComboBox, LineEdit, PrimaryPushButton, ProgressBar, PushButton, ScrollArea, TableWidget, TitleLabel
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QTableWidgetItem,
+    QWidget,
+)
+from qfluentwidgets import (
+    BodyLabel,
+    ComboBox,
+    LineEdit,
+    PrimaryPushButton,
+    ProgressBar,
+    PushButton,
+    ScrollArea,
+    TableWidget,
+    TitleLabel,
+)
 
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.spectrum.reference_diagnostics import ReferenceDiagnosticConfig
 from app.ui.dialogs import StationDialog, StationFileDialog
-from .correction_controller import SpectrumCorrectionController, SpectrumReferenceDiagnosticRequest
+
+from .correction_controller import (
+    SpectrumCorrectionController,
+    SpectrumReferenceDiagnosticRequest,
+)
 
 
 class SpectrumDiagnosticDialog(StationDialog):
@@ -30,6 +51,7 @@ class SpectrumDiagnosticDialog(StationDialog):
         hint.setWordWrap(True)
         layout.addWidget(hint)
         scroll = ScrollArea(self)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content = QWidget(scroll)
@@ -53,6 +75,7 @@ class SpectrumDiagnosticDialog(StationDialog):
         note.setWordWrap(True)
         form.addRow(note)
         scroll.setWidget(content)
+        scroll.enableTransparentBackground()
         layout.addWidget(scroll, 1)
         self.status = BodyLabel("Ready. Choose a completed raw REF and a new JSON report.", self)
         self.status.setWordWrap(True)
@@ -82,13 +105,15 @@ class SpectrumDiagnosticDialog(StationDialog):
         self.table_status.setWordWrap(True)
         layout.addWidget(self.table_status)
         actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addStretch(1)
         self.start = PrimaryPushButton("Analyze and save report", self)
         self.cancel = PushButton("Cancel analysis", self)
         self.close_button = PushButton("Close", self)
         self.cancel.setEnabled(False)
         self.bin_selector.setEnabled(False)
         self.metric_selector.setEnabled(False)
-        for button in (self.start, self.cancel, self.close_button):
+        for button in (self.close_button, self.cancel, self.start):
             actions.addWidget(button)
         layout.addLayout(actions)
         self.start.clicked.connect(self._start)

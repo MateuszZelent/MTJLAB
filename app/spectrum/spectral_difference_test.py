@@ -1,7 +1,7 @@
 """Offline global difference test: permute complete independent spectral blocks."""
 
-from dataclasses import asdict, dataclass
 import math
+from dataclasses import asdict, dataclass
 
 import numpy as np
 
@@ -40,8 +40,11 @@ def difference_test_buffer_bytes(reference_blocks, signal_blocks, points):
     return (3 * (reference_blocks + signal_blocks) + 12 + batch_vectors) * points * 8
 
 
+_DEFAULT_DIFFERENCE_TEST_CONFIG = SpectralDifferenceTestConfig()
+
+
 def spectral_difference_test(frequencies_hz, references_w, signals_w, search_mask, *,
-                             config=SpectralDifferenceTestConfig(), cancellation_check=None,
+                             config=_DEFAULT_DIFFERENCE_TEST_CONFIG, cancellation_check=None,
                              progress_callback=None):
     """Test a global REF/SIGNAL difference; do not filter data or identify resonances.
 

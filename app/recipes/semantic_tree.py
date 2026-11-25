@@ -15,7 +15,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 
 from app.domain.errors import ConfigurationError, ExecutionError, SafetyViolation
-from app.domain.quantities import Quantity, QuantityError, parse_quantity
+from app.domain.quantities import DIMENSION_CURRENT, Quantity, QuantityError, parse_quantity
 from app.recipes.block_registry import ANRITSU_HARDWARE_AVERAGE_FIELDS
 from app.recipes.models import Recipe, RecipeNode
 from app.recipes.parameter_registry import parameter_descriptor
@@ -508,7 +508,7 @@ def _label(node: RecipeNode) -> str:
     if node.type == "repeat":
         return f"Repeat · {node.data.get('count', '?')} times"
     if node.type == "sequence" and not node.data.get("device_module"):
-        return "Measurement sequence"
+        return str(node.data.get("label") or "Measurement sequence")
     if node.type in {"configure_rigol", "configure_rigol_output"}:
         purpose = "waveform settings" if node.type == "configure_rigol" else "output and SYNC"
         return f"{_device_prefix(node)} · {purpose}"
@@ -547,6 +547,10 @@ def _label(node: RecipeNode) -> str:
     if node.type == "update_keithley_level":
         channel = str(node.data.get("channel", "")).upper()
         return f"Set Keithley {channel} · source level"
+    if node.type == "measure_keithley":
+        return f"Measure Keithley {node.data.get('channel', '?')} · I/V"
+    if node.type == "ramp_keithley_current":
+        return f"Ramp Keithley {node.data.get('channel', '?')} to {node.data.get('level', '?')}"
     if node.type == "ramp_keithley_to_zero":
         channel = str(node.data.get("channel", "")).upper()
         return f"Ramp Keithley {channel or 'output'} to zero"
@@ -693,7 +697,7 @@ def normalize_recipe_tree(
             axis_id,
             SemanticNodeKind.SWEEP_AXIS,
             node.id,
-            f"Sweep axis · {_parameter_tail(binding.target)}",
+            str(node.data.get("label") or f"Sweep axis · {_parameter_tail(binding.target)}"),
             _mapping({"target": binding.target, "dimension": binding.dimension}),
             binding,
             (body,),
@@ -853,6 +857,12 @@ def normalize_recipe_tree(
         children += tuple(output_end_nodes)
         add_id(node.id)
         node_data = dict(data)
+        if node.type == "ramp_keithley_current":
+            node_data.update(
+                target=f"keithley.{node.data.get('channel', '')}.current",
+                dimension=DIMENSION_CURRENT,
+                detail=f"{node.data.get('level', '—')} · {node.data.get('settle_time', '—')} per step",
+            )
         node_data.setdefault("type", node.type)
         if node.type == "final_state":
             values = ", ".join(f"{key.replace('_', ' ')} {node.data[key]}" for key in

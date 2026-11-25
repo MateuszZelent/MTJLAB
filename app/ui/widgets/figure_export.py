@@ -99,8 +99,8 @@ def _edges(value, name, count):
 
 def _axis_label(axis, label, unit):
     axis.setLabel(text=escape(str(label)), units=escape(str(unit)))
-    # Logarithmic units never acquire a metric prefix; no numeric rescaling.
-    axis.enableAutoSIPrefix(bool(unit) and unit not in ("dB", "dBm"))
+    # Logarithmic, squared, dimensionless, compound, and prefixed units never acquire auto-SI prefixes.
+    axis.enableAutoSIPrefix(plot_style.unit_allows_auto_si_prefix(unit))
 
 
 def _axis_flags(value, name):
@@ -521,7 +521,7 @@ def _save_figure(widget, plot, path, title):
             painter.end()
         image.setDotsPerMeterX(round(_DPI / 0.0254))
         image.setDotsPerMeterY(round(_DPI / 0.0254))
-        if not image.save(buffer, "PNG"):
+        if not image.save(buffer, "PNG", 70):
             raise OSError("Qt could not encode the PNG figure")
         payload = bytes(data)
     else:

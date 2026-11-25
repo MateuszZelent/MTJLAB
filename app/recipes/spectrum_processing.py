@@ -4,7 +4,7 @@ import math
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto, parse_quantity
+from app.domain.quantities import DIMENSION_FREQUENCY, DIMENSION_TIME, format_quantity_auto, parse_quantity
 from app.spectrum.analysis import SpectrumAnalysisParameters
 
 REFERENCE_OPERATIONS = (
@@ -51,6 +51,14 @@ def acquisition_summary(fields, *, reference_only=False):
             averaging = f"{count} Live {'frame' if count == 1 else 'frames'}"
         else:
             averaging = f"{count} complete {'sweep' if count == 1 else 'sweeps'}"
+        if reference_only and "minimum_duration" in fields:
+            duration_text = fields["minimum_duration"]
+            try:
+                duration_s = parse_quantity(duration_text, DIMENSION_TIME).si_value
+            except ValueError:
+                return "Invalid collection time — validate recipe"
+            if duration_s > 0:
+                averaging = f"≥ {duration_text}" if count == 1 else f"≥ {averaging} and ≥ {duration_text}"
     stages = [averaging]
     if not reference_only:
         operation = str(fields.get("reference_operation", "none"))

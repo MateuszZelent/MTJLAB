@@ -29,7 +29,7 @@ from app.domain.quantities import (
     parse_quantity,
 )
 from app.recipes import RecipeNode, generate_sweep_points
-from app.recipes.block_registry import ANRITSU_HARDWARE_AVERAGE_FIELDS
+from app.recipes.block_registry import ACTION_CONTROL_ROLES, ANRITSU_HARDWARE_AVERAGE_FIELDS, device_review_fields
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS as _SWEEPABLE_PARAMETERS
 from app.recipes.parameter_registry import sweep_default as _sweep_default
 from app.settings.models import StationSettings
@@ -151,6 +151,21 @@ class RepeatCountDialog(FluentRecipeDialog):
 class ActionNodeEditorDialog(FluentRecipeDialog):
     """Edit scalar fields of a non-device recipe action without raw YAML."""
 
+    _ACTION_NOTES = {
+        "ramp_keithley_current": (
+            "The ramp changes the selected channel's source current. The step size, "
+            "wait and timeout apply to this ramp only."
+        ),
+        "ramp_keithley_to_zero": (
+            "Ramps a configured source to zero and switches off the selected output. "
+            "The timeout applies to this action."
+        ),
+        "configure_moke_box": "These limits constrain the planned VOUT trajectory in PyLab.",
+        "arm_moke_voltage": "Authorizes the prepared VOUT trajectory for the subsequent voltage changes.",
+        "stop_moke_voltage": "Returns the DAC to 0 V and disarms the VOUT trajectory.",
+        "measure_keithley": "Reads current and voltage from the selected channel.",
+        "wait": "Pauses the recipe for the selected duration.",
+    }
     _TIME_FIELDS = {
         "duration",
         "deadline",
@@ -177,6 +192,8 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
         super().__init__(parent)
         self.setProperty("stationSurface", "page")
         self._node = node
+        self._is_current_ramp = node.type == "ramp_keithley_current"
+        self._device_review_fields = device_review_fields(node.type).intersection(node.data)
         self._in_finally = in_finally
         self._editors: dict[str, tuple[QWidget, str]] = {}
         self.setWindowTitle(f"Action settings — {node.type.replace('_', ' ').title()}")
@@ -189,10 +206,13 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
         layout.addWidget(heading)
         self.review = ConfigurationReview(surface, baseline_label="the saved action (not live hardware)",
                                           current_label="Saved action value")
+        if not self.compares_device_settings:
+            self.review.table.horizontalHeaderItem(2).setText("Edited value")
         layout.addWidget(self.review)
         note = BodyLabel(
-            "These values are stored in the recipe only. Hardware limits and output "
-            "interlocks are validated again during preflight and by the device adapter.",
+            self._ACTION_NOTES.get(
+                node.type, "These values are stored in the recipe. Preflight validates the action before execution."
+            ),
             surface,
         )
         note.setObjectName("muted")
@@ -238,17 +258,37 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
         self.cancel_button.clicked.connect(self.reject)
         self.apply_button.clicked.connect(self.accept)
         self.review.bind(form_host, self._comparison_rows)
+        self.review.setVisible(bool(self._editors))
+
+    @property
+    def compares_device_settings(self) -> bool:
+        return bool(self._device_review_fields)
 
     def _comparison_rows(self):
         rows = []
         for key, (editor, kind) in self._editors.items():
+            if self.compares_device_settings and key not in self._device_review_fields:
+                continue
             value = editor.currentData() if kind == "choice" else (
                 editor.isChecked() if kind == "bool" else editor.value() if kind == "int" else editor.text())
-            rows.append(ConfigurationComparisonRow(key, self._field_label(key), self._node.data.get(key), value, "Set"))
+            action = "Edit"
+            if self.compares_device_settings:
+                action = "Require" if ACTION_CONTROL_ROLES.get((self._node.type, key)) == "require" else "Set"
+            rows.append(ConfigurationComparisonRow(key, self._field_label(key), self._node.data.get(key), value, action))
         return rows
 
-    @staticmethod
-    def _field_label(key: str) -> str:
+    def _field_label(self, key: str) -> str:
+        if ACTION_CONTROL_ROLES.get((self._node.type, key)) == "require":
+            return "Required source mode"
+        if self._node.type == "ramp_keithley_to_zero" and key == "deadline":
+            return "Ramp timeout"
+        if self._is_current_ramp:
+            return {
+                "level": "Target current",
+                "step": "Maximum current step",
+                "settle_time": "Wait after each step",
+                "deadline": "Ramp timeout",
+            }.get(key, key.replace("_", " ").title())
         return {
             "enabled": "Output state",
             "checkpoint": "Store as checkpoint",
@@ -390,7 +430,9 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
         for key in logarithmic_power_fields:
             if key in fields and self._literal(fields[key]):
                 parse_quantity(fields[key], DIMENSION_DBM)
-        mode = str(fields.get("mode", ""))
+        mode = "current" if self._is_current_ramp else str(fields.get("mode", ""))
+        if self._is_current_ramp and "step" in fields and self._literal(fields["step"]):
+            parse_quantity(fields["step"], DIMENSION_CURRENT)
         if (
             "level" in fields
             and mode in {"current", "voltage"}
@@ -781,6 +823,11 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         self.acquisition_description = BodyLabel(surface)
         self.acquisition_description.setWordWrap(True)
         self.acquisition_description.setObjectName("muted")
+        self.processing_options = RecipeSpectrumOptions(
+            surface, reference_only=self._reference_only, fields=node.data,
+        )
+        if self._reference_only:
+            layout.addWidget(self.processing_options)
         layout.addWidget(self.acquisition_description)
         form = self.acquisition_form = QFormLayout()
         self.acquisition_mode = ComboBox(surface)
@@ -831,29 +878,47 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         self.average_count.setToolTip(
             "Number of complete spectra averaged in linear power."
         )
-        form.addRow("Average complete spectra", self.average_count)
+        if self._reference_only:
+            self.reference_average_target = ComboBox(surface)
+            self.reference_average_target.setAccessibleName("PyLab reference averaging target")
+            self.reference_average_target.setToolTip("With both targets selected, acquisition continues until both are met.")
+            self.reference_average_target.addItem("Frames", userData="count")
+            self.reference_average_target.addItem("Seconds", userData="duration")
+            self.reference_average_target.addItem("Frames + seconds", userData="count_and_duration")
+            saved_duration = node.data.get("minimum_duration", "0 s")
+            try:
+                timed_reference = parse_quantity(saved_duration, DIMENSION_TIME).si_value != 0
+            except ValueError:
+                timed_reference = True  # Keep a malformed saved value visible for correction.
+            if timed_reference:
+                target = "count_and_duration" if self.average_count.value() > 1 else "duration"
+                self.reference_average_target.setCurrentIndex(self.reference_average_target.findData(target))
+            form.addRow("Averaging target", self.reference_average_target)
+        form.addRow("Complete sweeps", self.average_count)
+        if self._reference_only:
+            self.minimum_duration = LineEdit(surface)
+            self.minimum_duration.setText(str(node.data.get("minimum_duration", "60 s")))
+            self.minimum_duration.setAccessibleName("PyLab reference collection time")
+            self.minimum_duration.setToolTip(
+                "Enter a time with a unit, for example 30 s or 500 ms. Collection ends after a complete spectrum."
+            )
+            form.addRow("Minimum collection time", self.minimum_duration)
         self.spectrum_storage = ComboBox(surface)
         self.spectrum_storage.addItem("Average + all RAW frames", userData=True)
         self.spectrum_storage.addItem("Average only", userData=False)
-        retain_sources = True if mode == "instrument_average" else node.data.get("store_source_spectra", True)
+        retain_sources = node.data.get("store_source_spectra", mode != "instrument_average")
         self.spectrum_storage.setCurrentIndex(self.spectrum_storage.findData(retain_sources))
         self.spectrum_storage.setAccessibleName("Spectrum storage policy")
         self.spectrum_storage.setToolTip("Choose whether to retain the individual input frames alongside the mean in HDF5.")
         form.addRow("Save to HDF5", self.spectrum_storage)
-        self.minimum_duration = LineEdit(surface)
-        self.minimum_duration.setText(str(node.data.get("minimum_duration", "0 s")))
-        self.minimum_duration.setToolTip("Collect for at least this time AND the requested sweep count. 0 s uses the count only.")
-        self.reference_purpose = ComboBox(surface)
-        self.reference_purpose.addItem("Reference", userData="reference")
-        self.reference_purpose.addItem("Background", userData="background")
-        purpose = node.data.get("purpose", node.data.get("file_kind", "reference"))
-        self.reference_purpose.setCurrentIndex(1 if purpose == "background" else 0)
         if self._reference_only:
-            form.addRow("Minimum collection time", self.minimum_duration)
+            self.reference_purpose = ComboBox(surface)
+            self.reference_purpose.setAccessibleName("Saved reference role")
+            self.reference_purpose.addItem("Reference", userData="reference")
+            self.reference_purpose.addItem("Background", userData="background")
+            purpose = node.data.get("purpose", node.data.get("file_kind", "reference"))
+            self.reference_purpose.setCurrentIndex(1 if purpose == "background" else 0)
             form.addRow("Saved role", self.reference_purpose)
-        else:
-            self.minimum_duration.hide()
-            self.reference_purpose.hide()
         self.inter_sweep_delay = LineEdit(surface)
         self.inter_sweep_delay.setText(str(node.data.get("inter_sweep_delay", "0 s")))
         self.inter_sweep_delay.setToolTip("Delay between complete raw spectra in this average. Use a Wait node before the first spectrum after a setpoint change.")
@@ -878,8 +943,8 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             self.reference_operation.hide()
             self.store_processed.hide()
         layout.addLayout(form)
-        self.processing_options = RecipeSpectrumOptions(surface, reference_only=self._reference_only, fields=node.data)
-        layout.addWidget(self.processing_options)
+        if not self._reference_only:
+            layout.addWidget(self.processing_options)
         self.processing_options.changed.connect(self._operation_changed)
         layout.addStretch(1)
         footer = QHBoxLayout()
@@ -901,6 +966,8 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         )
         self.acquisition_mode.currentIndexChanged.connect(self._operation_changed)
         self.instrument_average_target.currentIndexChanged.connect(self._update_acquisition_controls)
+        if self._reference_only:
+            self.reference_average_target.currentIndexChanged.connect(self._update_acquisition_controls)
         self._operation_changed()
 
     def _update_acquisition_controls(self) -> None:
@@ -908,7 +975,7 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         mode = self.acquisition_mode.currentData()
         hardware_average = acquiring and mode == "instrument_average"
         pylab_average = acquiring and not hardware_average
-        timed = self.instrument_average_target.currentData() == "duration"
+        instrument_timed = self.instrument_average_target.currentData() == "duration"
         self.acquisition_description.setVisible(acquiring)
         self.acquisition_description.setText({
             "instrument_average": "Anritsu averages Trace A internally and saves one mean per acquisition.",
@@ -919,13 +986,24 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         form.setRowVisible(self.acquisition_mode, acquiring)
         form.setRowVisible(self.trace, acquiring)
         form.setRowVisible(self.instrument_average_target, hardware_average)
-        form.setRowVisible(self.instrument_average_count, hardware_average and not timed)
-        form.setRowVisible(self.instrument_average_duration, hardware_average and timed)
-        for control in (self.average_count, self.spectrum_storage, self.inter_sweep_delay):
+        form.setRowVisible(self.instrument_average_count, hardware_average and not instrument_timed)
+        form.setRowVisible(self.instrument_average_duration, hardware_average and instrument_timed)
+        for control in (self.spectrum_storage, self.inter_sweep_delay):
             form.setRowVisible(control, pylab_average)
-        self.average_count.setEnabled(pylab_average)
+        live = mode == "continuous_live"
+        form.labelForField(self.average_count).setText("Live frames" if live else "Complete sweeps")
+        show_count = pylab_average
         if self._reference_only:
-            form.setRowVisible(self.minimum_duration, pylab_average)
+            target = self.reference_average_target
+            target.setItemText(target.findData("count"), "Frames" if live else "Sweeps")
+            target.setItemText(
+                target.findData("count_and_duration"), "Frames + seconds" if live else "Sweeps + seconds",
+            )
+            form.setRowVisible(target, pylab_average)
+            show_count = pylab_average and target.currentData() != "duration"
+            form.setRowVisible(self.minimum_duration, pylab_average and target.currentData() != "count")
+        form.setRowVisible(self.average_count, show_count)
+        self.average_count.setEnabled(show_count)
 
     def _operation_changed(self) -> None:
         self._update_acquisition_controls()
@@ -956,13 +1034,15 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         if options.get("source_file"):
             return {**options, "purpose": self.reference_purpose.currentData()}
         instrument_average = self.acquisition_mode.currentData() == "instrument_average"
+        reference_target = self.reference_average_target.currentData() if self._reference_only else "count"
         delay_text = "0 s" if instrument_average else self.inter_sweep_delay.text().strip()
         delay = parse_quantity(delay_text, DIMENSION_TIME).si_value
         if not 0 <= delay <= 3600:
             raise ValueError("Delay between raw spectra must be in 0..3600 s.")
+        count = 1 if instrument_average or reference_target == "duration" else self.average_count.value()
         fields: dict[str, object] = {
             "trace": self.trace.currentText(),
-            "average_count": 1 if instrument_average else self.average_count.value(),
+            "average_count": count,
             "inter_sweep_delay": delay_text,
         }
         fields.update(options)
@@ -981,13 +1061,12 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             fields["store_source_spectra"] = False
         if self._reference_only:
             fields["purpose"] = self.reference_purpose.currentData()
-            if not instrument_average:
+            if not instrument_average and reference_target != "count":
                 duration_text = self.minimum_duration.text().strip()
                 duration = parse_quantity(duration_text, DIMENSION_TIME).si_value
-                if not 0 <= duration <= 3600:
-                    raise ValueError("Minimum collection time must be in 0..3600 s.")
-                if duration:
-                    fields["minimum_duration"] = duration_text
+                if not 0 < duration <= 3600:
+                    raise ValueError("Collection time must be positive and at most 3600 s.")
+                fields["minimum_duration"] = duration_text
         if not self._reference_only:
             if self.processing_options.filters["emi_reject"].isChecked():
                 if instrument_average:

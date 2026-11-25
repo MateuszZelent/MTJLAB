@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-from collections import deque
 import csv
 import math
+import sys
+from collections import deque
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
 
 import pyqtgraph as pg
-from app.ui.widgets.plot_ownership import create_plot_widget
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QShowEvent
 from PySide6.QtWidgets import (
-    QApplication,
     QAbstractItemView,
+    QApplication,
     QHBoxLayout,
     QHeaderView,
     QTableWidgetItem,
@@ -23,12 +23,12 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
+    CheckBox,
+    LineEdit,
     PrimaryPushButton,
     PushButton,
     StrongBodyLabel,
     TableWidget,
-    CheckBox,
-    LineEdit,
     isDarkTheme,
 )
 
@@ -36,6 +36,47 @@ from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto, par
 from app.spectrum import SpectrumPeak
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.dialogs import StationDialog, StationFileDialog
+from app.ui.widgets.plot_ownership import create_plot_widget
+
+
+def _ensure_win32_taskbar_window(window: StationDialog) -> None:
+    """Apply native Windows taskbar extended styles for unowned floating tool windows."""
+    if sys.platform != "win32":
+        return
+    try:
+        import win32con
+        import win32gui
+
+        hwnd = int(window.winId())
+        if hwnd:
+            ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+            updated = (ex_style | win32con.WS_EX_APPWINDOW) & ~win32con.WS_EX_TOOLWINDOW
+            if updated != ex_style:
+                win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, updated)
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return
+    enable_controls = getattr(window, "_enable_platform_window_controls", None)
+    if callable(enable_controls):
+        enable_controls()
+
+
+def _configure_floating_tool_window(window: StationDialog, owner: QWidget | None) -> None:
+    """Make a non-modal tool window minimize to the Windows taskbar cleanly."""
+
+    flags = (
+        (window.windowFlags() & ~Qt.WindowType.Dialog)
+        | Qt.WindowType.Window
+        | Qt.WindowType.WindowMinMaxButtonsHint
+        | Qt.WindowType.WindowCloseButtonHint
+        | Qt.WindowType.WindowTitleHint
+        | Qt.WindowType.WindowSystemMenuHint
+    )
+    window.setWindowFlags(flags)
+    if owner is not None:
+        host = owner.window()
+        if host is not None and not host.windowIcon().isNull():
+            window.setWindowIcon(host.windowIcon())
+        owner.destroyed.connect(window.close)
 
 
 def _frequency(value_hz: float | None) -> str:
@@ -60,9 +101,21 @@ class PeakTableDialog(StationDialog):
         "Fit",
         "Fit RMSE",
     )
+    INITIAL_COLUMN_WIDTHS = (
+        44,
+        124,
+        116,
+        96,
+        104,
+        116,
+        90,
+        116,
+        110,
+    )
 
-    def __init__(self, parent: QWidget) -> None:
-        super().__init__(parent)
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(None, resizable=True)
+        _configure_floating_tool_window(self, parent)
         self.setWindowTitle("Anritsu — detected peaks")
         self.setObjectName("anritsuPeakTableDialog")
         self.setModal(False)
@@ -88,11 +141,13 @@ class PeakTableDialog(StationDialog):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSortingEnabled(False)
         self.table.verticalHeader().hide()
-        self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents
-        )
-        self.table.horizontalHeader().setStretchLastSection(True)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        for column, width in enumerate(self.INITIAL_COLUMN_WIDTHS):
+            self.table.setColumnWidth(column, width)
         layout.addWidget(self.table, 1)
         self.status = CaptionLabel("No peaks detected.", surface)
         self.status.setObjectName("muted")
@@ -121,34 +176,57 @@ class PeakTableDialog(StationDialog):
             # Rows can reorder when amplitudes cross; retain the selected frequency.
             selected = min(range(len(peaks)), key=lambda index: abs(peaks[index].frequency_hz - previous_peak.frequency_hz))
         self._peaks = peaks
+        updates_enabled = self.table.updatesEnabled()
+        sorting_enabled = self.table.isSortingEnabled()
+        self.table.setUpdatesEnabled(False)
+        if sorting_enabled:
+            self.table.setSortingEnabled(False)
         self.table.blockSignals(True)
-        self.table.setRowCount(len(peaks))
-        for row, peak in enumerate(peaks):
-            values = (
-                str(row + 1),
-                _frequency(peak.frequency_hz),
-                f"{peak.amplitude_dbm:.5g} {getattr(peak, 'amplitude_unit', 'dBm')}",
-                f"{peak.snr_db:.4g} {peak.contrast_unit}",
-                f"{peak.prominence_db:.4g} {peak.contrast_unit}",
-                _frequency(peak.fit_fwhm_hz or peak.fwhm_hz),
-                "—" if peak.q_factor is None else f"{peak.q_factor:.6g}",
-                peak.fit_model,
-                "—" if peak.fit_rmse_db is None else f"{peak.fit_rmse_db:.4g} dB",
+        try:
+            if self.table.rowCount() != len(peaks):
+                self.table.setRowCount(len(peaks))
+            for row, peak in enumerate(peaks):
+                values = (
+                    str(row + 1),
+                    _frequency(peak.frequency_hz),
+                    f"{peak.amplitude_dbm:.5g} {getattr(peak, 'amplitude_unit', 'dBm')}",
+                    f"{peak.snr_db:.4g} {peak.contrast_unit}",
+                    f"{peak.prominence_db:.4g} {peak.contrast_unit}",
+                    _frequency(peak.fit_fwhm_hz or peak.fwhm_hz),
+                    "—" if peak.q_factor is None else f"{peak.q_factor:.6g}",
+                    peak.fit_model,
+                    "—" if peak.fit_rmse_db is None else f"{peak.fit_rmse_db:.4g} dB",
+                )
+                for column, text in enumerate(values):
+                    item = self.table.item(row, column)
+                    if item is None:
+                        item = QTableWidgetItem(text)
+                        item.setData(Qt.ItemDataRole.UserRole, row)
+                        self.table.setItem(row, column, item)
+                    else:
+                        if item.text() != text:
+                            item.setText(text)
+                        if item.data(Qt.ItemDataRole.UserRole) != row:
+                            item.setData(Qt.ItemDataRole.UserRole, row)
+            target_row = (
+                selected
+                if selected is not None and selected < len(peaks)
+                else (0 if peaks else -1)
             )
-            for column, text in enumerate(values):
-                item = QTableWidgetItem(text)
-                item.setData(Qt.ItemDataRole.UserRole, row)
-                self.table.setItem(row, column, item)
-        if selected is not None and selected < len(peaks):
-            self.table.selectRow(selected)
-        elif peaks:
-            self.table.selectRow(0)
-        self.table.blockSignals(False)
-        self.status.setText(
+            if target_row >= 0 and self.table.currentRow() != target_row:
+                self.table.selectRow(target_row)
+        finally:
+            self.table.blockSignals(False)
+            if sorting_enabled:
+                self.table.setSortingEnabled(True)
+            self.table.setUpdatesEnabled(updates_enabled)
+        status_text = (
             f"{len(peaks)} peak(s) · {method}"
             if peaks
             else f"No peaks meet the automatic threshold · {method}"
         )
+        if self.status.text() != status_text:
+            self.status.setText(status_text)
         self._selection_changed()
 
     def selected_peak_index(self) -> int | None:
@@ -171,11 +249,17 @@ class PeakTableDialog(StationDialog):
         for row in range(self.table.rowCount()):
             rows.append(
                 "\t".join(
-                    self.table.item(row, column).text()
+                    item.text()
+                    if (item := self.table.item(row, column)) is not None
+                    else ""
                     for column in range(self.table.columnCount())
                 )
             )
         QApplication.clipboard().setText("\n".join(rows))
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        _ensure_win32_taskbar_window(self)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         super().closeEvent(event)
@@ -189,8 +273,9 @@ class PeakTrackingWindow(StationDialog):
     history_cleared = Signal()
     gate_changed = Signal(float)
 
-    def __init__(self, parent: QWidget) -> None:
-        super().__init__(parent, resizable=True)
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(None, resizable=True)
+        _configure_floating_tool_window(self, parent)
         self.setWindowTitle("Anritsu — peak frequency tracking")
         self.setObjectName("anritsuPeakTrackingWindow")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
@@ -278,7 +363,7 @@ class PeakTrackingWindow(StationDialog):
         self._amplitudes_dbm.append(float(peak.amplitude_dbm))
         self._amplitude_units.append(getattr(peak, "amplitude_unit", "dBm"))
         self._sources.append(source)
-        self._timestamps.append(datetime.now(timezone.utc).isoformat())
+        self._timestamps.append(datetime.now(UTC).isoformat())
         self._gates_hz.append(self.gate_hz)
         self.curve.setData(tuple(self._times_s), tuple(self._frequencies_hz), connect="finite")
         if self._initial_frequency_hz is None:
@@ -301,7 +386,7 @@ class PeakTrackingWindow(StationDialog):
             self._amplitudes_dbm.append(float("nan"))
             self._amplitude_units.append("")
             self._sources.append(self._sources[-1] if self._sources else "")
-            self._timestamps.append(datetime.now(timezone.utc).isoformat())
+            self._timestamps.append(datetime.now(UTC).isoformat())
             self._gates_hz.append(gate_hz)
             self.curve.setData(tuple(self._times_s), tuple(self._frequencies_hz), connect="finite")
         self.status.setText(
@@ -375,6 +460,10 @@ class PeakTrackingWindow(StationDialog):
             axis.setPen(pg.mkPen(palette.axes))
             axis.setTextPen(pg.mkPen(palette.axes))
         self.curve.setPen(pg.mkPen(palette.measurement, width=2))
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        _ensure_win32_taskbar_window(self)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         super().closeEvent(event)

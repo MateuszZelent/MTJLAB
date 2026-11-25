@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import numpy as np
 import pyqtgraph as pg
@@ -14,10 +16,12 @@ from qfluentwidgets import (
     CaptionLabel,
     CheckBox,
     ComboBox,
+    FlowLayout,
     LineEdit,
     PushButton,
     ScrollArea,
     StrongBodyLabel,
+    TogglePushButton,
 )
 
 from app.domain.quantities import (
@@ -27,6 +31,7 @@ from app.domain.quantities import (
 )
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.widgets import SpectrumPlotWidget
+
 from .spectrum_controls import format_plot_amplitude, parse_plot_amplitude
 
 
@@ -44,19 +49,26 @@ class SpectrumWorkbench(SpectrumPlotWidget):
         self._hold_frequencies: np.ndarray | None = None
         self._refreshing = False
         self._restoring_ranges = False
+        self._batch_depth = 0
+        self._batch_dirty_choices = False
+        self._batch_dirty_ranges = False
+        self._batch_dirty_measurements = False
+        self._mouse_enabled_state: tuple[bool, bool] = (True, True)
         super().__init__(parent=parent, legend=True)
         self.toolbar_buttons[0].setToolTip("Fit unlocked axes to finite traces; preserve fixed X/Y limits.")
-        # Keep every tool reachable beside the inspector at smaller widths.
+        # Keep every tool reachable in a compact wrapping FlowLayout toolbar.
         root = self.layout()
         toolbar = root.takeAt(0).layout()
-        tool_grid = QGridLayout()
-        tool_grid.setSpacing(4)
-        for index, button in enumerate(self.toolbar_buttons):
+        tool_flow = FlowLayout(needAni=False)
+        tool_flow.setContentsMargins(0, 0, 0, 0)
+        tool_flow.setHorizontalSpacing(4)
+        tool_flow.setVerticalSpacing(4)
+        for button in self.toolbar_buttons:
             toolbar.removeWidget(button)
-            tool_grid.addWidget(button, index // 4, index % 4)
+            tool_flow.addWidget(button)
         toolbar.removeWidget(self.readout)
         toolbar.deleteLater()
-        root.insertLayout(0, tool_grid)
+        root.insertLayout(0, tool_flow)
         root.insertWidget(1, self.readout)
         self.tools = ScrollArea(parent)
         self.tools.setObjectName("spectrumAnalysisTools")
@@ -66,9 +78,10 @@ class SpectrumWorkbench(SpectrumPlotWidget):
         self.tools.setMinimumWidth(300)
         content = QWidget()
         self.tools.setWidget(content)
+        self.tools.enableTransparentBackground()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
         layout.addWidget(StrongBodyLabel("View and analysis", content))
         note = BodyLabel("Ranges change this view only. Drag marker lines and band edges to inspect the trace.")
         note.setWordWrap(True)
@@ -77,50 +90,18 @@ class SpectrumWorkbench(SpectrumPlotWidget):
         self.freeze.setToolTip("Pause this preview while acquisition continues. Unfreeze to show the latest completed frame.")
         self.freeze.toggled.connect(self._freeze_changed)
         layout.addWidget(self.freeze)
-        self.axis_controls: dict[str, tuple[CheckBox, LineEdit, LineEdit]] = {}
-        self.axis_feedback: dict[str, CaptionLabel] = {}
-        for axis, title, defaults in (
-            ("x", "Frequency range", ("1 MHz", "10 MHz")),
-            ("y", "Amplitude range", ("-100 dBm", "0 dBm")),
-        ):
-            layout.addWidget(StrongBodyLabel(title, content))
-            locked = CheckBox("Fixed range", content)
-            locked.setToolTip("Keep these limits through new Live frames, Reset and mouse zoom.")
-            lower, upper = LineEdit(content), LineEdit(content)
-            lower.setText(defaults[0])
-            upper.setText(defaults[1])
-            lower.setAccessibleName(f"{title} minimum")
-            upper.setAccessibleName(f"{title} maximum")
-            grid = QGridLayout()
-            grid.setHorizontalSpacing(8)
-            grid.setVerticalSpacing(8)
-            grid.addWidget(locked, 0, 0, 1, 2)
-            grid.addWidget(BodyLabel("Minimum"), 1, 0)
-            grid.addWidget(lower, 1, 1)
-            grid.addWidget(BodyLabel("Maximum"), 2, 0)
-            grid.addWidget(upper, 2, 1)
-            apply = PushButton("Apply range", content)
-            grid.addWidget(apply, 3, 0, 1, 2)
-            message = CaptionLabel("", content)
-            message.setWordWrap(True)
-            message.hide()
-            grid.addWidget(message, 4, 0, 1, 2)
-            self.axis_feedback[axis] = message
-            layout.addLayout(grid)
-            self.axis_controls[axis] = locked, lower, upper
-            apply.clicked.connect(lambda _checked=False, selected=axis: self.apply_axis_range(selected))
-            lower.returnPressed.connect(lambda selected=axis: self.apply_axis_range(selected))
-            upper.returnPressed.connect(lambda selected=axis: self.apply_axis_range(selected))
-            locked.toggled.connect(lambda checked, selected=axis: self._lock_axis(selected, checked))
-        self.fit_button = PushButton("Fit unlocked axes", content)
-        self.fit_button.clicked.connect(self.auto_range)
-        layout.addWidget(self.fit_button)
+
         layout.addWidget(StrongBodyLabel("Measurement trace", content))
         self.trace_selector = ComboBox(content)
         self.trace_selector.setAccessibleName("Trace used for marker and band measurements")
         self.trace_selector.currentIndexChanged.connect(self._measurement_trace_changed)
         layout.addWidget(self.trace_selector)
+
         layout.addWidget(StrongBodyLabel("Frequency markers", content))
+        self.marker_readout = BodyLabel("No frequency markers.", content)
+        self.marker_readout.setWordWrap(True)
+        self.marker_readout.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.marker_readout)
         self.marker_frequency = LineEdit(content)
         self.marker_frequency.setPlaceholderText("Frequency, e.g. 2.45 GHz")
         self.marker_frequency.setAccessibleName("New marker frequency")
@@ -149,13 +130,14 @@ class SpectrumWorkbench(SpectrumPlotWidget):
         self.snap_markers = CheckBox("Snap lines to measured samples", content)
         self.snap_markers.setChecked(True)
         layout.addWidget(self.snap_markers)
-        self.marker_readout = BodyLabel("No frequency markers.", content)
-        self.marker_readout.setWordWrap(True)
-        self.marker_readout.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.marker_readout)
+
         layout.addWidget(StrongBodyLabel("Band inspection", content))
         self.band_enabled = CheckBox("Show movable frequency band", content)
         layout.addWidget(self.band_enabled)
+        self.band_readout = BodyLabel("Enable the band to inspect measured samples.", content)
+        self.band_readout.setWordWrap(True)
+        self.band_readout.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.band_readout)
         band_grid = QGridLayout()
         self.band_start, self.band_stop = LineEdit(content), LineEdit(content)
         self.band_start.setPlaceholderText("Start, e.g. 1 MHz")
@@ -167,10 +149,57 @@ class SpectrumWorkbench(SpectrumPlotWidget):
         self.apply_band_button = PushButton("Apply band", content)
         band_grid.addWidget(self.apply_band_button, 1, 0, 1, 2)
         layout.addLayout(band_grid)
-        self.band_readout = BodyLabel("Enable the band to inspect measured samples.", content)
-        self.band_readout.setWordWrap(True)
-        self.band_readout.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.band_readout)
+
+        self.axis_ranges_toggle = TogglePushButton("Axis ranges", content)
+        self.axis_ranges_toggle.setChecked(False)
+        self.axis_ranges_toggle.setToolTip("Show or hide fixed frequency and amplitude axis limits.")
+        layout.addWidget(self.axis_ranges_toggle)
+        self.axis_ranges_container = QWidget(content)
+        axis_layout = QVBoxLayout(self.axis_ranges_container)
+        axis_layout.setContentsMargins(0, 0, 0, 0)
+        axis_layout.setSpacing(8)
+        self.axis_controls: dict[str, tuple[CheckBox, LineEdit, LineEdit]] = {}
+        self.axis_feedback: dict[str, CaptionLabel] = {}
+        for axis, title, defaults in (
+            ("x", "Frequency range", ("1 MHz", "10 MHz")),
+            ("y", "Amplitude range", ("-100 dBm", "0 dBm")),
+        ):
+            axis_layout.addWidget(StrongBodyLabel(title, self.axis_ranges_container))
+            locked = CheckBox("Fixed range", self.axis_ranges_container)
+            locked.setToolTip("Keep these limits through new Live frames, Reset and mouse zoom.")
+            lower, upper = LineEdit(self.axis_ranges_container), LineEdit(self.axis_ranges_container)
+            lower.setText(defaults[0])
+            upper.setText(defaults[1])
+            lower.setAccessibleName(f"{title} minimum")
+            upper.setAccessibleName(f"{title} maximum")
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(8)
+            grid.setVerticalSpacing(6)
+            grid.addWidget(locked, 0, 0, 1, 2)
+            grid.addWidget(BodyLabel("Minimum", self.axis_ranges_container), 1, 0)
+            grid.addWidget(lower, 1, 1)
+            grid.addWidget(BodyLabel("Maximum", self.axis_ranges_container), 2, 0)
+            grid.addWidget(upper, 2, 1)
+            apply = PushButton("Apply range", self.axis_ranges_container)
+            grid.addWidget(apply, 3, 0, 1, 2)
+            message = CaptionLabel("", self.axis_ranges_container)
+            message.setWordWrap(True)
+            message.hide()
+            grid.addWidget(message, 4, 0, 1, 2)
+            self.axis_feedback[axis] = message
+            axis_layout.addLayout(grid)
+            self.axis_controls[axis] = locked, lower, upper
+            apply.clicked.connect(lambda _checked=False, selected=axis: self.apply_axis_range(selected))
+            lower.returnPressed.connect(lambda selected=axis: self.apply_axis_range(selected))
+            upper.returnPressed.connect(lambda selected=axis: self.apply_axis_range(selected))
+            locked.toggled.connect(lambda checked, selected=axis: self._lock_axis(selected, checked))
+        self.fit_button = PushButton("Fit unlocked axes", self.axis_ranges_container)
+        self.fit_button.clicked.connect(self.auto_range)
+        axis_layout.addWidget(self.fit_button)
+        self.axis_ranges_container.setVisible(False)
+        self.axis_ranges_toggle.toggled.connect(self.axis_ranges_container.setVisible)
+        layout.addWidget(self.axis_ranges_container)
+
         self.feedback = BodyLabel("", content)
         self.feedback.setWordWrap(True)
         layout.addWidget(self.feedback)
@@ -238,6 +267,8 @@ class SpectrumWorkbench(SpectrumPlotWidget):
                 raise ValueError("Minimum must be smaller than maximum; previous range preserved.")
         except (ValueError, TypeError) as error:
             self._say_error(error)
+            if not self.axis_ranges_toggle.isChecked():
+                self.axis_ranges_toggle.setChecked(True)
             self.axis_feedback[axis].setText(str(error))
             self.axis_feedback[axis].show()
             return False
@@ -268,14 +299,56 @@ class SpectrumWorkbench(SpectrumPlotWidget):
     def _restore_fixed_ranges(self) -> None:
         if self._restoring_ranges:
             return
+        desired_mouse = ("x" not in self.fixed_ranges, "y" not in self.fixed_ranges)
+        if not self.fixed_ranges and self._mouse_enabled_state == desired_mouse:
+            return
         self._restoring_ranges = True
         try:
             view = self.plot.getViewBox()
             for axis, limits in self.fixed_ranges.items():
                 view.setRange(**{f"{axis}Range": limits}, padding=0)
-            view.setMouseEnabled(x="x" not in self.fixed_ranges, y="y" not in self.fixed_ranges)
+            if self._mouse_enabled_state != desired_mouse:
+                view.setMouseEnabled(x=desired_mouse[0], y=desired_mouse[1])
+                self._mouse_enabled_state = desired_mouse
         finally:
             self._restoring_ranges = False
+
+    def begin_batch(self) -> None:
+        self._batch_depth += 1
+        parent_begin = getattr(super(), "begin_batch", None)
+        if parent_begin is not None:
+            parent_begin()
+
+    def end_batch(self) -> None:
+        parent_end = getattr(super(), "end_batch", None)
+        if parent_end is not None:
+            parent_end()
+        if self._batch_depth <= 0:
+            return
+        self._batch_depth -= 1
+        if self._batch_depth > 0:
+            return
+        dirty_choices = self._batch_dirty_choices
+        dirty_ranges = self._batch_dirty_ranges
+        dirty_measurements = self._batch_dirty_measurements
+        self._batch_dirty_choices = False
+        self._batch_dirty_ranges = False
+        self._batch_dirty_measurements = False
+        if dirty_ranges:
+            self._restore_fixed_ranges()
+        refreshed = False
+        if dirty_choices and hasattr(self, "trace_selector"):
+            refreshed = self._sync_trace_choices()
+        if dirty_measurements and not refreshed:
+            self.refresh_measurements()
+
+    @contextmanager
+    def batch_updates(self) -> Iterator[None]:
+        self.begin_batch()
+        try:
+            yield
+        finally:
+            self.end_batch()
 
     def _view_range_changed(self, *_args) -> None:
         if self._restoring_ranges:
@@ -303,9 +376,9 @@ class SpectrumWorkbench(SpectrumPlotWidget):
             return
         x, y = data
         lower, upper = self.plot.viewRange()[0]
-        indices = np.flatnonzero((x >= lower) & (x <= upper))
+        indices = np.flatnonzero((x >= lower) & (x <= upper) & np.isfinite(x) & np.isfinite(y))
         if not indices.size:
-            self.status_changed.emit("Peak search unavailable: no measured samples in view.")
+            self.status_changed.emit("Peak search unavailable: no finite measured samples in view.")
             return
         index = indices[int(np.argmax(y[indices]))]
         self.marker.setPos(float(x[index]))
@@ -317,7 +390,8 @@ class SpectrumWorkbench(SpectrumPlotWidget):
 
     def set_labels(self, **kwargs) -> None:
         unit = kwargs.get("y_unit", "dBm")
-        if unit != self.amplitude_unit:
+        unit_changed = unit != self.amplitude_unit
+        if unit_changed:
             # A ratio and absolute dBm are different physical dimensions.
             self.fixed_ranges.pop("y", None)
             self.amplitude_unit = unit
@@ -326,17 +400,26 @@ class SpectrumWorkbench(SpectrumPlotWidget):
                 self._sync_axis_editors("y", (-100, 0) if unit == "dBm" else (0, 1))
                 self.feedback.setText("Amplitude unit changed; Y range unlocked. Set limits in the new unit.")
         super().set_labels(**kwargs)
-        if hasattr(self, "band"):
-            self.refresh_measurements()
+        if unit_changed and hasattr(self, "band"):
+            if self._batch_depth > 0:
+                self._batch_dirty_measurements = True
+            else:
+                self.refresh_measurements()
 
     def set_trace(self, name: str, x: object, y: object, **kwargs) -> None:
         selected = self.trace_selector.currentText() if hasattr(self, "trace_selector") else ""
         kwargs["primary"] = name == (selected or name)
         super().set_trace(name, x, y, **kwargs)
+        if self._batch_depth > 0:
+            self._batch_dirty_ranges = True
+            self._batch_dirty_choices = True
+            self._batch_dirty_measurements = True
+            return
         self._restore_fixed_ranges()
         if hasattr(self, "trace_selector"):
-            self._sync_trace_choices()
-            self.refresh_measurements()
+            refreshed = self._sync_trace_choices()
+            if not refreshed and name == self.trace_selector.currentText():
+                self.refresh_measurements()
 
     def _update_holds(self, x_values: np.ndarray, y_values: np.ndarray) -> None:
         if self._hold_frequencies is not None and not np.array_equal(self._hold_frequencies, x_values):
@@ -348,16 +431,22 @@ class SpectrumWorkbench(SpectrumPlotWidget):
         super()._update_holds(x_values, y_values)
 
     def clear_trace(self, name: str) -> None:
+        if name not in self._traces:
+            return
         super().clear_trace(name)
+        if self._batch_depth > 0:
+            self._batch_dirty_choices = True
+            self._batch_dirty_measurements = True
+            return
         if hasattr(self, "trace_selector"):
             self._sync_trace_choices()
             self.refresh_measurements()
 
-    def _sync_trace_choices(self) -> None:
+    def _sync_trace_choices(self) -> bool:
         names = [name for name in self._traces if name not in {"Max hold", "Min hold"}]
         current_names = [self.trace_selector.itemText(index) for index in range(self.trace_selector.count())]
         if names == current_names:
-            return
+            return False
         selected = self.trace_selector.currentText()
         self.trace_selector.blockSignals(True)
         self.trace_selector.clear()
@@ -367,6 +456,8 @@ class SpectrumWorkbench(SpectrumPlotWidget):
         self.trace_selector.blockSignals(False)
         if self.trace_selector.currentText() != selected:
             self._measurement_trace_changed()
+            return True
+        return False
 
     def _measurement_data(self):
         return self._traces.get(self.trace_selector.currentText())
@@ -382,10 +473,15 @@ class SpectrumWorkbench(SpectrumPlotWidget):
         if data is None or not data[0].size:
             return None
         x, y = data
-        if frequency_hz < np.min(x) or frequency_hz > np.max(x):
+        finite_x = np.isfinite(x)
+        if not np.any(finite_x):
             return None
-        index = int(np.argmin(np.abs(x - frequency_hz)))
-        return float(x[index]), float(y[index])
+        fx = x[finite_x]
+        fy = y[finite_x]
+        if frequency_hz < float(np.min(fx)) or frequency_hz > float(np.max(fx)):
+            return None
+        index = int(np.argmin(np.abs(fx - frequency_hz)))
+        return float(fx[index]), float(fy[index])
 
     def add_frequency_marker(self, frequency_hz: float) -> str:
         if not math.isfinite(frequency_hz) or frequency_hz < 0:
@@ -421,9 +517,9 @@ class SpectrumWorkbench(SpectrumPlotWidget):
             return
         x, y = data
         lower, upper = self.plot.viewRange()[0]
-        selected = np.flatnonzero((x >= lower) & (x <= upper))
+        selected = np.flatnonzero((x >= lower) & (x <= upper) & np.isfinite(x) & np.isfinite(y))
         if not selected.size:
-            self.feedback.setText("No measured samples in the visible frequency range.")
+            self.feedback.setText("No finite measured samples in the visible frequency range.")
             return
         index = selected[int(np.argmax(y[selected]))]
         self.add_frequency_marker(float(x[index]))
@@ -495,44 +591,64 @@ class SpectrumWorkbench(SpectrumPlotWidget):
             return
         self._refreshing = True
         try:
-            rows, samples = [], []
-            for name, line in self.frequency_markers.items():
-                frequency = float(line.value())
-                sample = self._sample(frequency)
-                text = f"{name}: {format_quantity_auto(frequency, DIMENSION_FREQUENCY)}"
-                if sample:
-                    text += f"\n  {self._format_measurement(sample[1])} at sample {format_quantity_auto(sample[0], DIMENSION_FREQUENCY)}"
-                else:
-                    text += "\n  Outside measured trace / no data"
-                rows.append(text)
-                samples.append((name, frequency, sample))
-            if len(samples) >= 2:
-                first = samples[0]
-                for other in samples[1:]:
-                    text = f"{other[0]} − {first[0]}: Δf {format_quantity_auto(other[1] - first[1], DIMENSION_FREQUENCY)}"
-                    if first[2] and other[2]:
-                        unit = "dB" if self._measurement_unit() in {"dBm", "dB"} else self._measurement_unit()
-                        text += f", ΔA {other[2][1] - first[2][1]:.6g} {unit}"
+            if not self.frequency_markers:
+                if self.marker_readout.text() != "No frequency markers.":
+                    self.marker_readout.setText("No frequency markers.")
+            else:
+                rows, samples = [], []
+                for name, line in self.frequency_markers.items():
+                    frequency = float(line.value())
+                    sample = self._sample(frequency)
+                    text = f"{name}: {format_quantity_auto(frequency, DIMENSION_FREQUENCY)}"
+                    if sample and math.isfinite(sample[1]):
+                        text += f"\n  {self._format_measurement(sample[1])} at sample {format_quantity_auto(sample[0], DIMENSION_FREQUENCY)}"
+                    elif sample:
+                        text += f"\n  n/a at sample {format_quantity_auto(sample[0], DIMENSION_FREQUENCY)}"
+                    else:
+                        text += "\n  Outside measured trace / no data"
                     rows.append(text)
-            self.marker_readout.setText("\n".join(rows) or "No frequency markers.")
-            data = self._measurement_data()
+                    samples.append((name, frequency, sample))
+                if len(samples) >= 2:
+                    first = samples[0]
+                    for other in samples[1:]:
+                        text = f"{other[0]} − {first[0]}: Δf {format_quantity_auto(other[1] - first[1], DIMENSION_FREQUENCY)}"
+                        if (
+                            first[2]
+                            and other[2]
+                            and math.isfinite(first[2][1])
+                            and math.isfinite(other[2][1])
+                        ):
+                            unit = "dB" if self._measurement_unit() in {"dBm", "dB"} else self._measurement_unit()
+                            text += f", ΔA {other[2][1] - first[2][1]:.6g} {unit}"
+                        rows.append(text)
+                self.marker_readout.setText("\n".join(rows))
             if not self.band_enabled.isChecked():
-                self.band_readout.setText("Enable the band to inspect measured samples.")
+                default_band_text = "Enable the band to inspect measured samples."
+                if self.band_readout.text() != default_band_text:
+                    self.band_readout.setText(default_band_text)
                 return
+            data = self._measurement_data()
             lower, upper = self.band.getRegion()
             span_text = f"Width: {format_quantity_auto(upper - lower, DIMENSION_FREQUENCY)}"
             if data is None:
                 self.band_readout.setText(span_text + "\nNo measured samples.")
                 return
             x, y = data
-            selected = np.flatnonzero((x >= lower) & (x <= upper))
+            selected = np.flatnonzero((x >= lower) & (x <= upper) & np.isfinite(x))
             if not selected.size:
                 self.band_readout.setText(span_text + "\nNo measured samples in this band.")
                 return
-            peak = selected[int(np.argmax(y[selected]))]
-            trough = float(np.min(y[selected]))
+            finite_indices = selected[np.isfinite(y[selected])]
+            if not finite_indices.size:
+                self.band_readout.setText(
+                    f"{span_text}\nSamples: {selected.size} (0 finite)\n"
+                    "Peak: n/a\nMinimum: n/a\n−3 dB width: n/a"
+                )
+                return
+            peak = finite_indices[int(np.argmax(y[finite_indices]))]
+            trough = float(np.min(y[finite_indices]))
             self.band_readout.setText(
-                f"{span_text}\nSamples: {selected.size}\n"
+                f"{span_text}\nSamples: {finite_indices.size}\n"
                 f"Peak: {self._format_measurement(float(y[peak]))}\n"
                 f"at {format_quantity_auto(float(x[peak]), DIMENSION_FREQUENCY)}\n"
                 f"Minimum: {self._format_measurement(trough)}\n"
@@ -546,24 +662,44 @@ class SpectrumWorkbench(SpectrumPlotWidget):
         """Find the connected peak lobe's crossings inside the inspected band."""
         if self._measurement_unit() not in {"dBm", "dB"}:
             return "−3 dB width requires a logarithmic power trace."
-        order = np.argsort(x)
-        x, y = x[order], y[order]
-        peak = int(np.argmax(y))
-        threshold = float(y[peak]) - 3.0
-        left, right = peak, peak
-        while left > 0 and y[left] > threshold:
-            left -= 1
-        while right < y.size - 1 and y[right] > threshold:
-            right += 1
-        if y[left] > threshold or y[right] > threshold or left == peak or right == peak:
+        finite = np.isfinite(x) & np.isfinite(y)
+        if not np.any(finite):
+            return "−3 dB width: n/a"
+        fx = x[finite]
+        fy = y[finite]
+        if fx.size > 1 and not bool(np.all(fx[:-1] <= fx[1:])):
+            order = np.argsort(fx)
+            fx, fy = fx[order], fy[order]
+        if fx.size < 3:
             return "−3 dB width: incomplete lobe inside this band."
-        if np.any(np.diff(x) <= 0):
+        peak = int(np.argmax(fy))
+        peak_val = float(fy[peak])
+        if not math.isfinite(peak_val):
+            return "−3 dB width: n/a"
+        threshold = peak_val - 3.0
+        left, right = peak, peak
+        while left > 0 and fy[left] > threshold:
+            left -= 1
+        while right < fy.size - 1 and fy[right] > threshold:
+            right += 1
+        if fy[left] > threshold or fy[right] > threshold or left == peak or right == peak:
+            return "−3 dB width: incomplete lobe inside this band."
+        if np.any(np.diff(fx) <= 0):
             return "−3 dB width unavailable: duplicate frequency bins."
-        left_hz = float(x[left] + (threshold - y[left]) * (x[left + 1] - x[left]) / (y[left + 1] - y[left]))
-        right_hz = float(x[right - 1] + (threshold - y[right - 1]) * (x[right] - x[right - 1]) / (y[right] - y[right - 1]))
-        return f"−3 dB width: {format_quantity_auto(right_hz - left_hz, DIMENSION_FREQUENCY)} (interpolated crossings)"
+        dy_left = float(fy[left + 1] - fy[left])
+        dy_right = float(fy[right] - fy[right - 1])
+        if dy_left == 0.0 or dy_right == 0.0:
+            return "−3 dB width: incomplete lobe inside this band."
+        left_hz = float(fx[left] + (threshold - fy[left]) * (fx[left + 1] - fx[left]) / dy_left)
+        right_hz = float(fx[right - 1] + (threshold - fy[right - 1]) * (fx[right] - fx[right - 1]) / dy_right)
+        width_hz = right_hz - left_hz
+        if not (math.isfinite(left_hz) and math.isfinite(right_hz) and math.isfinite(width_hz) and width_hz >= 0):
+            return "−3 dB width: n/a"
+        return f"−3 dB width: {format_quantity_auto(width_hz, DIMENSION_FREQUENCY)} (interpolated crossings)"
 
     def apply_theme(self, theme: str) -> None:
+        if getattr(self, "_cleaned_up", False):
+            return
         super().apply_theme(theme)
         palette = plot_theme(tokens_for(theme))
         for line in self.frequency_markers.values():

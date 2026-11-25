@@ -315,6 +315,10 @@ class _Resolver:
             return self.all_unknown(state, node.id)
         if kind not in ACTION_FIELDS or kind == "connect":
             return self.all_unknown(state, node.id)
+        if kind == "ramp_keithley_current":
+            updates = {"source_level": _authored(data.get("level"), node.id)}
+            self.dependent_ranges(updates, state, node.id)
+            return updates
         if kind == "ramp_keithley_to_zero":
             mode = state.get("source_mode")
             zero = {"current": "0 A", "voltage": "0 V"}.get(str(mode.value) if mode else "")

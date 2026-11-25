@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QEvent, Signal
-from PySide6.QtGui import QFont, QFontMetrics, QResizeEvent
+from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtGui import QFont, QFontMetrics, QPainter, QPaintEvent, QResizeEvent
 from PySide6.QtWidgets import QGridLayout, QSizePolicy, QWidget
-from qfluentwidgets import BodyLabel, PrimaryPushButton, PushButton
+from qfluentwidgets import BodyLabel, PrimaryPushButton, PushButton, isDarkTheme
+
+from app.ui.design_system import set_dynamic_property
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,11 +38,11 @@ class _EmergencyStopButton(PrimaryPushButton):
         caption_width = QFontMetrics(font).horizontalAdvance(self.text()) + 32
         self.setMinimumWidth(max(184, caption_width))
 
-    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+    def setText(self, text: str) -> None:
         super().setText(text)
         self._reserve_caption_width()
 
-    def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
+    def changeEvent(self, event: QEvent) -> None:
         super().changeEvent(event)
         if event.type() in {QEvent.Type.FontChange, QEvent.Type.StyleChange}:
             self._reserve_caption_width()
@@ -52,14 +54,35 @@ class _SafetyStatusLabel(BodyLabel):
     def _reserve_caption_width(self) -> None:
         self.setMinimumWidth(self.fontMetrics().horizontalAdvance(self.text()) + 4)
 
-    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+    def setText(self, text: str) -> None:
         super().setText(text)
         self._reserve_caption_width()
 
-    def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
+    def changeEvent(self, event: QEvent) -> None:
         super().changeEvent(event)
         if event.type() in {QEvent.Type.FontChange, QEvent.Type.StyleChange}:
             self._reserve_caption_width()
+
+
+class _ElidedStatusLabel(BodyLabel):
+    """BodyLabel that paints with clean right-elision while preserving full .text()."""
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        del event
+        painter = QPainter(self)
+        try:
+            rect = self.contentsRect()
+            elided = self.fontMetrics().elidedText(
+                self.text(),
+                Qt.TextElideMode.ElideRight,
+                max(0, rect.width()),
+            )
+            painter.setFont(self.font())
+            color = self.darkColor if isDarkTheme() else self.lightColor
+            painter.setPen(color)
+            painter.drawText(rect, int(self.alignment()), elided)
+        finally:
+            painter.end()
 
 
 class StationSafetyStrip(QWidget):
@@ -75,7 +98,7 @@ class StationSafetyStrip(QWidget):
         self.readiness = _SafetyStatusLabel()
         self.outputs = _SafetyStatusLabel()
         self.mode = _SafetyStatusLabel()
-        self.actor = BodyLabel()
+        self.actor = _ElidedStatusLabel()
         self.estop = _EmergencyStopButton("E-STOP  |  ALL OUTPUTS OFF", self)
         self.estop.setObjectName("stationEmergencyStopButton")
         self.estop.setProperty("visualPriority", "high")
@@ -125,6 +148,7 @@ class StationSafetyStrip(QWidget):
         )
         self.save_settings.setMinimumWidth(100)
         self._layout_mode: str | None = None
+        self._last_snapshot: StationSafetySnapshot | None = None
         self._reflow(mode="narrow")
 
     def resizeEvent(self, event: QResizeEvent) -> None:
@@ -165,12 +189,14 @@ class StationSafetyStrip(QWidget):
             self.estop.setText("E-STOP  |  ALL OUTPUTS OFF")
             self._layout.addWidget(self.readiness, 0, 0)
             self._layout.addWidget(self.outputs, 0, 1)
-            self._layout.addWidget(self.save_settings, 1, 0)
-            self._layout.addWidget(self.estop, 1, 1)
-            self._layout.addWidget(self.mode, 2, 0)
-            self._layout.addWidget(self.actor, 2, 1)
+            self._layout.addWidget(self.save_settings, 0, 2)
+            self._layout.addWidget(self.estop, 0, 3)
+            self._layout.addWidget(self.mode, 1, 0)
+            self._layout.addWidget(self.actor, 1, 1, 1, 3)
             self._layout.setColumnStretch(0, 1)
-            self._layout.setColumnStretch(1, 2)
+            self._layout.setColumnStretch(1, 1)
+            self._layout.setColumnStretch(2, 0)
+            self._layout.setColumnStretch(3, 1)
         else:
             self.estop.setText("E-STOP  |  ALL OUTPUTS OFF")
             self._layout.addWidget(self.readiness, 0, 0)
@@ -193,13 +219,18 @@ class StationSafetyStrip(QWidget):
 
     def update_snapshot(self, snapshot: StationSafetySnapshot) -> None:
         """Synchronously render ``snapshot`` without performing station actions."""
-        self.readiness.setText(
-            "Station ready" if snapshot.ready else "Station blocked"
+        if snapshot == self._last_snapshot:
+            return
+        self._last_snapshot = snapshot
+        readiness_text = "Station ready" if snapshot.ready else "Station blocked"
+        if self.readiness.text() != readiness_text:
+            self.readiness.setText(readiness_text)
+        set_dynamic_property(
+            self.readiness,
+            "safetyState",
+            "ready" if snapshot.ready else "danger",
         )
-        self.readiness.setProperty(
-            "safetyState", "ready" if snapshot.ready else "danger"
-        )
-        self.outputs.setText(
+        outputs_text = (
             f"{snapshot.active_outputs} on · {snapshot.unknown_outputs} unknown"
             if snapshot.unknown_outputs and snapshot.active_outputs
             else "Outputs unknown"
@@ -208,15 +239,31 @@ class StationSafetyStrip(QWidget):
             if snapshot.active_outputs == 0
             else f"{snapshot.active_outputs} outputs active"
         )
-        self.outputs.setProperty(
-            "outputState", "unknown" if snapshot.unknown_outputs else "off" if snapshot.active_outputs == 0 else "active"
+        if self.outputs.text() != outputs_text:
+            self.outputs.setText(outputs_text)
+        set_dynamic_property(
+            self.outputs,
+            "outputState",
+            "unknown"
+            if snapshot.unknown_outputs
+            else "off"
+            if snapshot.active_outputs == 0
+            else "active",
         )
-        self.mode.setText("SIMULATION" if snapshot.simulation else "HARDWARE")
+        mode_text = "SIMULATION" if snapshot.simulation else "HARDWARE"
+        if self.mode.text() != mode_text:
+            self.mode.setText(mode_text)
+        set_dynamic_property(
+            self.mode,
+            "safetyState",
+            "caution" if snapshot.simulation else "neutral",
+        )
         roles = ", ".join(snapshot.roles) or "no role"
-        self.actor.setText(f"{snapshot.actor or 'anonymous'} · {roles}")
+        actor_text = f"{snapshot.actor or 'anonymous'} · {roles}"
+        if self.actor.text() != actor_text:
+            self.actor.setText(actor_text)
+        set_dynamic_property(self.actor, "outputState", "neutral")
         for widget in (self.readiness, self.outputs, self.mode, self.actor):
-            widget.setToolTip(widget.text())
-
-        for widget in (self.readiness, self.outputs):
-            widget.style().unpolish(widget)
-            widget.style().polish(widget)
+            text = widget.text()
+            if widget.toolTip() != text:
+                widget.setToolTip(text)

@@ -300,7 +300,7 @@ def set_keithley_shutdown_ramps_in_recipe(
 
 class RecipePage(QWidget):
     status = Signal(str)
-    run_requested = Signal(object, bool, str, str, str)
+    execution_preview_requested = Signal(object, bool, str, str, str)
     change_target_requested = Signal()
     plan_preflight_changed = Signal(object)
     settings_issue_requested = Signal(object)
@@ -461,7 +461,8 @@ class RecipePage(QWidget):
             "an active output; Kepco power OFF is not verified. Real spectra require "
             "the station to be outside SIMULATION mode."
         )
-        self.run_button = PrimaryPushButton("Run plan")
+        self.run_button = PrimaryPushButton("Go to Execute")
+        self.run_button.setToolTip("Review the validated plan in Execution before starting.")
         self.run_button.setEnabled(False)
         self.save_to_elab_check = CheckBox("Save finished run to eLab", self.document_card)
         self.save_to_elab_check.setEnabled(False)
@@ -910,7 +911,7 @@ class RecipePage(QWidget):
         status_layout.addWidget(self.summary)
         layout.addWidget(self.status_card)
         self.restore_button.clicked.connect(self.restore_autosave)
-        self.run_button.clicked.connect(self.request_run)
+        self.run_button.clicked.connect(self.request_execution_preview)
         self.output_directory.textChanged.connect(self._refresh_output_preview)
         self.output_file_stem.textChanged.connect(self._refresh_output_preview)
         self.output_directory_button.clicked.connect(self.browse_output_directory)
@@ -2167,7 +2168,7 @@ class RecipePage(QWidget):
         return tokens_for(effective_theme(mode))
 
     def set_keithley_snapshot_provider(self, provider: object) -> None:
-        """Bind read-only access to the manual Keithley form state."""
+        """Bind a read-only snapshot provider with optional channel and source mode."""
 
         self._keithley_snapshot_provider = provider
 
@@ -2364,6 +2365,8 @@ class RecipePage(QWidget):
         self,
         recipe_source: str | None = None,
         plan: object | None = None,
+        *,
+        update_editor: bool = True,
     ) -> SemanticMeasurementTree:
         """Return the immutable semantic snapshot used by Builder and Runner."""
 
@@ -2375,7 +2378,7 @@ class RecipePage(QWidget):
             recipe, self._device_registry.sweep_providers(),
             safe_shutdown_actions=getattr(plan, "safe_shutdown_actions", None),
         )
-        if recipe_source is None or source == self._tree_source:
+        if update_editor and (recipe_source is None or source == self._tree_source):
             # The editor keeps a stable authored tree; Execution gets the full
             # safeguard event nodes from the returned snapshot.
             self.tree_model.replace_tree(snapshot.editor_projection())
@@ -4244,7 +4247,8 @@ class RecipePage(QWidget):
             )
         self.open_editor_button.setText(
             "Set final output state" if semantic.kind is SemanticNodeKind.FINALLY else "Device settings" if has_device else "Edit ROI" if has_roi
-            else "Acquisition settings" if node is not None and node.type in {"acquire_reference", "acquire_spectrum"}
+            else "Reference settings…" if node is not None and node.type == "acquire_reference"
+            else "Spectrum acquisition settings…" if node is not None and node.type == "acquire_spectrum"
             else "Edit comment" if node is not None and node.type == "comment"
             else "Action settings"
         )
@@ -5027,7 +5031,9 @@ class RecipePage(QWidget):
             )
         device = next((name for name in ("keithley", "rigol", "anritsu_sg", "anritsu", "moke_box")
                        if name in node.type), None)
-        if device is not None and node.type.startswith(("configure_", "update_", "set_", "enable_", "ramp_", "stop_")):
+        if device is not None and (
+            not isinstance(dialog, ActionNodeEditorDialog) or dialog.compares_device_settings
+        ):
             self._bind_recipe_review(dialog, node, device)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -5566,7 +5572,10 @@ class RecipePage(QWidget):
             return cache[channel]
 
         def device_values():
-            return self._device_tab_comparison_values(device, selected_channel())
+            values = self._device_tab_comparison_values(device, selected_channel())
+            if node.type == "ramp_keithley_current" and values.get("source_mode") != "current":
+                return {}
+            return values
 
         if hasattr(dialog, "set_recipe_context"):
             dialog.set_recipe_context(context, device_values)
@@ -5575,6 +5584,8 @@ class RecipePage(QWidget):
             review.table.set_recipe_context(context, device_values)
             review.toggle.setChecked(True)
             review.baseline_note.setText(
+                "Compare the target current with the Keithley tab and the current before this ramp in the recipe."
+                if node.type == "ramp_keithley_current" else
                 "Compare sweep targets with the current settings in the matching device tab. "
                 "Recipe context shows any additional changes introduced by earlier blocks. "
                 "This comparison does not communicate with the instrument."
@@ -6815,23 +6826,25 @@ class RecipePage(QWidget):
         except (ConfigurationError, TypeError, ValueError) as exc:
             QMessageBox.warning(self, "Anritsu acquisition", str(exc))
             return
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        replacement = self._node_to_mapping(node)
-        for field in ANRITSU_ACQUISITION_OPTION_FIELDS[node.type] | {
-            "trace", "average_count", "reference_operation", "store_raw", "store_processed",
-        }:
-            replacement.pop(field, None)
-        replacement.update(dialog.node_fields())
         try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            replacement = self._node_to_mapping(node)
+            for field in ANRITSU_ACQUISITION_OPTION_FIELDS[node.type] | {
+                "trace", "average_count", "reference_operation", "store_raw", "store_processed",
+            }:
+                replacement.pop(field, None)
+            replacement.update(dialog.node_fields())
             source = replace_recipe_node(
                 self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(
-                source, f"Updated Anritsu acquisition {node.id}"
+                source, f"Updated Anritsu acquisition {node.id}", selected_node_id=node.id,
             )
         except Exception as exc:
             QMessageBox.warning(self, "Anritsu acquisition", str(exc))
+        finally:
+            dialog.deleteLater()
 
     @staticmethod
     def _configured_keithley_node(
@@ -6990,14 +7003,7 @@ class RecipePage(QWidget):
         provider = self._keithley_snapshot_provider
         if not callable(provider):
             return None
-        try:
-            snapshot = provider(channel, mode) if mode is not None else provider(channel)
-        except TypeError:
-            snapshot = provider()
-            if isinstance(snapshot, KeithleyConfigurationSnapshot):
-                if snapshot.channel != channel:
-                    return None
-                return replace(snapshot, source_mode=mode) if mode is not None else snapshot
+        snapshot = provider(channel, mode) if mode is not None else provider(channel)
         return snapshot if isinstance(snapshot, KeithleyConfigurationSnapshot) else None
 
     @staticmethod
@@ -7090,11 +7096,13 @@ class RecipePage(QWidget):
         )
         edit_roi = add_action("Edit ROI", self._edit_selected_roi)
         edit_comment = add_action("Edit comment", self._edit_selected_node)
+        node = self._selected_recipe_node()
         edit_acquisition = add_action(
-            "Acquisition settings", self._edit_selected_node
+            "Reference settings…" if node is not None and node.type == "acquire_reference"
+            else "Spectrum acquisition settings…",
+            self._edit_selected_node,
         )
         edit_action = add_action("Action settings", self._edit_selected_node)
-        node = self._selected_recipe_node()
         location = self._selected_recipe_location()
         toggle_enabled = add_action(
             "Enable selected node"
@@ -7505,15 +7513,19 @@ class RecipePage(QWidget):
             return
         self._move_recipe_node(node.id, parent_id, branch, target)
 
-    def request_run(self) -> None:
-        if self._plan is not None:
-            self.run_requested.emit(
-                self._plan,
-                self.execution_mode.currentData() == "dry_run",
-                str(self.execution_mode.currentData()),
-                self._requested_output_directory(),
-                self._requested_output_file_stem(),
-            )
+    def execution_request(self) -> tuple[ExecutionPlan, bool, str, str, str] | None:
+        if self._plan is None or self._execution_controlled:
+            return None
+        mode = str(self.execution_mode.currentData())
+        return (
+            self._plan, mode == "dry_run", mode,
+            self._requested_output_directory(), self._requested_output_file_stem(),
+        )
+
+    def request_execution_preview(self) -> None:
+        request = self.execution_request()
+        if request is not None:
+            self.execution_preview_requested.emit(*request)
 
     def _execution_mode_changed(self, _index: int = -1) -> None:
         mode = str(self.execution_mode.currentData())
@@ -7521,9 +7533,6 @@ class RecipePage(QWidget):
         manual = mode == "manual_step"
         self.tree_model.set_outputs_forced_off(dry_run)
         self.measurement_tree.viewport().update()
-        self.run_button.setText(
-            "Run dry run" if dry_run else "Start manual stages" if manual else "Run plan"
-        )
         self.execution_mode_hint.setText(
             (
                 "DRY RUN: Keithley/Rigol/Anritsu settings and spectra execute with outputs OFF. "

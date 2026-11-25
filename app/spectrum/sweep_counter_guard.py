@@ -11,7 +11,7 @@ class SweepCounterGuard:
     Call record only after checking the frame's other acceptance conditions.
     """
 
-    __slots__ = ("_segment", "_counter")
+    __slots__ = ("_counter", "_segment")
 
     def __init__(self):
         self._segment: str | None = None

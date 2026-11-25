@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import fields, replace
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QColor, QPainter
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -23,6 +23,7 @@ from qfluentwidgets import (
     PrimaryPushButton,
     PushButton,
     ScrollArea,
+    SegmentedWidget,
     SpinBox,
     StrongBodyLabel,
     SubtitleLabel,
@@ -36,16 +37,29 @@ from app.domain.quantities import (
     parse_quantity,
 )
 from app.spectrum import SpectrumAnalysisParameters
+from app.ui.design_system import tokens_for
 from app.ui.dialogs import StationDialog
+
+_CONTROL_WIDTH = 180
+
+
+class _ThemeSeparator(QWidget):
+    """Subtle horizontal separator painted directly from active theme tokens."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(1)
+
+    def paintEvent(self, event) -> None:
+        del event
+        tokens = tokens_for("dark" if isDarkTheme() else "light")
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(tokens.border))
 
 
 def _create_separator(parent: QWidget) -> QWidget:
     """Subtle horizontal separator matching theme borders."""
-    sep = QWidget(parent)
-    sep.setFixedHeight(1)
-    color = "rgba(255, 255, 255, 0.08)" if isDarkTheme() else "rgba(0, 0, 0, 0.07)"
-    sep.setStyleSheet(f"background-color: {color}; border: none;")
-    return sep
+    return _ThemeSeparator(parent)
 
 
 def _create_setting_row(
@@ -134,6 +148,14 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         header_layout.addWidget(explanation)
         root_layout.addWidget(header_widget)
 
+        self.section_tabs: SegmentedWidget | None = None
+        if section == "all":
+            self.section_tabs = SegmentedWidget(surface)
+            self.section_tabs.addItem("filters", "Filters")
+            self.section_tabs.addItem("peaks", "Peak detection")
+            self.section_tabs.setCurrentItem("filters")
+            root_layout.addWidget(self.section_tabs)
+
         # ── Scrollable Settings Body ─────────────────────────────────────────
         scroll = ScrollArea(surface)
         self.settings_scroll = scroll
@@ -143,28 +165,30 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         scroll_content = QWidget(scroll)
-        scroll_content.setProperty("stationSurface", "surface")
+        scroll_content.setAutoFillBackground(False)
         cards_layout = QVBoxLayout(scroll_content)
         cards_layout.setContentsMargins(0, 4, 6, 4)
         cards_layout.setSpacing(10)
 
         average_card = CardWidget(scroll_content)
+        average_card.setProperty("stationSurface", "card")
         average_layout = QVBoxLayout(average_card)
         average_layout.setContentsMargins(0, 10, 0, 10)
         self.temporal_frames = SpinBox(average_card)
         self.temporal_frames.setRange(1, 64)
-        self.temporal_frames.setFixedWidth(150)
+        self.temporal_frames.setFixedWidth(_CONTROL_WIDTH)
         self.temporal_frames.setValue(self._initial_parameters.temporal_average_frames)
         self.temporal_frames.setAccessibleName("Power average received frames")
         average_layout.addWidget(_create_setting_row("Temporal power average", "Mean in W before correction. 1 disables averaging; up to 64 received frames.", self.temporal_frames, average_card))
         self.temporal_gap = LineEdit(average_card)
-        self.temporal_gap.setFixedWidth(150)
+        self.temporal_gap.setFixedWidth(_CONTROL_WIDTH)
         self.temporal_gap.setText(format_quantity_auto(self._initial_parameters.temporal_max_gap_s, DIMENSION_TIME, precision=17))
         self.temporal_gap.setAccessibleName("Reset average after acquisition gap")
         average_layout.addWidget(_create_setting_row("Reset after a gap", "Do not mix samples across a longer interruption. Explicit time, e.g. 30 s.", self.temporal_gap, average_card))
         cards_layout.addWidget(average_card)
 
         narrow_card = CardWidget(scroll_content)
+        narrow_card.setProperty("stationSurface", "card")
         narrow_layout = QVBoxLayout(narrow_card)
         narrow_layout.setContentsMargins(0, 10, 0, 10)
         narrow_layout.setSpacing(4)
@@ -180,7 +204,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         narrow_header_layout.addWidget(hint)
         narrow_layout.addWidget(narrow_header)
         self.narrow_width = LineEdit(narrow_card)
-        self.narrow_width.setFixedWidth(150)
+        self.narrow_width.setFixedWidth(_CONTROL_WIDTH)
         self.narrow_width.setAccessibleName("Maximum narrow-peak width")
         self.narrow_width.setText(format_quantity_auto(self._initial_parameters.narrow_max_width_hz, DIMENSION_FREQUENCY))
         narrow_layout.addWidget(_create_setting_row("Maximum peak width", "Explicit frequency, e.g. 6 MHz.", self.narrow_width, narrow_card))
@@ -189,11 +213,11 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         self.narrow_threshold.setSingleStep(.5)
         self.narrow_threshold.setDecimals(1)
         self.narrow_threshold.setSuffix(" ×")
-        self.narrow_threshold.setFixedWidth(150)
+        self.narrow_threshold.setFixedWidth(_CONTROL_WIDTH)
         self.narrow_threshold.setValue(self._initial_parameters.narrow_threshold_sigma)
         narrow_layout.addWidget(_create_setting_row("Outlier threshold", "Robust local noise scale; higher means fewer replacements.", self.narrow_threshold, narrow_card))
         self.narrow_protect = CheckBox("Protect bands", narrow_card)
-        self.narrow_protect.setFixedWidth(150)
+        self.narrow_protect.setFixedWidth(_CONTROL_WIDTH)
         regions = self._initial_parameters.narrow_protected_regions_hz
         self.narrow_protect.setChecked(bool(regions))
         narrow_layout.addWidget(_create_setting_row("Keep signal bands unchanged", "Protect from Narrow peaks, EMI and Denoise. Include tails and an RBW margin.", self.narrow_protect, narrow_card))
@@ -201,7 +225,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         self.narrow_protected_stop = LineEdit(narrow_card)
         for control, value, name in ((self.narrow_protected_start, regions[0][0] if regions else 1e9, "Protected band start"),
                                      (self.narrow_protected_stop, regions[0][1] if regions else 2e9, "Protected band stop")):
-            control.setFixedWidth(150)
+            control.setFixedWidth(_CONTROL_WIDTH)
             control.setText(format_quantity_auto(value, DIMENSION_FREQUENCY, precision=17))
             control.setAccessibleName(name)
             control.setEnabled(bool(regions))
@@ -209,7 +233,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         narrow_layout.addWidget(_create_setting_row("Protected band start", "Frequency including lower signal tails and margin.", self.narrow_protected_start, narrow_card))
         narrow_layout.addWidget(_create_setting_row("Protected band stop", "Frequency including upper signal tails and margin.", self.narrow_protected_stop, narrow_card))
         self.additional_bands = LineEdit(narrow_card)
-        self.additional_bands.setFixedWidth(210)
+        self.additional_bands.setFixedWidth(_CONTROL_WIDTH)
         self.additional_bands.setAccessibleName("Additional protected signal bands")
         self.additional_bands.setPlaceholderText("3 GHz .. 3.1 GHz; …")
         self.additional_bands.setText("; ".join(
@@ -249,7 +273,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         self.denoise_window.setRange(3, 51)
         self.denoise_window.setSingleStep(2)
         self.denoise_window.setSuffix(" bins")
-        self.denoise_window.setFixedWidth(150)
+        self.denoise_window.setFixedWidth(_CONTROL_WIDTH)
         self.denoise_window.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.denoise_window.setValue(self._initial_parameters.denoise_window)
         self.denoise_window.setToolTip(
@@ -295,7 +319,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         self.emi_threshold.setSingleStep(0.5)
         self.emi_threshold.setDecimals(1)
         self.emi_threshold.setSuffix(" dB")
-        self.emi_threshold.setFixedWidth(150)
+        self.emi_threshold.setFixedWidth(_CONTROL_WIDTH)
         self.emi_threshold.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.emi_threshold.setValue(self._initial_parameters.emi_threshold_db)
         self.emi_threshold.setToolTip(
@@ -316,7 +340,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         self.emi_max_std.setSingleStep(0.05)
         self.emi_max_std.setDecimals(2)
         self.emi_max_std.setSuffix(" dB")
-        self.emi_max_std.setFixedWidth(150)
+        self.emi_max_std.setFixedWidth(_CONTROL_WIDTH)
         self.emi_max_std.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.emi_max_std.setValue(self._initial_parameters.emi_max_std_db)
         self.emi_max_std.setToolTip(
@@ -336,7 +360,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         self.emi_min_frames.setRange(3, 24)
         self.emi_min_frames.setSingleStep(1)
         self.emi_min_frames.setSuffix(" frames")
-        self.emi_min_frames.setFixedWidth(150)
+        self.emi_min_frames.setFixedWidth(_CONTROL_WIDTH)
         self.emi_min_frames.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.emi_min_frames.setValue(self._initial_parameters.emi_min_frames)
         self.emi_min_frames.setToolTip(
@@ -386,12 +410,12 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
             (self.peak_max_width, self._initial_parameters.peak_max_width_hz, "Maximum detected peak width", "FWHM (−3 dB) for logarithmic traces; half local prominence for linear power. 0 Hz disables this bound."),
             (self.peak_distance, self._initial_parameters.peak_min_distance_hz, "Minimum peak separation", "Minimum center-to-center frequency difference; 0 Hz uses automatic separation."),
         ):
-            control.setFixedWidth(150)
+            control.setFixedWidth(_CONTROL_WIDTH)
             control.setAccessibleName(title)
             control.setText(format_quantity_auto(value, DIMENSION_FREQUENCY))
             peak_layout.addWidget(_create_setting_row(title, description, control, peak_card))
         self.peak_polarity = ComboBox(peak_card)
-        self.peak_polarity.setFixedWidth(150)
+        self.peak_polarity.setFixedWidth(_CONTROL_WIDTH)
         for label, value in (("Positive", "positive"), ("Negative", "negative"), ("Both signs", "both")):
             self.peak_polarity.addItem(label, userData=value)
         self.peak_polarity.setCurrentIndex(self.peak_polarity.findData(self._initial_parameters.peak_polarity))
@@ -403,7 +427,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         self.peak_snr.setSingleStep(0.5)
         self.peak_snr.setDecimals(1)
         self.peak_snr.setSuffix(" dB")
-        self.peak_snr.setFixedWidth(150)
+        self.peak_snr.setFixedWidth(_CONTROL_WIDTH)
         self.peak_snr.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.peak_snr.setValue(self._initial_parameters.peak_min_snr_db)
         self.peak_snr.setToolTip(
@@ -424,7 +448,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         self.peak_prominence.setSingleStep(0.5)
         self.peak_prominence.setDecimals(1)
         self.peak_prominence.setSuffix(" dB")
-        self.peak_prominence.setFixedWidth(150)
+        self.peak_prominence.setFixedWidth(_CONTROL_WIDTH)
         self.peak_prominence.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.peak_prominence.setValue(self._initial_parameters.peak_min_prominence_db)
         self.peak_prominence.setToolTip(
@@ -444,7 +468,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         self.peak_max_count.setRange(1, 100)
         self.peak_max_count.setSingleStep(5)
         self.peak_max_count.setSuffix(" peaks")
-        self.peak_max_count.setFixedWidth(150)
+        self.peak_max_count.setFixedWidth(_CONTROL_WIDTH)
         self.peak_max_count.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.peak_max_count.setValue(self._initial_parameters.peak_max_count)
         self.peak_max_count.setToolTip(
@@ -461,7 +485,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         peak_layout.addWidget(_create_separator(peak_card))
 
         self.peak_fit_models = CheckBox("Fit models", peak_card)
-        self.peak_fit_models.setFixedWidth(150)
+        self.peak_fit_models.setFixedWidth(_CONTROL_WIDTH)
         self.peak_fit_models.setChecked(self._initial_parameters.peak_fit_models)
         self.peak_fit_models.setToolTip(
             "Fit analytical line shapes to extract precise center frequency, FWHM, and Q factor."
@@ -484,7 +508,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
             control.setRange(1, 100)
             control.setDecimals(1)
             control.setSuffix(" σ")
-            control.setFixedWidth(150)
+            control.setFixedWidth(_CONTROL_WIDTH)
             control.setValue(value)
             control.setEnabled(source_unit not in {"dBm", "dB"})
             peak_layout.addWidget(_create_setting_row(title, "Multiple of robust point-noise scale; applies to linear power, without dB conversion.", control, peak_card))
@@ -494,14 +518,14 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         for control in (self.emi_threshold, self.emi_max_std, self.emi_min_frames):
             control.setEnabled(source_unit in {"dBm", "dB"})
         linear_source = source_unit not in {"dBm", "dB"}
-        emi_card.setVisible(not linear_source)
-        for card in (narrow_card, denoise_card):
-            card.setVisible(section != "peaks")
-        emi_card.setVisible(section != "peaks" and not linear_source)
-        peak_card.setVisible(section != "filters")
-        average_card.setVisible(section != "peaks" and allow_temporal_average)
+        self._average_card = average_card
+        self._narrow_card = narrow_card
+        self._denoise_card = denoise_card
+        self._emi_card = emi_card
+        self._linear_source = linear_source
+        self._allow_temporal_average = allow_temporal_average
         self.peak_measure_filtered = CheckBox("Filtered preview", peak_card)
-        self.peak_measure_filtered.setFixedWidth(150)
+        self.peak_measure_filtered.setFixedWidth(_CONTROL_WIDTH)
         self.peak_measure_filtered.setChecked(selected_trace_only or self._initial_parameters.peak_measure_filtered)
         self.peak_measure_filtered.setEnabled(not selected_trace_only)
         if selected_trace_only:
@@ -511,6 +535,9 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
             if selected_trace_only else "Unchecked: measure after averaging/correction, before display filters. Markers may differ from the filtered curve.",
             self.peak_measure_filtered, peak_card))
         self.section = section
+        self._apply_section_visibility("peaks" if section == "peaks" else "filters")
+        if self.section_tabs is not None:
+            self.section_tabs.currentItemChanged.connect(self._on_section_tab_changed)
         for control in (self.peak_snr, self.peak_prominence):
             control.parentWidget().setVisible(not linear_source)
         self.peak_fit_models.parentWidget().setVisible(source_unit == "dBm")
@@ -519,6 +546,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
 
         cards_layout.addStretch(1)
         scroll.setWidget(scroll_content)
+        scroll.enableTransparentBackground()
         root_layout.addWidget(scroll, 1)
 
         # ── Action Bar (Pinned at bottom) ───────────────────────────────────
@@ -646,8 +674,26 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         self.parameters_applied.emit(params)
         self.accept()
 
+    def _apply_section_visibility(self, active_tab: str) -> None:
+        show_filters = active_tab == "filters"
+        show_peaks = active_tab == "peaks"
+        self._average_card.setVisible(show_filters and self._allow_temporal_average)
+        self._narrow_card.setVisible(show_filters)
+        self._denoise_card.setVisible(show_filters)
+        self._emi_card.setVisible(show_filters and not self._linear_source)
+        self.peak_card.setVisible(show_peaks)
+
+    def _on_section_tab_changed(self, route_key: str) -> None:
+        self._apply_section_visibility(route_key)
+        self.settings_scroll.verticalScrollBar().setValue(0)
+
     def focus_peaks(self) -> None:
-        self.settings_scroll.verticalScrollBar().setValue(self.peak_card.y())
+        if self.section_tabs is not None:
+            self.section_tabs.setCurrentItem("peaks")
+            self._apply_section_visibility("peaks")
+            self.settings_scroll.verticalScrollBar().setValue(0)
+        else:
+            self.settings_scroll.verticalScrollBar().setValue(self.peak_card.y())
 
     def closeEvent(self, event: QCloseEvent) -> None:
         super().closeEvent(event)

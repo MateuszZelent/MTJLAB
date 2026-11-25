@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import ArrayLike
-from app.domain.spectrum_interference import SpectrumInterferenceCalibration
 
 from app.domain.spectrum_correction import (
     BackgroundProfile,
@@ -18,10 +17,12 @@ from app.domain.spectrum_correction import (
     TemporalAverageMode,
     immutable_vector,
 )
+from app.domain.spectrum_interference import SpectrumInterferenceCalibration
+
 from .background_profile import BackgroundProfileBuilder
+from .interference_model import calibrated_interference_model
 from .streaming_statistics import TemporalPowerAverage, dbm_to_w, finite_vector
 from .sweep_counter_guard import SweepCounterGuard
-from .interference_model import calibrated_interference_model
 
 
 class RealtimeSpectrumProcessor:

@@ -134,6 +134,7 @@ class RunTelemetryCoalescer:
             "semantic_operation_started",
             "semantic_operation_applied",
             "semantic_operation_failed",
+            "semantic_operation_skipped",
         }
     )
 
@@ -561,6 +562,7 @@ class RunWorker(QObject):
                         name: devices[name].capabilities for name in sorted(required)
                     },
                     expected_points=self._plan.total_points,
+                    allow_skipped_checkpoints=self._plan.may_skip_compliance_points,
                     operator_context=self._operator_context,
                     simulation_metadata=self._execution_metadata(
                         simulation_context, required

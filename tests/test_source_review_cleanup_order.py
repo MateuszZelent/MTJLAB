@@ -1,14 +1,14 @@
 """Failed initialization de-energizes devices before potentially slow HDF5 close."""
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock
-from contextlib import contextmanager
 
 import pytest
 
-from app.ui import run_worker
 from app.domain.models import ApplicationState
 from app.engine.runner import RunResult
+from app.ui import run_worker
 from tests.helpers import simulation_settings
 from tests.test_sweep_worker_initialization_faults import plan
 
@@ -18,6 +18,7 @@ from tests.test_sweep_worker_initialization_faults import plan
 @pytest.mark.parametrize("failure_stage", ["construction", "run"])
 def test_hardware_cleanup_precedes_failed_run_archive_close(monkeypatch, tmp_path, close_fails, abort_fails, failure_stage):
     settings = simulation_settings()
+    settings.storage["output_directory"] = str(tmp_path)
     worker = run_worker.RunWorker(settings, tmp_path / "settings.yml", plan(settings), simulation=True)
     calls = []
     def abort():
@@ -57,10 +58,14 @@ def test_hardware_cleanup_precedes_failed_run_archive_close(monkeypatch, tmp_pat
 @pytest.mark.parametrize("prior_error", [None, "measurement failed"])
 def test_post_run_cleanup_fault_keeps_archive_but_cannot_report_success(monkeypatch, tmp_path, fault, prior_error):
     settings = simulation_settings()
+    settings.storage["output_directory"] = str(tmp_path)
     worker = run_worker.RunWorker(settings, tmp_path / "settings.yml", plan(settings), simulation=True)
     device = SimpleNamespace(
-        connected=True, capabilities={}, identity=SimpleNamespace(idn="TEST"),
+        connected=True,
+        capabilities={},
+        identity=SimpleNamespace(idn="TEST"),
         connect=Mock(return_value=SimpleNamespace(idn="TEST")),
+        abort_acquisition=Mock(return_value=True),
         disconnect=Mock(side_effect=RuntimeError("disconnect failed") if fault == "disconnect" else None),
     )
     path = tmp_path / "run.h5"
@@ -68,6 +73,7 @@ def test_post_run_cleanup_fault_keeps_archive_but_cannot_report_success(monkeypa
     result = RunResult(ApplicationState.FAULT if prior_error else ApplicationState.SAFE, 10, 3, prior_error)
     monkeypatch.setattr(worker, "_adapter_for_run", lambda *_: device)
     monkeypatch.setattr(run_worker, "require_storage_capacity", lambda *_: None)
+    monkeypatch.setattr("app.storage.run_bundle.RunBundle", Mock(return_value=Mock()))
     monkeypatch.setattr(run_worker, "Hdf5RunWriter", lambda *args, **kwargs: writer)
     monkeypatch.setattr(run_worker, "RecipeRunner", lambda *args, **kwargs: SimpleNamespace(run=lambda *args, **kwargs: result))
     monkeypatch.setattr(worker, "_release_run_leases", lambda: ["release failed"] if fault == "release" else [])

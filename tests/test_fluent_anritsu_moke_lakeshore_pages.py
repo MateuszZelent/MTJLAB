@@ -643,7 +643,7 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         self.assertTrue(page.cleanup_filters)
         for checkbox in page.cleanup_filters.values():
             self.assertIsInstance(checkbox, CheckBox)
-        self.assertIsInstance(page.open_peak_table, PrimaryPushButton)
+        self.assertIsInstance(page.open_peak_table, PushButton)
         page.compact_plot_settings.click()
         self.application.processEvents()
         self.assertTrue(page.signal_analysis_card.isVisibleTo(self.window))

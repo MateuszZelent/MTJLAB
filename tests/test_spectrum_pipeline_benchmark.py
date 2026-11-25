@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -11,6 +12,18 @@ import pytest
 from app.storage.hdf5_reader import Hdf5RunReader
 from tools.benchmark_spectrum_async_pipeline import benchmark_async_pipeline
 from tools.benchmark_spectrum_pipeline import benchmark_pipeline
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_benchmark_temp_files(request: pytest.FixtureRequest):
+    target = request.getfixturevalue("tmp_path") if "tmp_path" in request.fixturenames else None
+    yield
+    if target is not None and target.exists():
+        for child in list(target.iterdir()):
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
 
 
 def test_pipeline_benchmark_preserves_archive_counts_sign_and_output_exclusivity(tmp_path):

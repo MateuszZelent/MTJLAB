@@ -14,7 +14,6 @@ from app.domain.quantities import (
 )
 from app.settings.models import AnritsuSafety, AnritsuSettings
 
-
 ANRITSU_SWEEP_POINT_COUNTS = (11, 21, 41, 51, 101, 201, 251, 401, 501, 1001, 2001, 5001, 10001)
 ANRITSU_REFERENCE_LEVEL_MIN_DBM = -120.0
 ANRITSU_REFERENCE_LEVEL_MAX_DBM = 50.0
@@ -200,7 +199,10 @@ def validate_anritsu_advanced_spectrum(
         )
 
     if (rbw_auto is False or rbw_hz is not None) and (
-        rbw_hz is None or not math.isfinite(rbw_hz) or not 1 <= rbw_hz <= 31.25e6
+        rbw_hz is None
+        or isinstance(rbw_hz, bool)
+        or not math.isfinite(rbw_hz)
+        or not 1 <= rbw_hz <= 31.25e6
     ):
         raise SafetyViolation("Manual Anritsu RBW must be within 1 Hz..31.25 MHz.")
 
@@ -208,7 +210,10 @@ def validate_anritsu_advanced_spectrum(
     if normalized_vbw_mode is not None and normalized_vbw_mode not in {"auto", "manual", "off"}:
         raise SafetyViolation("Anritsu VBW mode must be auto, manual, or off.")
     if (normalized_vbw_mode == "manual" or vbw_hz is not None) and (
-        vbw_hz is None or not math.isfinite(vbw_hz) or not 1 <= vbw_hz <= 10e6
+        vbw_hz is None
+        or isinstance(vbw_hz, bool)
+        or not math.isfinite(vbw_hz)
+        or not 1 <= vbw_hz <= 10e6
     ):
         raise SafetyViolation("Manual Anritsu VBW must be within 1 Hz..10 MHz.")
 
@@ -218,6 +223,10 @@ def validate_anritsu_advanced_spectrum(
         if minimum_attenuation is not None
         else None
     )
+    if attenuation_db is not None and (
+        isinstance(attenuation_db, bool) or not math.isfinite(attenuation_db)
+    ):
+        raise SafetyViolation("Anritsu attenuation must be a finite value.")
     if attenuation_auto:
         if minimum_db is not None and minimum_db > 0:
             raise SafetyViolation(
@@ -227,9 +236,9 @@ def validate_anritsu_advanced_spectrum(
     elif attenuation_auto is False or attenuation_db is not None:
         if attenuation_db is None or not math.isfinite(attenuation_db):
             raise SafetyViolation("Manual Anritsu attenuation requires a finite value.")
-        if not 0 <= attenuation_db <= 60 or not math.isclose(
-            attenuation_db % 2, 0.0, abs_tol=1e-9
-        ):
+        if not 0 <= attenuation_db <= 60 or abs(
+            attenuation_db - round(attenuation_db / 2.0) * 2.0
+        ) > 1e-9:
             raise SafetyViolation("Anritsu attenuation must be 0..60 dB in 2 dB steps.")
         if minimum_db is not None and attenuation_db < minimum_db:
             raise SafetyViolation(
@@ -245,6 +254,7 @@ def validate_anritsu_advanced_spectrum(
 
     if (sweep_time_auto is False or sweep_time_s is not None) and (
         sweep_time_s is None
+        or isinstance(sweep_time_s, bool)
         or not math.isfinite(sweep_time_s)
         or not 1e-3 <= sweep_time_s <= 1000
     ):

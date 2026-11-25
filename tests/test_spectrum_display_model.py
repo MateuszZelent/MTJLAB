@@ -118,3 +118,29 @@ def test_live_frame_uses_same_reference_operation_and_keeps_undefined_power_gaps
     assert isnan(curve.values[0])
     assert curve.values[1] == state.by_key["processed"].values[1]
     assert curve.values[2] > state.by_key["processed"].values[2]
+
+
+def test_display_trace_vectors_are_readonly_zero_copy_numpy_and_sequence_compatible() -> None:
+    import numpy as np
+
+    raw = _trace("TRAC1", (-30.0, -20.0, -10.0))
+    reference = _trace("reference", (-20.0, -25.0, -5.0))
+    state = build_display_state(
+        raw=raw,
+        averaged=None,
+        reference=reference,
+        reference_operation="difference_db",
+        visible={"raw": True, "processed": True},
+        frame_id=11,
+    )
+    processed = state.by_key["processed"]
+    arr = np.asarray(processed.values)
+    assert not arr.flags.writeable
+    assert np.shares_memory(arr, np.asarray(processed.values))
+    assert len(processed.values) == 3
+    assert tuple(processed.values) == (-10.0, 5.0, -5.0)
+    assert processed.values == (-10.0, 5.0, -5.0)
+    assert processed.values[1] == 5.0
+    assert processed.values[:2] == (-10.0, 5.0)
+    folded = state.absolute_differences().by_key["processed"]
+    assert folded.values == (10.0, 5.0, 5.0)

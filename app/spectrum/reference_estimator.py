@@ -8,6 +8,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from app.domain.spectrum_correction import BackgroundProfile, ReferenceEstimate
+
 from .streaming_statistics import finite_vector
 
 

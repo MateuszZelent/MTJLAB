@@ -104,6 +104,36 @@ def test_live_average_ignores_inflight_poll_and_requests_qualified_sweep(page):
     assert page._averager.count == 1
 
 
+@pytest.mark.parametrize("elapsed_s,expected_reads", [(0.025, 0), (0.105, 1)])
+def test_live_read_uses_completed_transfer_as_next_slot_when_due(page, monkeypatch, elapsed_s, expected_reads):
+    now = 100.0
+    monkeypatch.setattr("app.devices.anritsu_ms2830a.ui.page.time", SimpleNamespace(monotonic=lambda: now))
+    sample = SpectrumTrace((1e6, 2e6), (-73., -74.), datetime.now(UTC), "TRAC1")
+    page._set_page_state(AnritsuPageState.LIVE)
+    page._timer.start(50)
+    page.fetch_live()
+    page._controller.call.assert_called_once_with("fetch_current_trace_fast", "TRAC1")
+    page._controller.call.reset_mock()
+    requests_at_render = []
+    show_trace = page._show_trace
+
+    def capture_render(trace):
+        requests_at_render.append(page._controller.call.call_count)
+        show_trace(trace)
+
+    monkeypatch.setattr(page, "_show_trace", capture_render)
+
+    now += elapsed_s
+    page._result("fetch_current_trace_fast", sample)
+
+    assert requests_at_render == [expected_reads]
+    assert page._controller.call.call_count == expected_reads
+    assert page._fetch_pending is bool(expected_reads)
+    if expected_reads:
+        page.fetch_live()
+        page._controller.call.assert_called_once_with("fetch_current_trace_fast", "TRAC1")
+
+
 def test_cancel_restart_discards_old_inflight_sweep(page):
     old = SpectrumTrace((1e6, 2e6), (-10., -10.), datetime.now(UTC), "TRAC1")
     fresh = replace(old, powers_dbm=(-60., -60.))
@@ -176,8 +206,8 @@ def test_live_average_shares_floating_controls_and_uses_existing_live_stream(pag
     assert page.show_live_frame.isChecked()
     assert page._display_state.primary_key == "averaged"
     assert page._display_state.by_key["live_frame"].values == (-70., -70.)
-    palette = plot_theme(tokens_for("light"))
     for plot in (page.spectrum_plot, floating.spectrum):
+        palette = plot_theme(tokens_for(plot._theme_name))
         average_curve = plot._curves["Averaged"]
         live_curve = plot._curves["Live frame"]
         assert average_curve.opts["pen"].color().name() == palette.measurement

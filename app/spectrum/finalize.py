@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
-from typing import Iterable
+from collections.abc import Iterable
+from dataclasses import dataclass
+from itertools import pairwise
 
 import numpy as np
 from numpy.typing import ArrayLike
 
 from app.domain.spectrum_correction import (
-    BackgroundProfile, CorrectedSpectrumFrame, CorrectionQuality,
-    SpectrumAcquisitionContext, SpectrumFrameEnvelope, SpectrumFrameRole,
-    TemporalAverageMode, immutable_vector,
+    BackgroundProfile,
+    CorrectedSpectrumFrame,
+    CorrectionQuality,
+    SpectrumAcquisitionContext,
+    SpectrumFrameEnvelope,
+    SpectrumFrameRole,
+    TemporalAverageMode,
+    immutable_vector,
 )
+
 from .reference_estimator import bracketed_reference
 from .streaming_statistics import VectorWelford, dbm_to_w, finite_vector
 from .sweep_counter_guard import SweepCounterGuard
@@ -31,7 +38,7 @@ class FinalizedSpectrumBlock:
             raise ValueError("Finalized artifact requires a final measurement block.")
         if len(ids) != self.result.count or not ids or ids[-1] != self.result.frame_id:
             raise ValueError("Finalized sources must match the contributing frame count.")
-        if any(first >= second for first, second in zip(ids, ids[1:])):
+        if any(first >= second for first, second in pairwise(ids)):
             raise ValueError("Finalized source frames must be strictly ordered.")
         raw = immutable_vector(self.raw_mean_w, name="raw block mean_w", nonnegative=True)
         if raw.shape != self.result.values_w.shape or np.any(raw <= 0):

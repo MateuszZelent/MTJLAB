@@ -2,32 +2,33 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 import json
+from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import dataclass
 from types import UnionType
-from typing import Any, Callable, Literal, Union, get_args, get_origin
+from typing import Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, ValidationError
-
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
-    QHBoxLayout,
-    QHeaderView,
-    QDialog,
     QCheckBox,
     QComboBox,
-    QLabel,
-    QLineEdit,
+    QDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QStyledItemDelegate,
     QStyleOptionViewItem,
-    QSizePolicy,
-    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
@@ -68,12 +69,10 @@ from app.domain.quantities import (
     QuantityError,
     parse_quantity,
 )
-from app.security import AccessPolicy, Permission
 from app.safety.keithley_limit_reconciliation import (
     propose_keithley_limit_adjustments,
 )
-from app.ui.dialogs import StationFileDialog as QFileDialog
-from app.ui.dialogs import StationDialog, StationMessageBox as QMessageBox
+from app.security import AccessPolicy, Permission
 from app.settings import SettingsRepository
 from app.settings.diagnostics import (
     configuration_diagnostics,
@@ -82,8 +81,45 @@ from app.settings.diagnostics import (
 )
 from app.settings.models import StationSettings
 from app.settings.validation import format_settings_validation_error
-from app.ui.widgets import KeithleyLimitProposalDialog, show_toast
+from app.ui.design_system import set_dynamic_property
+from app.ui.dialogs import StationDialog
+from app.ui.dialogs import StationFileDialog as QFileDialog
+from app.ui.dialogs import StationMessageBox as QMessageBox
 from app.ui.settings_guidance import SettingsPath
+from app.ui.widgets import KeithleyLimitProposalDialog, show_toast
+
+
+@dataclass
+class _LimitRowRecord:
+    """Lightweight in-memory canonical representation of one safety-limit row."""
+
+    scope: str
+    parameter: str
+    min_path: tuple[str | int, ...]
+    max_path: tuple[str | int, ...] | None
+    min_text: str
+    max_text: str
+    unit: str
+    default_text: str
+    source: str = "Enforced station profile"
+    min_error: str | None = None
+    max_error: str | None = None
+
+
+class _LazyScrollArea(ScrollArea):
+    """Populate a settings route's form cards on first show or direct widget() access."""
+
+    def __init__(self, on_demand: Callable[[], None], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._on_demand = on_demand
+
+    def showEvent(self, event) -> None:
+        self._on_demand()
+        super().showEvent(event)
+
+    def widget(self) -> QWidget | None:
+        self._on_demand()
+        return super().widget()
 
 
 _LIMIT_VALIDATION_MESSAGE_ROLE = int(Qt.ItemDataRole.UserRole) + 101
@@ -149,6 +185,10 @@ class _FluentSettingsSections(QWidget):
         layout.addWidget(self.stack, 1)
         self._routes: list[str] = []
         self._labels: list[str] = []
+        self._on_index_changed: Callable[[int], None] | None = None
+
+    def set_on_index_changed(self, callback: Callable[[int], None] | None) -> None:
+        self._on_index_changed = callback
 
     def addTab(self, page: QWidget, label: str) -> int:
         index = self.stack.addWidget(page)
@@ -178,6 +218,8 @@ class _FluentSettingsSections(QWidget):
         self.setCurrentIndex(self.stack.indexOf(page))
 
     def setCurrentIndex(self, index: int) -> None:
+        if self._on_index_changed is not None:
+            self._on_index_changed(index)
         self.stack.setCurrentIndex(index)
         route = self._routes[index]
         self.navigation.setCurrentItem(route)
@@ -215,15 +257,15 @@ class SettingsPage(QWidget):
     moke_address_change_requested = Signal()
     status = Signal(str)
 
-    _PROTECTED_PATHS = {
+    _PROTECTED_PATHS = frozenset({
         ("devices", "anritsu", "safety", "reference_level", "min"),
         ("devices", "anritsu", "safety", "reference_level", "max"),
         _MOKE_PATH + ("endpoint",),
         _MOKE_PATH + ("protocol_qualified",),
-    }
-    _OPERATOR_EDITABLE_PATHS = {
+    })
+    _OPERATOR_EDITABLE_PATHS = frozenset({
         ("devices", "rigol", "safety", "allow_output_enable"),
-    }
+    })
 
     def __init__(
         self,
@@ -242,12 +284,23 @@ class SettingsPage(QWidget):
         self._persisted_raw: dict[str, Any] = {}
         self._settings: StationSettings | None = None
         self._choice_editors: dict[tuple[str | int, ...], QComboBox] = {}
-        self._form_editors: dict[tuple[str | int, ...], QWidget] = {}
+        self._form_editors_store: dict[tuple[str | int, ...], QWidget] = {}
         self._field_errors: dict[tuple[str | int, ...], QLabel] = {}
+        self._limit_rows: list[_LimitRowRecord] = []
+        self._limit_records_by_path: dict[tuple[str | int, ...], tuple[_LimitRowRecord, str]] = {}
         self._limit_error_items: list[QTableWidgetItem] = []
-        self._limit_items_by_path: dict[tuple[str | int, ...], QTableWidgetItem] = {}
-        self._safety_limit_editors: dict[tuple[str | int, ...], QLineEdit] = {}
+        self._limit_items_by_path_store: dict[tuple[str | int, ...], QTableWidgetItem] = {}
+        self._safety_limit_editors_store: dict[tuple[str | int, ...], QLineEdit] = {}
         self._safety_limit_error_labels: dict[tuple[str | int, ...], QLabel] = {}
+        self._trees_cache: dict[str, QTreeWidget] | None = None
+        self._trees_dirty = True
+        self._limits_table_widget: TableWidget | None = None
+        self._limits_table_dirty = True
+        self._built_forms: set[str] = set()
+        self._limits_cards_built = False
+        self._roles_built = False
+        self._diagnostics_dirty = True
+        self._tab_names: list[str] = []
         self._changing = False
         self._source_autorange_acknowledged: set[tuple[str | int, ...]] = set()
         self._dirty = False
@@ -259,6 +312,46 @@ class SettingsPage(QWidget):
         # SAVE SETTINGS / Save changes action.
         self._build()
         self.reload()
+
+    _FORM_TAB_SPECS = (
+        ("general", "General"),
+        ("rigol", "Rigol"),
+        ("keithley", "Keithley"),
+        ("anritsu", "Anritsu"),
+        ("moke_box", "MOKE Box"),
+        ("lakeshore_gaussmeter", "Lake Shore 475"),
+    )
+
+    @property
+    def trees(self) -> dict[str, QTreeWidget]:
+        self._ensure_trees_built()
+        assert self._trees_cache is not None
+        return self._trees_cache
+
+    @property
+    def tree(self) -> QTreeWidget:
+        return self.trees["general"]
+
+    @property
+    def limits_table(self) -> TableWidget:
+        self._ensure_limits_table_built()
+        assert self._limits_table_widget is not None
+        return self._limits_table_widget
+
+    @property
+    def _limit_items_by_path(self) -> dict[tuple[str | int, ...], QTableWidgetItem]:
+        self._ensure_limits_table_built()
+        return self._limit_items_by_path_store
+
+    @property
+    def _form_editors(self) -> dict[tuple[str | int, ...], QWidget]:
+        self._ensure_all_forms_built()
+        return self._form_editors_store
+
+    @property
+    def _safety_limit_editors(self) -> dict[tuple[str | int, ...], QLineEdit]:
+        self._ensure_limits_cards_built()
+        return self._safety_limit_editors_store
 
     def _build(self) -> None:
         self.setProperty("stationSurface", "page")
@@ -285,36 +378,22 @@ class SettingsPage(QWidget):
         self.tabs = _FluentSettingsSections(self)
         self.section_navigation = self.tabs.navigation
         self.page_stack = self.tabs.stack
-        # These widgets retain the editable draft representation consumed by
-        # validation and persistence, but are not part of the operator-facing
-        # Fluent forms.  Keep them below one permanently hidden parent so a
-        # native style/theme refresh cannot expose their default 100x30
-        # geometry at the page origin.
+        # Hidden host reserved for legacy tree/table draft-model widgets if a
+        # caller explicitly requests them via the lazy properties.
         self._draft_model_host = QWidget(self)
         self._draft_model_host.setObjectName("settingsDraftModelHost")
         self._draft_model_host.hide()
-        self.trees: dict[str, QTreeWidget] = {}
         self.forms: dict[str, ScrollArea] = {}
-        for key, label in (
-            ("general", "General"),
-            ("rigol", "Rigol"),
-            ("keithley", "Keithley"),
-            ("anritsu", "Anritsu"),
-            ("moke_box", "MOKE Box"),
-            ("lakeshore_gaussmeter", "Lake Shore 475"),
-        ):
-            tree = TreeWidget(self._draft_model_host)
-            tree.setHeaderLabels(["Parameter", "Value"])
-            tree.setAlternatingRowColors(True)
-            tree.itemChanged.connect(self._changed)
-            self.trees[key] = tree
-            form = ScrollArea()
+        self._tab_names = []
+        for key, label in self._FORM_TAB_SPECS:
+            form = _LazyScrollArea(lambda tab_key=key: self._ensure_form_built(tab_key))
             form.setObjectName("settingsForm")
             form.setProperty("stationSurface", "page")
             form.viewport().setProperty("stationSurface", "page")
             form.setWidgetResizable(True)
             form.setFrameShape(QFrame.Shape.NoFrame)
             self.forms[key] = form
+            self._tab_names.append(key)
             self.tabs.addTab(form, label)
         limits_page = QWidget()
         limits_page.setObjectName("settingsSpecialPage")
@@ -338,28 +417,7 @@ class SettingsPage(QWidget):
         limits_card.setObjectName("settingsTableCard")
         limits_card_layout = QVBoxLayout(limits_card)
         limits_card_layout.setContentsMargins(14, 14, 14, 14)
-        self.limits_table = TableWidget(self._draft_model_host)
-        self.limits_table.setColumnCount(7)
-        self.limits_table.setHorizontalHeaderLabels(
-            ["Device / scope", "Parameter", "Minimum", "Maximum", "Unit", "Default", "Source"]
-        )
-        self.limits_table.setAlternatingRowColors(True)
-        self.limits_table.setItemDelegate(_SafetyLimitValidationDelegate(self.limits_table))
-        self.limits_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.limits_table.verticalHeader().setVisible(False)
-        limits_header = self.limits_table.horizontalHeader()
-        limits_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        limits_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for column in range(4, 7):
-            limits_header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
-        for column in (2, 3):
-            limits_header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
-            self.limits_table.setColumnWidth(column, 170)
-        self.limits_table.itemChanged.connect(self._limit_changed)
-        # Retained as the draft model used by the station settings editor.
-        # The operator-facing editor below is intentionally card based.
-        self.limits_table.hide()
-        self.limits_scroll = ScrollArea()
+        self.limits_scroll = _LazyScrollArea(self._ensure_limits_cards_built)
         self.limits_scroll.setObjectName("settingsForm")
         self.limits_scroll.setWidgetResizable(True)
         self.limits_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -368,6 +426,7 @@ class SettingsPage(QWidget):
         limits_layout.addWidget(limits_description)
         limits_layout.addWidget(limits_card, 1)
         self.limits_page = limits_page
+        self._tab_names.append("limits")
         self.tabs.addTab(limits_page, "Safety boundaries")
         roles_page = QWidget()
         roles_page.setObjectName("settingsSpecialPage")
@@ -404,6 +463,7 @@ class SettingsPage(QWidget):
         roles_layout.addWidget(roles_title)
         roles_layout.addWidget(self.roles_info)
         roles_layout.addWidget(roles_card, 1)
+        self._tab_names.append("roles")
         self.tabs.addTab(roles_page, "Access roles")
         diagnostics_page = QWidget()
         diagnostics_page.setObjectName("settingsSpecialPage")
@@ -434,8 +494,9 @@ class SettingsPage(QWidget):
         diagnostics_layout.addWidget(diagnostics_description)
         diagnostics_layout.addWidget(diagnostics_card, 1)
         diagnostics_layout.addLayout(diagnostics_buttons)
+        self._tab_names.append("diagnostics")
         self.tabs.addTab(diagnostics_page, "Diagnostics")
-        self.tree = self.trees["general"]
+        self.tabs.set_on_index_changed(self._on_settings_tab_selected)
         layout.addWidget(self.tabs, 1)
 
         self.action_card = CardWidget(self)
@@ -581,19 +642,27 @@ class SettingsPage(QWidget):
     def _refresh_moke_assignment(self, old_moke: dict, new_moke: dict) -> None:
         """Refresh connection evidence and drop any permission edit for the old address."""
         draft_moke = self._get_path(self._raw, _MOKE_PATH)
-        enabled = self._form_editors[_MOKE_PATH + ("enabled",)]
-        keep_enabled_edit = enabled.isChecked() != old_moke["enabled"]
+        enabled = self._form_editors_store.get(_MOKE_PATH + ("enabled",))
+        keep_enabled_edit = (
+            isinstance(enabled, QCheckBox) and enabled.isChecked() != old_moke["enabled"]
+        )
         was_changing = self._changing
         self._changing = True
         try:
             for key in (*_MOKE_ASSIGNMENT_FIELDS, *_MOKE_DERIVED_FIELDS):
                 old_moke[key] = deepcopy(new_moke[key])
                 draft_moke[key] = deepcopy(new_moke[key])
-            if not keep_enabled_edit:
+            if isinstance(enabled, QCheckBox) and not keep_enabled_edit:
                 enabled.setChecked(new_moke["enabled"])
-            self._form_editors[_MOKE_PATH + ("allow_vout_control",)].setChecked(new_moke["allow_vout_control"])
-            self._form_editors[_MOKE_PATH + ("protocol_qualified",)].setChecked(new_moke["protocol_qualified"])
-            self._form_editors[_MOKE_PATH + ("endpoint",)].setText(self._format_scalar(new_moke["endpoint"]))
+            allow_editor = self._form_editors_store.get(_MOKE_PATH + ("allow_vout_control",))
+            if isinstance(allow_editor, QCheckBox):
+                allow_editor.setChecked(new_moke["allow_vout_control"])
+            qualified_editor = self._form_editors_store.get(_MOKE_PATH + ("protocol_qualified",))
+            if isinstance(qualified_editor, QCheckBox):
+                qualified_editor.setChecked(new_moke["protocol_qualified"])
+            endpoint_editor = self._form_editors_store.get(_MOKE_PATH + ("endpoint",))
+            if isinstance(endpoint_editor, QLineEdit):
+                endpoint_editor.setText(self._format_scalar(new_moke["endpoint"]))
         finally:
             self._changing = was_changing
 
@@ -670,6 +739,7 @@ class SettingsPage(QWidget):
         self.diagnostics_text.setPlainText(
             "\n".join(configuration_diagnostics(self._repository.path, self._raw))
         )
+        self._diagnostics_dirty = False
 
     def discard_draft(self) -> None:
         if self._dirty:
@@ -736,41 +806,218 @@ class SettingsPage(QWidget):
             return
         self.status.emit(f"Redacted configuration exported: {destination}")
 
-    def _populate(self) -> None:
+    def _on_settings_tab_selected(self, index: int) -> None:
+        if not self._raw or index < 0 or index >= len(self._tab_names):
+            return
+        name = self._tab_names[index]
+        if name in self.forms:
+            self._ensure_form_built(name)
+        elif name == "limits":
+            self._ensure_limits_cards_built()
+        elif name == "roles":
+            self._ensure_roles_built()
+        elif name == "diagnostics" and self._diagnostics_dirty:
+            self._refresh_diagnostics()
+
+    def _general_section_data(self) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in self._raw.items()
+            if key not in {"schema_version", "devices", "access_control"}
+        }
+
+    def _ensure_form_built(self, name: str) -> None:
+        if name in self._built_forms or not self._raw:
+            return
+        previous_changing = self._changing
         self._changing = True
         try:
-            for tree in self.trees.values():
+            self._built_forms.add(name)
+            if name == "general":
+                self._populate_form("general", self._general_section_data(), ())
+            else:
+                devices = self._raw.get("devices", {})
+                self._populate_form(name, devices.get(name, {}), ("devices", name))
+        finally:
+            self._changing = previous_changing
+
+    def _ensure_all_forms_built(self) -> None:
+        for key, _label in self._FORM_TAB_SPECS:
+            self._ensure_form_built(key)
+
+    def _ensure_trees_built(self) -> None:
+        if self._trees_cache is None:
+            self._trees_cache = {}
+            for key, _label in self._FORM_TAB_SPECS:
+                tree = TreeWidget(self._draft_model_host)
+                tree.setHeaderLabels(["Parameter", "Value"])
+                tree.setAlternatingRowColors(True)
+                tree.itemChanged.connect(self._changed)
+                self._trees_cache[key] = tree
+            self._trees_dirty = True
+        if self._trees_dirty and self._raw:
+            self._populate_trees()
+
+    def _populate_trees(self) -> None:
+        assert self._trees_cache is not None
+        previous_changing = self._changing
+        self._changing = True
+        try:
+            for tree in self._trees_cache.values():
                 tree.clear()
             self._choice_editors.clear()
-            general = {
-                key: value
-                for key, value in self._raw.items()
-                if key not in {"schema_version", "devices", "access_control"}
-            }
-            self._add_items(self.trees["general"], None, general, ())
+            general = self._general_section_data()
+            self._add_items(self._trees_cache["general"], None, general, ())
             devices = self._raw.get("devices", {})
             for device in ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter"):
                 self._add_items(
-                    self.trees[device],
+                    self._trees_cache[device],
                     None,
                     devices.get(device, {}),
                     ("devices", device),
                 )
-            for tree in self.trees.values():
+            for tree in self._trees_cache.values():
                 tree.expandToDepth(3)
-                tree.resizeColumnToContents(0)
-            self._populate_forms(general, devices)
-            self._populate_limits()
+            self._trees_dirty = False
+        finally:
+            self._changing = previous_changing
+
+    def _ensure_limits_table_built(self) -> None:
+        if self._limits_table_widget is None:
+            table = TableWidget(self._draft_model_host)
+            table.setColumnCount(7)
+            table.setHorizontalHeaderLabels(
+                ["Device / scope", "Parameter", "Minimum", "Maximum", "Unit", "Default", "Source"]
+            )
+            table.setAlternatingRowColors(True)
+            table.setItemDelegate(_SafetyLimitValidationDelegate(table))
+            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            table.verticalHeader().setVisible(False)
+            limits_header = table.horizontalHeader()
+            for column in range(7):
+                limits_header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+            table.setColumnWidth(2, 170)
+            table.setColumnWidth(3, 170)
+            table.itemChanged.connect(self._limit_changed)
+            table.hide()
+            self._limits_table_widget = table
+            self._limits_table_dirty = True
+        if self._limits_table_dirty:
+            self._populate_limits_table()
+
+    def _populate_limits_table(self) -> None:
+        assert self._limits_table_widget is not None
+        table = self._limits_table_widget
+        previous_changing = self._changing
+        self._changing = True
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
+        try:
+            table.setRowCount(len(self._limit_rows))
+            self._limit_items_by_path_store.clear()
+            self._limit_error_items.clear()
+            for row, record in enumerate(self._limit_rows):
+                values = (
+                    record.scope,
+                    record.parameter,
+                    record.min_text,
+                    record.max_text,
+                    record.unit,
+                    record.default_text,
+                    record.source,
+                )
+                for column, text in enumerate(values):
+                    item = QTableWidgetItem(text)
+                    if column == 2:
+                        item.setData(Qt.ItemDataRole.UserRole, record.min_path)
+                        self._limit_items_by_path_store[record.min_path] = item
+                        if not self._read_only:
+                            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                        else:
+                            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                        if record.min_error:
+                            item.setData(_LIMIT_VALIDATION_MESSAGE_ROLE, record.min_error)
+                            item.setToolTip(f"Validation error: {record.min_error}")
+                            self._limit_error_items.append(item)
+                    elif column == 3 and record.max_path is not None:
+                        item.setData(Qt.ItemDataRole.UserRole, record.max_path)
+                        self._limit_items_by_path_store[record.max_path] = item
+                        if not self._read_only:
+                            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                        else:
+                            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                        if record.max_error:
+                            item.setData(_LIMIT_VALIDATION_MESSAGE_ROLE, record.max_error)
+                            item.setToolTip(f"Validation error: {record.max_error}")
+                            self._limit_error_items.append(item)
+                    else:
+                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    table.setItem(row, column, item)
+            self._limits_table_dirty = False
+        finally:
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
+            self._changing = previous_changing
+
+    def _ensure_limits_cards_built(self) -> None:
+        if self._limits_cards_built or not self._raw:
+            return
+        previous_changing = self._changing
+        self._changing = True
+        try:
+            self._limits_cards_built = True
+            self._populate_safety_limit_cards()
+        finally:
+            self._changing = previous_changing
+
+    def _ensure_roles_built(self) -> None:
+        if self._roles_built or not self._raw:
+            return
+        previous_changing = self._changing
+        self._changing = True
+        try:
+            self._roles_built = True
             self._populate_roles()
+        finally:
+            self._changing = previous_changing
+
+    def _populate(self) -> None:
+        self._changing = True
+        try:
+            self._choice_editors.clear()
+            self._form_editors_store.clear()
+            self._field_errors.clear()
+            self._safety_limit_editors_store.clear()
+            self._safety_limit_error_labels.clear()
+            self._limit_error_items.clear()
+            self._built_forms.clear()
+            self._limits_cards_built = False
+            self._roles_built = False
+            self._trees_dirty = True
+            self._limits_table_dirty = True
+            self._diagnostics_dirty = True
+            self._collect_limit_rows()
+            if self._trees_cache is not None:
+                self._populate_trees()
+            if self._limits_table_widget is not None:
+                self._populate_limits_table()
+            current_index = self.tabs.stack.currentIndex()
+            if 0 <= current_index < len(self._tab_names):
+                self._on_settings_tab_selected(current_index)
+            else:
+                self._ensure_form_built("general")
         finally:
             self._changing = False
 
     def _populate_forms(self, general: dict[str, Any], devices: dict[str, Any]) -> None:
-        self._form_editors.clear()
+        self._form_editors_store.clear()
         self._field_errors.clear()
+        self._built_forms.clear()
+        self._built_forms.add("general")
         self._populate_form("general", general, ())
         for device in ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter"):
-            self._populate_form("%s" % device, devices.get(device, {}), ("devices", device))
+            self._built_forms.add(device)
+            self._populate_form(f"{device}", devices.get(device, {}), ("devices", device))
 
     @staticmethod
     def _title(text: object) -> str:
@@ -920,9 +1167,9 @@ class SettingsPage(QWidget):
             selector.currentIndexChanged.connect(stack.setCurrentIndex)
             selector.setCurrentIndex(0)
 
-            master = self._form_editors[master_path]
-            enabled = self._form_editors[prefix + ("enabled",)]
-            primary_approval = self._form_editors[primary_path + ("approved",)]
+            master = self._form_editors_store[master_path]
+            enabled = self._form_editors_store[prefix + ("enabled",)]
+            primary_approval = self._form_editors_store[primary_path + ("approved",)]
 
             def update_moke_permission() -> None:
                 saved_connection = self._get_path(self._raw, prefix)
@@ -951,8 +1198,8 @@ class SettingsPage(QWidget):
             walk(other_fields, prefix, ("Connection and readout defaults",))
             enabled.toggled.connect(update_moke_permission)
             primary_approval.toggled.connect(update_moke_permission)
-            self._form_editors[prefix + ("endpoint",)].textChanged.connect(update_moke_permission)
-            self._form_editors[prefix + ("protocol_qualified",)].toggled.connect(update_moke_permission)
+            self._form_editors_store[prefix + ("endpoint",)].textChanged.connect(update_moke_permission)
+            self._form_editors_store[prefix + ("protocol_qualified",)].toggled.connect(update_moke_permission)
             update_moke_permission()
         else:
             walk(data, prefix, ())
@@ -961,9 +1208,9 @@ class SettingsPage(QWidget):
 
     def _bind_moke_approval(self, path: tuple[str | int, ...]) -> None:
         approval_path = path + ("approved",)
-        approval = self._form_editors[approval_path]
-        binding = self._form_editors[path + ("binding_id",)]
-        reference = self._form_editors[path + ("qualification_reference",)]
+        approval = self._form_editors_store[approval_path]
+        binding = self._form_editors_store[path + ("binding_id",)]
+        reference = self._form_editors_store[path + ("qualification_reference",)]
 
         def update_approval() -> None:
             has_evidence = bool(binding.text().strip() and reference.text().strip())
@@ -1083,7 +1330,7 @@ class SettingsPage(QWidget):
         error.hide()
         field_layout.addWidget(editor)
         field_layout.addWidget(error)
-        self._form_editors[path] = editor
+        self._form_editors_store[path] = editor
         self._field_errors[path] = error
         return field
 
@@ -1167,7 +1414,7 @@ class SettingsPage(QWidget):
         ):
             path = tuple(item.data(0, Qt.ItemDataRole.UserRole))
             self._sync_limit_from_tree(path, item.text(1))
-            editor = self._form_editors.get(path)
+            editor = self._form_editors_store.get(path)
             if isinstance(editor, QLineEdit):
                 editor.setText(item.text(1))
             elif isinstance(editor, QCheckBox):
@@ -1330,62 +1577,92 @@ class SettingsPage(QWidget):
         tree.setItemWidget(item, 1, editor)
         self._choice_editors[path] = editor
 
+    def _form_tab_for_path(self, path: tuple[str | int, ...]) -> str:
+        if len(path) >= 2 and path[0] == "devices" and str(path[1]) in self.forms:
+            return str(path[1])
+        return "general"
+
     def editor_for_path(self, path: tuple[str | int, ...]) -> QComboBox | None:
         """Return the list editor for a settings value, when it has choices."""
 
-        editor = self._form_editors.get(path)
-        return editor if isinstance(editor, QComboBox) else self._choice_editors.get(path)
+        self._ensure_form_built(self._form_tab_for_path(path))
+        editor = self._form_editors_store.get(path)
+        if isinstance(editor, QComboBox):
+            return editor
+        self._ensure_trees_built()
+        return self._choice_editors.get(path)
 
     def _apply_tree_values(self) -> dict[str, Any]:
         draft = deepcopy(self._raw)
 
-        for path, editor in self._form_editors.items():
+        for path, editor in self._form_editors_store.items():
             original = self._get_path(draft, path)
             val = self._form_value(editor, original)
             self._set_path(draft, path, val)
-            if self._is_keithley_sense_mode_path(path):
-                if len(path) >= 2 and path[-1] == "sense_mode" and str(path[-2]) in ("A", "B"):
-                    def_path = path[:-1] + ("defaults", "sense_mode")
-                    self._set_path(draft, def_path, val)
+            if (
+                self._is_keithley_sense_mode_path(path)
+                and len(path) >= 2
+                and path[-1] == "sense_mode"
+                and str(path[-2]) in ("A", "B")
+            ):
+                def_path = path[:-1] + ("defaults", "sense_mode")
+                self._set_path(draft, def_path, val)
 
-        def walk(item: QTreeWidgetItem) -> None:
-            path = item.data(0, Qt.ItemDataRole.UserRole)
-            if path is not None:
-                if tuple(path) in self._form_editors:
-                    return
-                original = self._get_path(draft, tuple(path))
-                val = self._parse_scalar(item.text(1), original)
-                self._set_path(draft, tuple(path), val)
-                if self._is_keithley_sense_mode_path(tuple(path)):
-                    if len(path) >= 2 and path[-1] == "sense_mode" and str(path[-2]) in ("A", "B"):
+        if self._trees_cache is not None and not self._trees_dirty:
+            def walk(item: QTreeWidgetItem) -> None:
+                path = item.data(0, Qt.ItemDataRole.UserRole)
+                if path is not None:
+                    if tuple(path) in self._form_editors_store:
+                        return
+                    original = self._get_path(draft, tuple(path))
+                    val = self._parse_scalar(item.text(1), original)
+                    self._set_path(draft, tuple(path), val)
+                    if (
+                        self._is_keithley_sense_mode_path(tuple(path))
+                        and len(path) >= 2
+                        and path[-1] == "sense_mode"
+                        and str(path[-2]) in ("A", "B")
+                    ):
                         def_path = tuple(path[:-1]) + ("defaults", "sense_mode")
                         self._set_path(draft, def_path, val)
-            for index in range(item.childCount()):
-                walk(item.child(index))
+                for index in range(item.childCount()):
+                    walk(item.child(index))
 
-        for tree in self.trees.values():
-            for index in range(tree.topLevelItemCount()):
-                walk(tree.topLevelItem(index))
-        for row in range(self.limits_table.rowCount()):
-            for column in (2, 3):
-                item = self.limits_table.item(row, column)
-                path = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-                if path is None:
-                    continue
-                original = self._get_path(draft, tuple(path))
-                self._set_path(draft, tuple(path), self._parse_scalar(item.text(), original))
+            for tree in self._trees_cache.values():
+                for index in range(tree.topLevelItemCount()):
+                    walk(tree.topLevelItem(index))
+
+        if self._limits_table_widget is not None and not self._limits_table_dirty:
+            for row in range(self._limits_table_widget.rowCount()):
+                for column in (2, 3):
+                    item = self._limits_table_widget.item(row, column)
+                    path = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+                    if path is None:
+                        continue
+                    original = self._get_path(draft, tuple(path))
+                    self._set_path(draft, tuple(path), self._parse_scalar(item.text(), original))
+        else:
+            for record in self._limit_rows:
+                min_original = self._get_path(draft, record.min_path)
+                self._set_path(draft, record.min_path, self._parse_scalar(record.min_text, min_original))
+                if record.max_path is not None:
+                    max_original = self._get_path(draft, record.max_path)
+                    self._set_path(draft, record.max_path, self._parse_scalar(record.max_text, max_original))
         return draft
 
-    def _populate_limits(self) -> None:
-        self.limits_table.setRowCount(0)
-        self._limit_items_by_path.clear()
+    def _collect_limit_rows(self) -> None:
+        self._limit_rows.clear()
+        self._limit_records_by_path.clear()
 
         def walk(value: Any, path: tuple[str | int, ...]) -> None:
             if not isinstance(value, dict):
                 return
-            if "min" in value and "max" in value:
-                if path != ("devices", "anritsu", "safety", "reference_level"):
-                    self._add_limit_row(path, value)
+            if (
+                "min" in value
+                and "max" in value
+                and path != ("devices", "anritsu", "safety", "reference_level")
+            ):
+                self._add_limit_record(path, value)
             for key, nested in value.items():
                 if isinstance(nested, dict):
                     walk(nested, path + (str(key),))
@@ -1394,18 +1671,24 @@ class SettingsPage(QWidget):
                     and path[-1:] == ("lab_limits",)
                     and isinstance(nested, str)
                 ):
-                    self._add_scalar_limit_row(path + (str(key),), nested)
+                    self._add_scalar_limit_record(path + (str(key),), nested)
 
         devices = self._raw.get("devices", {})
         if isinstance(devices, dict):
             for device, nested in devices.items():
                 walk(nested, ("devices", str(device)))
+
+    def _populate_limits(self) -> None:
+        self._collect_limit_rows()
+        if self._limits_table_widget is not None:
+            self._populate_limits_table()
+        self._limits_cards_built = True
         self._populate_safety_limit_cards()
 
     def _populate_safety_limit_cards(self) -> None:
         """Build the operator-facing safety editor from the canonical limit rows."""
 
-        self._safety_limit_editors.clear()
+        self._safety_limit_editors_store.clear()
         self._safety_limit_error_labels.clear()
         content = QWidget()
         content.setMinimumWidth(0)
@@ -1418,13 +1701,9 @@ class SettingsPage(QWidget):
         content_layout.setSpacing(14)
         device_layouts: dict[str, QVBoxLayout] = {}
 
-        for row in range(self.limits_table.rowCount()):
-            minimum = self.limits_table.item(row, 2)
-            maximum = self.limits_table.item(row, 3)
-            if minimum is None or maximum is None:
-                continue
-            min_path = tuple(minimum.data(Qt.ItemDataRole.UserRole) or ())
-            max_path = tuple(maximum.data(Qt.ItemDataRole.UserRole) or ())
+        for record in self._limit_rows:
+            min_path = record.min_path
+            max_path = record.max_path
             if not min_path:
                 continue
             device = str(min_path[1]).capitalize() if len(min_path) > 1 else "Device"
@@ -1440,9 +1719,6 @@ class SettingsPage(QWidget):
                 content_layout.addWidget(card)
                 device_layouts[device] = card_layout
 
-            scope_item = self.limits_table.item(row, 0)
-            parameter_item = self.limits_table.item(row, 1)
-            unit_item = self.limits_table.item(row, 4)
             row_widget = CardWidget(self)
             row_widget.setObjectName("safetyLimitRow")
             row_layout = QVBoxLayout(row_widget)
@@ -1450,22 +1726,23 @@ class SettingsPage(QWidget):
             row_layout.setSpacing(7)
             values_layout = QHBoxLayout()
             values_layout.setSpacing(10)
-            label_text = parameter_item.text() if parameter_item is not None else "Limit"
-            if scope_item is not None and scope_item.text() != device.lower():
-                label_text = f"{label_text}  ·  {scope_item.text()}"
+            label_text = record.parameter or "Limit"
+            if record.scope and record.scope != device.lower():
+                label_text = f"{label_text}  ·  {record.scope}"
             label = BodyLabel(label_text)
             label.setObjectName("safetyLimitLabel")
             label.setMinimumWidth(250)
             values_layout.addWidget(label, 1)
-            scalar_limit = not max_path
+            scalar_limit = max_path is None
             values_layout.addWidget(self._safety_boundary_label("LIMIT" if scalar_limit else "MIN"))
-            minimum_editor = self._make_safety_limit_editor(min_path, minimum.text())
+            minimum_editor = self._make_safety_limit_editor(min_path, record.min_text)
             values_layout.addWidget(minimum_editor)
-            if not scalar_limit:
+            maximum_editor: QLineEdit | None = None
+            if not scalar_limit and max_path is not None:
                 values_layout.addWidget(self._safety_boundary_label("MAX"))
-                maximum_editor = self._make_safety_limit_editor(max_path, maximum.text())
+                maximum_editor = self._make_safety_limit_editor(max_path, record.max_text)
                 values_layout.addWidget(maximum_editor)
-            unit = BodyLabel(unit_item.text() if unit_item is not None else "SI / explicit")
+            unit = BodyLabel(record.unit or "SI / explicit")
             unit.setObjectName("safetyLimitUnit")
             unit.setMinimumWidth(84)
             values_layout.addWidget(unit)
@@ -1479,24 +1756,35 @@ class SettingsPage(QWidget):
                 "Ignore this station-profile limit. Immutable hardware limits remain active."
             )
             disable_limit.toggled.connect(
-                lambda disabled, p=enabled_path, row=row_widget, editors=(minimum_editor, None if scalar_limit else maximum_editor): (
+                lambda disabled, p=enabled_path, row=row_widget, editors=(minimum_editor, maximum_editor): (
                     self._set_limit_disabled(p, disabled, row, editors)
                 )
             )
             values_layout.addWidget(disable_limit)
             minimum_editor.setEnabled(enabled and not self._read_only)
-            if not scalar_limit:
+            if maximum_editor is not None:
                 maximum_editor.setEnabled(enabled and not self._read_only)
             row_widget.setProperty("limitDisabled", not enabled)
             row_layout.addLayout(values_layout)
             error = BodyLabel()
             error.setObjectName("settingsFieldError")
             error.setWordWrap(True)
-            error.hide()
+            active_err = record.min_error or record.max_error
+            if active_err:
+                error.setText(active_err)
+                error.show()
+            else:
+                error.hide()
             row_layout.addWidget(error)
             self._safety_limit_error_labels[min_path] = error
-            if not scalar_limit:
+            if record.min_error:
+                self._set_validation_state(minimum_editor, "error")
+                minimum_editor.setToolTip(f"Validation error: {record.min_error}")
+            if max_path is not None:
                 self._safety_limit_error_labels[max_path] = error
+                if maximum_editor is not None and record.max_error:
+                    self._set_validation_state(maximum_editor, "error")
+                    maximum_editor.setToolTip(f"Validation error: {record.max_error}")
             device_layouts[device].addWidget(row_widget)
 
         content_layout.addStretch(1)
@@ -1527,9 +1815,7 @@ class SettingsPage(QWidget):
         for editor in editors:
             if editor is not None:
                 editor.setEnabled(not disabled and not self._read_only)
-        row.setProperty("limitDisabled", disabled)
-        row.style().unpolish(row)
-        row.style().polish(row)
+        set_dynamic_property(row, "limitDisabled", disabled)
         self._dirty = True
         self.status.emit(
             f"Safety limit {'disabled' if disabled else 'enabled'} in the draft. "
@@ -1552,16 +1838,40 @@ class SettingsPage(QWidget):
         editor.editingFinished.connect(
             lambda p=path, e=editor: self._commit_safety_limit_editor(p, e)
         )
-        self._safety_limit_editors[path] = editor
+        self._safety_limit_editors_store[path] = editor
         return editor
 
     def _commit_safety_limit_editor(self, path: tuple[str | int, ...], editor: QLineEdit) -> None:
         if self._is_keithley_limit_path(path):
             self._commit_keithley_safety_limit_editor(path, editor)
             return
-        item = self._limit_items_by_path.get(path)
-        if item is not None and item.text() != editor.text():
-            item.setText(editor.text())
+        if self._limits_table_widget is not None and not self._limits_table_dirty:
+            item = self._limit_items_by_path_store.get(path)
+            if item is not None and item.text() != editor.text():
+                item.setText(editor.text())
+            return
+        entry = self._limit_records_by_path.get(path)
+        if entry is None:
+            return
+        record, side = entry
+        current_text = record.min_text if side == "min" else record.max_text
+        if current_text == editor.text():
+            return
+        if side == "min":
+            record.min_text = editor.text()
+        else:
+            record.max_text = editor.text()
+        self._validate_limit_record(record)
+        if self._has_limit_errors():
+            self._show_limit_validation_toast(
+                "Incorrect value or unit. Correct the red outlined field before saving."
+            )
+        else:
+            self._limit_validation_toast_message = None
+        self._sync_tree_from_limit(path, editor.text())
+        self._dirty = True
+        if self._autosave_enabled:
+            self.status.emit("Safety-limit autosave pending…")
 
     @staticmethod
     def _is_keithley_limit_path(path: tuple[str | int, ...]) -> bool:
@@ -1599,7 +1909,7 @@ class SettingsPage(QWidget):
                     target[adjustment.path[-1]] = adjustment.proposed
             settings = StationSettings.model_validate(draft)
         except (ConfigurationError, ValueError, KeyError, TypeError) as exc:
-            self._set_limit_validation(self._limit_items_by_path.get(path), str(exc))
+            self._set_limit_path_validation(path, str(exc))
             editor.setText(str(self._get_path(self._raw, path)))
             return
         changed_paths = {path}
@@ -1767,9 +2077,7 @@ class SettingsPage(QWidget):
             "Role assignment removed from the draft; Save changes and restart the application to apply it."
         )
 
-    def _add_limit_row(self, path: tuple[str | int, ...], value: dict[str, Any]) -> None:
-        row = self.limits_table.rowCount()
-        self.limits_table.insertRow(row)
+    def _add_limit_record(self, path: tuple[str | int, ...], value: dict[str, Any]) -> None:
         scope_parts = [
             str(part) for part in path[1:-1] if str(part) not in {"safety", "lab_limits"}
         ]
@@ -1782,28 +2090,25 @@ class SettingsPage(QWidget):
         maximum = self._format_scalar(value.get("max"))
         unit = self._range_unit(minimum, maximum)
         default = self._default_for_limit(path)
-        values = (scope, parameter, minimum, maximum, unit, default, "Enforced station profile")
-        for column, text in enumerate(values):
-            item = QTableWidgetItem(text)
-            if column in {2, 3}:
-                item.setData(
-                    Qt.ItemDataRole.UserRole,
-                    path + (("min" if column == 2 else "max"),),
-                )
-                self._limit_items_by_path[tuple(item.data(Qt.ItemDataRole.UserRole))] = item
-                if not self._read_only:
-                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-                else:
-                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            else:
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.limits_table.setItem(row, column, item)
+        min_path = path + ("min",)
+        max_path = path + ("max",)
+        record = _LimitRowRecord(
+            scope=scope,
+            parameter=parameter,
+            min_path=min_path,
+            max_path=max_path,
+            min_text=minimum,
+            max_text=maximum,
+            unit=unit,
+            default_text=default,
+        )
+        self._limit_rows.append(record)
+        self._limit_records_by_path[min_path] = (record, "min")
+        self._limit_records_by_path[max_path] = (record, "max")
 
-    def _add_scalar_limit_row(self, path: tuple[str | int, ...], value: str) -> None:
+    def _add_scalar_limit_record(self, path: tuple[str | int, ...], value: str) -> None:
         """Add a one-value safety limit such as maximum allowed power."""
 
-        row = self.limits_table.rowCount()
-        self.limits_table.insertRow(row)
         scope_parts = [
             str(part) for part in path[1:-1] if str(part) not in {"safety", "lab_limits"}
         ]
@@ -1812,23 +2117,18 @@ class SettingsPage(QWidget):
         parameter = _SAFETY_LIMIT_LABELS.get(
             parameter_key, parameter_key.replace("_", " ").capitalize()
         )
-        # The value itself always carries its unit and may use a different SI
-        # prefix after editing (for example 6700 uW -> 6.7 mW).  A duplicated
-        # fixed suffix would incorrectly imply that the editor is unitless.
-        unit = "explicit unit"
-        values = (scope, parameter, value, "—", unit, "—", "Enforced station profile")
-        for column, text in enumerate(values):
-            item = QTableWidgetItem(text)
-            if column == 2:
-                item.setData(Qt.ItemDataRole.UserRole, path)
-                self._limit_items_by_path[path] = item
-                if not self._read_only:
-                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-                else:
-                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            else:
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.limits_table.setItem(row, column, item)
+        record = _LimitRowRecord(
+            scope=scope,
+            parameter=parameter,
+            min_path=path,
+            max_path=None,
+            min_text=value,
+            max_text="—",
+            unit="explicit unit",
+            default_text="—",
+        )
+        self._limit_rows.append(record)
+        self._limit_records_by_path[path] = (record, "min")
 
     @staticmethod
     def _range_unit(minimum: str, maximum: str) -> str:
@@ -1913,49 +2213,77 @@ class SettingsPage(QWidget):
     def _is_empty_limit_value(text: str) -> bool:
         return text.strip().lower() in {"", "null", "none"}
 
+    def _has_limit_errors(self) -> bool:
+        return bool(self._limit_error_items) or any(
+            record.min_error or record.max_error for record in self._limit_rows
+        )
+
+    def _validate_limit_record(self, record: _LimitRowRecord) -> None:
+        dimension = self._limit_dimension(record.min_path)
+        if record.max_path is None:
+            self._set_limit_path_validation(record.min_path, None)
+            try:
+                if dimension is None:
+                    float(record.min_text.strip().replace(",", "."))
+                else:
+                    value = parse_quantity(record.min_text, dimension, require_unit=True).si_value
+                    if value <= 0:
+                        raise ValueError("Value must be greater than zero.")
+            except (QuantityError, ValueError) as exc:
+                expected = f" Enter {self._dimension_unit_hint(dimension)}."
+                self._set_limit_path_validation(
+                    record.min_path, f"Invalid limit value:{expected} {exc}"
+                )
+            return
+        values: dict[str, float] = {}
+        for path, text, boundary in (
+            (record.min_path, record.min_text, "minimum"),
+            (record.max_path, record.max_text, "maximum"),
+        ):
+            self._set_limit_path_validation(path, None)
+            if self._is_empty_limit_value(text):
+                continue
+            try:
+                if dimension is None:
+                    float(text.strip().replace(",", "."))
+                else:
+                    values[boundary] = parse_quantity(
+                        text, dimension, require_unit=True
+                    ).si_value
+            except (QuantityError, ValueError) as exc:
+                expected = f" Enter {self._dimension_unit_hint(dimension)}."
+                self._set_limit_path_validation(
+                    path, f"Invalid {boundary} value:{expected} {exc}"
+                )
+        if len(values) == 2 and values["minimum"] > values["maximum"]:
+            message = "Minimum cannot exceed maximum."
+            self._set_limit_path_validation(record.min_path, message)
+            self._set_limit_path_validation(record.max_path, message)
+
     def _validate_limit_row(self, row: int) -> None:
-        minimum = self.limits_table.item(row, 2)
-        maximum = self.limits_table.item(row, 3)
+        if 0 <= row < len(self._limit_rows):
+            record = self._limit_rows[row]
+            if self._limits_table_widget is not None:
+                minimum = self._limits_table_widget.item(row, 2)
+                maximum = self._limits_table_widget.item(row, 3)
+                if minimum is not None:
+                    record.min_text = minimum.text()
+                if maximum is not None and record.max_path is not None:
+                    record.max_text = maximum.text()
+            self._validate_limit_record(record)
+            return
+        if self._limits_table_widget is None:
+            return
+        minimum = self._limits_table_widget.item(row, 2)
+        maximum = self._limits_table_widget.item(row, 3)
         if minimum is None or maximum is None:
             return
         path = minimum.data(Qt.ItemDataRole.UserRole)
         if path is None:
             return
-        dimension = self._limit_dimension(tuple(path))
-        if maximum.data(Qt.ItemDataRole.UserRole) is None:
-            self._set_limit_validation(minimum, None)
-            try:
-                if dimension is None:
-                    float(minimum.text().strip().replace(",", "."))
-                else:
-                    value = parse_quantity(minimum.text(), dimension, require_unit=True).si_value
-                    if value <= 0:
-                        raise ValueError("Value must be greater than zero.")
-            except (QuantityError, ValueError) as exc:
-                expected = f" Enter {self._dimension_unit_hint(dimension)}."
-                self._set_limit_validation(minimum, f"Invalid limit value:{expected} {exc}")
-            return
-        values: dict[str, float] = {}
-        for item, boundary in ((minimum, "minimum"), (maximum, "maximum")):
-            # A range is a single validation unit: correcting either boundary must
-            # also remove stale errors left on the opposite boundary.
-            self._set_limit_validation(item, None)
-            if self._is_empty_limit_value(item.text()):
-                continue
-            try:
-                if dimension is None:
-                    float(item.text().strip().replace(",", "."))
-                else:
-                    values[boundary] = parse_quantity(
-                        item.text(), dimension, require_unit=True
-                    ).si_value
-            except (QuantityError, ValueError) as exc:
-                expected = f" Enter {self._dimension_unit_hint(dimension)}."
-                self._set_limit_validation(item, f"Invalid {boundary} value:{expected} {exc}")
-        if len(values) == 2 and values["minimum"] > values["maximum"]:
-            message = "Minimum cannot exceed maximum."
-            self._set_limit_validation(minimum, message)
-            self._set_limit_validation(maximum, message)
+        entry = self._limit_records_by_path.get(tuple(path))
+        if entry is not None:
+            self._validate_limit_record(entry[0])
 
     def _limit_changed(self, item: QTableWidgetItem) -> None:
         if self._changing or item.column() not in {2, 3}:
@@ -1965,17 +2293,25 @@ class SettingsPage(QWidget):
         path = item.data(Qt.ItemDataRole.UserRole)
         if path is None:
             return
-        safety_editor = self._safety_limit_editors.get(tuple(path))
+        path_tuple = tuple(path)
+        entry = self._limit_records_by_path.get(path_tuple)
+        if entry is not None:
+            record, side = entry
+            if side == "min":
+                record.min_text = item.text()
+            else:
+                record.max_text = item.text()
+        safety_editor = self._safety_limit_editors_store.get(path_tuple)
         if safety_editor is not None and safety_editor.text() != item.text():
             safety_editor.setText(item.text())
         self._validate_limit_row(item.row())
-        if self._limit_error_items:
+        if self._has_limit_errors():
             self._show_limit_validation_toast(
                 "Incorrect value or unit. Correct the red outlined field before saving."
             )
         else:
             self._limit_validation_toast_message = None
-        self._sync_tree_from_limit(tuple(path), item.text())
+        self._sync_tree_from_limit(path_tuple, item.text())
         self._dirty = True
         if self._autosave_enabled:
             self.status.emit("Safety-limit autosave pending…")
@@ -1983,35 +2319,38 @@ class SettingsPage(QWidget):
     def _sync_tree_from_limit(self, path: tuple[str | int, ...], text: str) -> None:
         self._changing = True
         try:
-            editor = self._form_editors.get(path)
+            editor = self._form_editors_store.get(path)
             if isinstance(editor, QLineEdit):
                 editor.setText(text)
-            for tree in self.trees.values():
-                iterator = QTreeWidgetItemIterator(tree)
-                while iterator.value() is not None:
-                    candidate = iterator.value()
-                    if tuple(candidate.data(0, Qt.ItemDataRole.UserRole) or ()) == path:
-                        candidate.setText(1, text)
-                        return
-                    iterator += 1
+            if self._trees_cache is not None and not self._trees_dirty:
+                for tree in self._trees_cache.values():
+                    iterator = QTreeWidgetItemIterator(tree)
+                    while iterator.value() is not None:
+                        candidate = iterator.value()
+                        if tuple(candidate.data(0, Qt.ItemDataRole.UserRole) or ()) == path:
+                            candidate.setText(1, text)
+                            return
+                        iterator += 1
         finally:
             self._changing = False
 
     def _sync_limit_from_tree(self, path: tuple[str | int, ...], text: str) -> None:
         self._changing = True
         try:
-            for row in range(self.limits_table.rowCount()):
-                for column in (2, 3):
-                    item = self.limits_table.item(row, column)
-                    if (
-                        item is not None
-                        and tuple(item.data(Qt.ItemDataRole.UserRole) or ()) == path
-                    ):
-                        item.setText(text)
-                        safety_editor = self._safety_limit_editors.get(path)
-                        if safety_editor is not None and safety_editor.text() != text:
-                            safety_editor.setText(text)
-                        return
+            entry = self._limit_records_by_path.get(path)
+            if entry is not None:
+                record, side = entry
+                if side == "min":
+                    record.min_text = text
+                else:
+                    record.max_text = text
+            safety_editor = self._safety_limit_editors_store.get(path)
+            if safety_editor is not None and safety_editor.text() != text:
+                safety_editor.setText(text)
+            if self._limits_table_widget is not None and not self._limits_table_dirty:
+                item = self._limit_items_by_path_store.get(path)
+                if item is not None and item.text() != text:
+                    item.setText(text)
         finally:
             self._changing = False
 
@@ -2048,12 +2387,10 @@ class SettingsPage(QWidget):
     def _set_validation_state(widget: QWidget, state: str) -> None:
         if (widget.property("validationState") or "") == state:
             return
-        widget.setProperty("validationState", state)
-        widget.style().unpolish(widget)
-        widget.style().polish(widget)
+        set_dynamic_property(widget, "validationState", state)
 
     def _clear_validation_error(self, path: tuple[str | int, ...]) -> None:
-        editor = self._form_editors.get(path)
+        editor = self._form_editors_store.get(path)
         message = self._field_errors.get(path)
         if editor is not None:
             self._set_validation_state(editor, "")
@@ -2062,8 +2399,13 @@ class SettingsPage(QWidget):
             message.hide()
 
     def _clear_validation_errors(self) -> None:
-        for path in tuple(self._form_editors):
+        for path in tuple(self._form_editors_store):
             self._clear_validation_error(path)
+        for record in self._limit_rows:
+            if record.min_error:
+                self._set_limit_path_validation(record.min_path, None)
+            if record.max_path is not None and record.max_error:
+                self._set_limit_path_validation(record.max_path, None)
         for item in tuple(self._limit_error_items):
             self._set_limit_validation(item, None)
         self._limit_validation_toast_message = None
@@ -2082,9 +2424,38 @@ class SettingsPage(QWidget):
             title="Station safety boundaries",
         )
 
-    def _set_limit_validation(self, item: QTableWidgetItem, message: str | None) -> None:
-        """Update error metadata without recursively re-entering itemChanged."""
+    def _set_limit_path_validation(
+        self, path: tuple[str | int, ...], message: str | None
+    ) -> None:
+        entry = self._limit_records_by_path.get(path)
+        if entry is not None:
+            record, side = entry
+            if side == "min":
+                record.min_error = message
+            else:
+                record.max_error = message
+        if self._limits_table_widget is not None and not self._limits_table_dirty:
+            item = self._limit_items_by_path_store.get(path)
+            if item is not None:
+                self._set_limit_validation(item, message)
+                return
+        self._sync_safety_limit_validation_path(path, message)
 
+    def _set_limit_validation(
+        self, item: QTableWidgetItem | None, message: str | None
+    ) -> None:
+        """Update error metadata without recursively re-entering itemChanged."""
+        if item is None:
+            return
+        path = tuple(item.data(Qt.ItemDataRole.UserRole) or ())
+        if path:
+            entry = self._limit_records_by_path.get(path)
+            if entry is not None:
+                record, side = entry
+                if side == "min":
+                    record.min_error = message
+                else:
+                    record.max_error = message
         previous_changing = self._changing
         self._changing = True
         try:
@@ -2098,33 +2469,40 @@ class SettingsPage(QWidget):
             self._changing = previous_changing
         self._sync_safety_limit_validation(item)
 
-    def _sync_safety_limit_validation(self, item: QTableWidgetItem) -> None:
-        path = tuple(item.data(Qt.ItemDataRole.UserRole) or ())
+    def _sync_safety_limit_validation_path(
+        self, path: tuple[str | int, ...], message: str | None
+    ) -> None:
         if not path:
             return
-        editor = self._safety_limit_editors.get(path)
-        message = item.data(_LIMIT_VALIDATION_MESSAGE_ROLE)
+        editor = self._safety_limit_editors_store.get(path)
         if editor is not None:
             self._set_validation_state(editor, "error" if message else "")
             editor.setToolTip(f"Validation error: {message}" if message else "")
         label = self._safety_limit_error_labels.get(path)
         if label is not None:
-            # MIN and MAX share one concise message line.  Do not hide it while
-            # the sibling boundary still has an error.
-            active_messages = [
-                candidate.data(_LIMIT_VALIDATION_MESSAGE_ROLE)
-                for candidate_path, candidate in self._limit_items_by_path.items()
-                if self._safety_limit_error_labels.get(candidate_path) is label
-                and candidate.data(_LIMIT_VALIDATION_MESSAGE_ROLE)
-            ]
-            active_message = active_messages[0] if active_messages else None
+            entry = self._limit_records_by_path.get(path)
+            active_message: str | None = None
+            if entry is not None:
+                record, _side = entry
+                active_message = record.min_error or record.max_error
+            else:
+                active_message = message
             label.setText(str(active_message or ""))
             label.setVisible(bool(active_message))
 
+    def _sync_safety_limit_validation(self, item: QTableWidgetItem) -> None:
+        path = tuple(item.data(Qt.ItemDataRole.UserRole) or ())
+        if not path:
+            return
+        self._sync_safety_limit_validation_path(
+            path, item.data(_LIMIT_VALIDATION_MESSAGE_ROLE)
+        )
+
     def _mark_invalid_path(self, path: tuple[str | int, ...], message: str) -> QWidget | None:
+        self._ensure_form_built(self._form_tab_for_path(path))
         candidates = [
             candidate
-            for candidate in self._form_editors
+            for candidate in self._form_editors_store
             if (len(candidate) <= len(path) and tuple(path[: len(candidate)]) == candidate)
             or (len(path) <= len(candidate) and tuple(candidate[: len(path)]) == path)
         ]
@@ -2132,19 +2510,19 @@ class SettingsPage(QWidget):
         if candidates:
             longest = max(len(candidate) for candidate in candidates)
             for matched in (candidate for candidate in candidates if len(candidate) == longest):
-                editor = self._form_editors[matched]
+                editor = self._form_editors_store[matched]
                 self._set_validation_state(editor, "error")
                 label = self._field_errors[matched]
                 label.setText(message)
                 label.show()
                 if marked_editor is None:
                     marked_editor = editor
-        for limit_path, item in self._limit_items_by_path.items():
+        for limit_path in tuple(self._limit_records_by_path):
             if (
                 tuple(path[: len(limit_path)]) == limit_path
                 or tuple(limit_path[: len(path)]) == path
             ):
-                self._set_limit_validation(item, message)
+                self._set_limit_path_validation(limit_path, message)
         return marked_editor
 
     def reveal_settings_issues(self, paths: tuple[SettingsPath, ...], message: str) -> None:
@@ -2158,6 +2536,7 @@ class SettingsPage(QWidget):
         )
         form = self.forms.get(device)
         if form is not None:
+            self._ensure_form_built(device)
             self.tabs.setCurrentWidget(form)
         first_editor: QWidget | None = None
         for path in paths:
@@ -2234,19 +2613,35 @@ class SettingsPage(QWidget):
                     editor = self._mark_invalid_path(path, str(error))
                     if first_editor is None and editor is not None:
                         first_editor = editor
-            if first_editor is None and draft is not None and not self._limit_error_items:
+            if first_editor is None and draft is not None and not self._has_limit_errors():
                 for path in self._changed_leaf_paths(self._persisted_raw, draft):
                     editor = self._mark_invalid_path(path, str(error))
                     if first_editor is None and editor is not None:
                         first_editor = editor
-            if self._limit_error_items:
-                first = self._limit_error_items[0]
+            if self._has_limit_errors():
                 self._show_limit_validation_toast(
                     "Correct the highlighted safety-limit fields before validating again."
                 )
+                self._ensure_limits_cards_built()
                 self.tabs.setCurrentWidget(self.limits_page)
-                path = tuple(first.data(Qt.ItemDataRole.UserRole) or ())
-                editor = self._safety_limit_editors.get(path)
+                first_limit_path: tuple[str | int, ...] | None = None
+                if self._limit_error_items:
+                    first_limit_path = tuple(
+                        self._limit_error_items[0].data(Qt.ItemDataRole.UserRole) or ()
+                    )
+                else:
+                    for record in self._limit_rows:
+                        if record.min_error:
+                            first_limit_path = record.min_path
+                            break
+                        if record.max_path is not None and record.max_error:
+                            first_limit_path = record.max_path
+                            break
+                editor = (
+                    self._safety_limit_editors_store.get(first_limit_path)
+                    if first_limit_path
+                    else None
+                )
                 if editor is not None:
                     self.limits_scroll.ensureWidgetVisible(editor, 36, 72)
                     editor.setFocus()
@@ -2419,11 +2814,7 @@ class SettingsPage(QWidget):
         self.settings_saved.emit(settings)
         self.status.emit(
             "Configuration saved and known inconsistencies repaired"
-            if silent and repaired
-            else "Configuration saved and known inconsistencies repaired"
             if repaired
-            else "Configuration saved"
-            if silent
             else "Configuration saved"
         )
         return True

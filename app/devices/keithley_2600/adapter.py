@@ -128,6 +128,23 @@ class KeithleyRampResult:
     target_si: float
     levels_si: tuple[float, ...]
     final_measurement: KeithleyMeasurement
+    actual_si: float
+    limited_by_compliance: bool = False
+
+
+class KeithleyComplianceBlocked(SafetyViolation):
+    """A source update rejected by the software compliance guard before writing."""
+
+    def __init__(self, channel: str, level_si: float) -> None:
+        self.channel = channel
+        super().__init__(
+            f"Keithley channel {channel} is at compliance near {level_si:.12g} SI. "
+            "Moving farther from zero is blocked until a measurement confirms recovery."
+        )
+
+
+def keithley_compliance_retreat(start_si: float, target_si: float) -> bool:
+    return start_si * target_si >= 0 and abs(target_si) < abs(start_si)
 
 
 def build_keithley_ramp_levels(
@@ -1614,11 +1631,7 @@ class KeithleyAdapter(DeviceAdapter):
             return
         tolerance = max(abs(blocked), 1.0) * 1e-12
         if abs(level_si) > abs(blocked) + tolerance:
-            raise SafetyViolation(
-                f"Keithley channel {channel} is at compliance; increasing the "
-                f"source above {blocked:.12g} SI is blocked until the measured "
-                "compliance warning clears."
-            )
+            raise KeithleyComplianceBlocked(channel, blocked)
 
     @staticmethod
     def _configure_measurement_ranges_and_sense(
@@ -2017,6 +2030,8 @@ class KeithleyAdapter(DeviceAdapter):
         self,
         request: KeithleyRampRequest,
         cancellation_token: threading.Event | None = None,
+        *,
+        allow_compliance_retreat: bool = False,
     ) -> KeithleyRampResult:
         """Ramp an already active source without ever enabling an output.
 
@@ -2067,16 +2082,14 @@ class KeithleyAdapter(DeviceAdapter):
         validate_keithley_source(channel_settings, target_request)
         smu = self._smu(channel)
         field = "leveli" if current_request.mode == "current" else "levelv"
-        session = self._require_session()
+        function = "OUTPUT_DCAMPS" if current_request.mode == "current" else "OUTPUT_DCVOLTS"
         try:
-            response = session.query(f"print({smu}.source.{field})")
-            start_si = float(response.strip())
-        except (TypeError, ValueError) as exc:
+            if not self._query_boolean(f"{smu}.source.func == {smu}.{function}"):
+                raise DeviceError("Keithley source mode changed before ramping.")
+            start_si = self._query_finite_float(f"{smu}.source.{field}")
+        except Exception:
             self.emergency_off()
-            raise DeviceError("Keithley returned an invalid source level before ramping.") from exc
-        if not math.isfinite(start_si):
-            self.emergency_off()
-            raise DeviceError("Keithley returned a non-finite source level before ramping.")
+            raise
         start_request = replace(current_request, level_si=start_si)
         try:
             validate_keithley_source(channel_settings, start_request)
@@ -2085,12 +2098,23 @@ class KeithleyAdapter(DeviceAdapter):
             if self._state is not DeviceState.UNKNOWN:
                 self._state = DeviceState.FAULT
             raise
+        limit_ramp = allow_compliance_retreat and self.compliance_policy(channel) == "warn_clamp"
         levels = build_keithley_ramp_levels(
             start_si,
             request.target_si,
             request.max_step_si,
             max_points=limits.sweep_points_max,
         )
+        if limit_ramp and channel in self._compliance_warnings and start_si * request.target_si < 0:
+            # Verify recovery before changing polarity, even if a nominal
+            # ramp increment would step directly across zero.
+            to_zero = build_keithley_ramp_levels(
+                start_si, 0.0, request.max_step_si, max_points=limits.sweep_points_max,
+            )
+            levels = to_zero + build_keithley_ramp_levels(
+                0.0, request.target_si, request.max_step_si,
+                max_points=limits.sweep_points_max - len(to_zero),
+            )
         predicted_s = len(levels) * request.settle_time_s
         if predicted_s > request.deadline_s:
             raise SafetyViolation(
@@ -2099,7 +2123,11 @@ class KeithleyAdapter(DeviceAdapter):
             )
         started = time.monotonic()
         final_measurement: KeithleyMeasurement | None = None
+        actual_si = start_si
+        executed_levels: list[float] = []
         try:
+            if limit_ramp and channel in self._compliance_warnings:
+                final_measurement = self.measure(channel)
             for level in levels:
                 if cancellation_token is not None and cancellation_token.is_set():
                     raise SafetyViolation("Keithley manual ramp cancelled.")
@@ -2107,9 +2135,18 @@ class KeithleyAdapter(DeviceAdapter):
                     raise DeviceError("Keithley manual ramp exceeded its deadline.")
                 step_request = replace(current_request, level_si=level)
                 validate_keithley_source(channel_settings, step_request)
-                self.update_source_level(
+                applied = self._quantize_source_request(step_request).level_si
+                if abs(applied - actual_si) > request.max_step_si + 1e-12:
+                    raise SafetyViolation("Quantized Keithley step exceeds the requested ramp step.")
+                if final_measurement is not None and final_measurement.compliance_stop_required:
+                    raise SafetyViolation("Keithley reached compliance during the manual ramp.")
+                if (limit_ramp and final_measurement is not None and final_measurement.compliance_detected
+                        and not keithley_compliance_retreat(actual_si, applied)):
+                    break
+                actual_si = self.update_source_level(
                     channel, mode=current_request.mode, level_si=level
                 )
+                executed_levels.append(level)
                 if request.settle_time_s:
                     time.sleep(request.settle_time_s)
                 if cancellation_token is not None and cancellation_token.is_set():
@@ -2135,7 +2172,9 @@ class KeithleyAdapter(DeviceAdapter):
                 if self._state is not DeviceState.UNKNOWN:
                     self._state = DeviceState.FAULT
             raise
-        self._last_request[channel] = target_request
         self._output_states[channel] = True
         self._update_aggregate_output_state()
-        return KeithleyRampResult(channel, start_si, request.target_si, levels, final_measurement)
+        return KeithleyRampResult(
+            channel, start_si, request.target_si, tuple(executed_levels), final_measurement, actual_si,
+            limited_by_compliance=limit_ramp and final_measurement.compliance_detected,
+        )

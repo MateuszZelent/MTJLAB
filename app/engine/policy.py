@@ -69,7 +69,7 @@ class ExecutionPolicy:
 
         if action.kind == "wait":
             return float(action.payload["duration_s"]) + self.watchdog_grace_s
-        if action.kind == "ramp_keithley_to_zero":
+        if action.kind in {"ramp_keithley_to_zero", "ramp_keithley_current"}:
             return float(action.payload["deadline_s"]) + self.watchdog_grace_s
         if action.kind in {"update_moke_voltage", "stop_moke_voltage"}:
             return float(action.payload["ramp_timeout_s"]) + self.watchdog_grace_s

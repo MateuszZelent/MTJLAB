@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from collections import deque
-from contextlib import nullcontext, contextmanager, ExitStack
-from dataclasses import asdict, dataclass, is_dataclass
-from datetime import datetime, timezone
+import logging
 import math
 import threading
 import time
-from typing import Callable
-from uuid import uuid4
+from collections import deque
+from collections.abc import Callable
+from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import asdict, dataclass, is_dataclass
+from datetime import UTC, datetime
 from enum import Enum
+from uuid import uuid4
 
 from app.devices.anritsu_ms2830a.adapter import (
     ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS,
@@ -19,26 +20,37 @@ from app.devices.anritsu_ms2830a.adapter import (
     AnritsuAdapter,
     SpectrumTrace,
 )
-from app.devices.keithley_2600.adapter import KeithleyAdapter
+from app.devices.keithley_2600.adapter import (
+    KeithleyAdapter, KeithleyComplianceBlocked, KeithleyMeasurement, KeithleyRampRequest,
+    keithley_compliance_retreat,
+)
+from app.devices.lakeshore_475.adapter import LakeShore475Adapter
 from app.devices.moke_box.adapter import MokeBoxAdapter
 from app.devices.moke_box.calibration import MokeCalibration
-from app.safety.moke_box import MokeVoltagePlan
-from app.devices.lakeshore_475.adapter import LakeShore475Adapter
 from app.devices.rigol_dg1000z.adapter import RigolAdapter
 from app.domain.errors import ConfigurationError, DeviceError, ExecutionError
 from app.domain.models import ApplicationState, DeviceState, MeasurementPoint
 from app.domain.recipe_spectrum import RecipeSpectrumSweep
 from app.domain.spectrum_averaging import InstrumentAverageProvenance
 from app.domain.spectrum_correction import SpectrumFrameRole
-from app.engine.compiler import ExecutionPlan, PlanAction, controlled_output_endpoints, required_devices_for_actions
+from app.engine.compiler import (
+    ExecutionPlan,
+    PlanAction,
+    action_produces_checkpoint,
+    controlled_output_endpoints,
+    required_devices_for_actions,
+)
 from app.engine.policy import ExecutionPolicy
 from app.engine.recovery import RecoveredReference
+from app.safety.moke_box import MokeVoltagePlan
 from app.spectrum import (
     LinearPowerAverager,
     apply_reference_operation,
     frequency_grids_match,
 )
 from app.storage.hdf5_writer import Hdf5RunWriter
+
+logger = logging.getLogger(__name__)
 
 
 EventCallback = Callable[[str, dict[str, object]], None]
@@ -53,7 +65,7 @@ class ExecutionMode(str, Enum):
     MANUAL_STEP = "manual_step"
 
     @classmethod
-    def coerce(cls, value: "ExecutionMode | str") -> "ExecutionMode":
+    def coerce(cls, value: ExecutionMode | str) -> ExecutionMode:
         """Read the current mode and the retired demo provenance value.
 
         ``demo_outputs_off`` may be present in immutable run files written by
@@ -73,6 +85,7 @@ class RunResult:
     completed_actions: int
     stored_points: int
     error: str | None = None
+    compliance_points_skipped: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +208,10 @@ class RecipeRunner:
         stored = stored_points
         point_measurements: dict[str, float] = {}
         point_setpoints: dict[str, float] = {}
+        skip_until = start_action_index
+        compliance_points_skipped = 0
+        self._keithley_compliance_holds: set[str] = set()
+        self._keithley_limited_currents: set[str] = set()
         run_started_monotonic = time.monotonic()
         self._required_devices = (
             plan.required_devices | required_devices_for_actions(plan.actions)
@@ -306,6 +323,9 @@ class RecipeRunner:
                 plan.actions[start_action_index:], start=start_action_index
             ):
                 self._raise_if_stop_requested()
+                if action_index < skip_until:
+                    completed = action_index + 1
+                    continue
                 if action.fault_only:
                     completed = action_index + 1
                     self._emit("action_skipped", {"node_id": action.node_id, "kind": action.kind,
@@ -354,7 +374,51 @@ class RecipeRunner:
                 )
                 if semantic_started is not None:
                     self._emit("semantic_operation_started", semantic_started)
-                acquisition = self._execute_with_policy(action, point_measurements)
+                blocked_channel = None
+                try:
+                    acquisition = self._execute_with_policy(action, point_measurements)
+                except KeithleyComplianceBlocked as exc:
+                    if (exc.channel not in self._compliance_scope_channels(action)
+                            or self._keithley.compliance_policy(exc.channel) != "warn_clamp"
+                            or not self._keithley_output_active[exc.channel]):
+                        raise
+                    self._keithley_compliance_holds.add(exc.channel)
+                    self._keithley_limited_currents.add(exc.channel)
+                    acquisition = None
+                    blocked_channel = exc.channel
+                limited = self._scoped_soft_compliance(action, point_measurements)
+                if blocked_channel is not None:
+                    limited.add(blocked_channel)
+                if limited and not self._compliance_channels(point_measurements):
+                    self._keithley_limited_currents.update(limited)
+                    scopes = action.payload.get("_compliance_scope_ends", {})
+                    skip_until = max(scopes.get(channel, action_index + 1) for channel in limited)
+                    if len(limited) == 1:
+                        skip_until = self._skip_outward_current_points(plan.actions, skip_until, next(iter(limited)))
+                    skipped = sum(
+                        action_produces_checkpoint(skipped_action)
+                        for skipped_action in plan.actions[action_index:skip_until]
+                    )
+                    compliance_points_skipped += skipped
+                    point_measurements.clear()
+                    completed = action_index + 1
+                    self._emit("sweep_compliance_limited", {
+                        "node_id": action.node_id, "channels": sorted(limited),
+                        "action_index": action_index, "next_action_index": skip_until,
+                        "total_actions": len(plan.actions), "skipped_points": skipped,
+                        "source_current_a": {
+                            channel: self._actual_setpoint_value(f"keithley.{channel}.current")
+                            for channel in sorted(limited)
+                        },
+                        "incomplete_scope": dict(action.setpoints_si),
+                    })
+                    skipped_state = self._semantic_event_data(
+                        action, action_index=action_index, total_actions=len(plan.actions), phase="skipped",
+                    )
+                    if skipped_state is not None:
+                        self._emit("semantic_operation_skipped", skipped_state)
+                    current_action = None
+                    continue
                 if action.completion_only and action.retained_output is not None:
                     completed_retained_outputs.add(action.retained_output)
                 if action.semantic_id:
@@ -506,12 +570,13 @@ class RecipeRunner:
             self._state = (ApplicationState.HOLDING if retained_outputs else
                            ApplicationState.UNKNOWN if self._moke_owns_output else ApplicationState.SAFE)
             completion = self._emit("run_completed", {"completed_actions": completed, "stored_points": stored,
+                                                       "compliance_points_skipped": compliance_points_skipped,
                                                        "retained_outputs": sorted(retained_outputs),
                                                        "storage_validation_pending": True}, notify=False)
             self._writer.close("completed")
             self._on_event("run_completed", {**completion, "storage_validation_pending": False})
-            return RunResult(self._state, completed, stored)
-        except Exception as exc:
+            return RunResult(self._state, completed, stored, compliance_points_skipped=compliance_points_skipped)
+        except Exception as exc:  # noqa: BLE001 - top-level run safety boundary must shut down hardware
             if self._stop_requested.is_set() and not self._watchdog_timed_out.is_set():
                 return self._abort_safely(
                     plan,
@@ -595,7 +660,7 @@ class RecipeRunner:
                     raise ExecutionError(
                         f"Action {action.node_id!r} exceeded its {deadline_s:.3g} s deadline."
                     )
-                confirmed_at = datetime.now(timezone.utc).isoformat()
+                confirmed_at = datetime.now(UTC).isoformat()
                 for target in affected_targets:
                     if self._actual_setpoint_value(target) is not None:
                         self._setpoint_confirmed_at[target] = confirmed_at
@@ -676,7 +741,7 @@ class RecipeRunner:
         context: dict[str, object] = {"device": device} if device else {}
         if kind.startswith("update_") and kind != "update_moke_voltage":
             context["transition_policy"] = "direct_setpoint"
-        elif kind == "update_moke_voltage" or kind == "ramp_keithley_to_zero":
+        elif kind in {"update_moke_voltage", "ramp_keithley_to_zero", "ramp_keithley_current"}:
             context["transition_policy"] = "qualified_ramp"
         elif kind in {"configure_keithley", "configure_rigol", "configure_anritsu_sg"}:
             context["transition_policy"] = "configuration_with_output_off"
@@ -723,8 +788,8 @@ class RecipeRunner:
             if fields is None or "settle_time_s" in fields:
                 tails.add("settling_time")
             return {prefix + tail for tail in tails}
-        if action.kind in {"update_keithley_level", "update_keithley_compliance"}:
-            tails = ("current", "voltage", "level") if action.kind.endswith("level") else ("compliance_voltage", "compliance_current")
+        if action.kind in {"update_keithley_level", "update_keithley_compliance", "ramp_keithley_current"}:
+            tails = ("compliance_voltage", "compliance_current") if action.kind == "update_keithley_compliance" else ("current", "voltage", "level")
             return {f"keithley.{payload['channel']}.{tail}" for tail in tails}
         if action.kind in {"configure_rigol", "update_rigol_frequency", "update_rigol_levels"}:
             channel = payload["config"].channel if action.kind == "configure_rigol" else payload["channel"]
@@ -760,7 +825,7 @@ class RecipeRunner:
             return
         self._semantic_confirmations[context.axis_id] = {
             "target": action.payload.get("target"),
-            "confirmed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "confirmed_at_utc": datetime.now(UTC).isoformat(),
             "semantic_operation_id": action.semantic_id,
             "requested_si": event.get("requested_si"),
             "applied_si": event.get("applied_si"),
@@ -915,7 +980,7 @@ class RecipeRunner:
                         target = str(key)
                         break
         applied: object | None = None
-        if action.kind == "update_keithley_level":
+        if action.kind in {"update_keithley_level", "ramp_keithley_current"}:
             applied = self._active_safety_context.get(
                 f"keithley.{action.payload.get('channel')}", {}
             ).get("source_level_si", applied)
@@ -1048,11 +1113,11 @@ class RecipeRunner:
         )
 
     def _emit_telemetry(self, name: str, data: dict[str, object]) -> None:
-        payload = {"timestamp_utc": datetime.now(timezone.utc).isoformat(), **data}
+        payload = {"timestamp_utc": datetime.now(UTC).isoformat(), **data}
         try:
             self._on_telemetry(name, payload)
-        except Exception:
-            pass
+        except Exception:  # UI telemetry callback must never abort hardware control
+            logger.debug("Telemetry callback %r raised an exception.", name, exc_info=True)
 
     def _emit_point_stored(
         self,
@@ -1078,6 +1143,25 @@ class RecipeRunner:
             },
         )
 
+    def _matching_spectrum_reference(
+        self, trace: SpectrumTrace, metadata: dict[str, object]
+    ) -> SpectrumTrace | None:
+        reference = self._reference_trace
+        instrument_averaged = (
+            isinstance(metadata.get("instrument_average"), dict)
+            or metadata.get("averaging_source") == "instrument"
+        )
+        if (
+            reference is not None
+            and instrument_averaged == (self._reference_origin.get("averaging_source") == "instrument")
+            and reference.trace_name == trace.trace_name
+            and self._reference_fingerprint is not None
+            and self._reference_fingerprint == metadata.get("configuration_fingerprint")
+            and frequency_grids_match(trace.frequencies_hz, reference.frequencies_hz)
+        ):
+            return reference
+        return None
+
     def _emit_spectrum_preview(
         self,
         trace: SpectrumTrace,
@@ -1094,16 +1178,8 @@ class RecipeRunner:
         instrument_average = metadata.get("instrument_average")
         instrument_averaged = isinstance(instrument_average, dict) or metadata.get("averaging_source") == "instrument"
         difference_db = None
-        reference = self._reference_trace
-        if (
-            measurement is not None
-            and reference is not None
-            and instrument_averaged == (self._reference_origin.get("averaging_source") == "instrument")
-            and reference.trace_name == trace.trace_name
-            and self._reference_fingerprint is not None
-            and self._reference_fingerprint == metadata.get("configuration_fingerprint")
-            and frequency_grids_match(trace.frequencies_hz, reference.frequencies_hz)
-        ):
+        reference = self._matching_spectrum_reference(trace, metadata) if measurement is not None else None
+        if reference is not None:
             try:
                 difference_db, _ = apply_reference_operation(trace.powers_dbm, reference.powers_dbm, "difference_db")
             except ValueError:
@@ -1163,7 +1239,7 @@ class RecipeRunner:
         """Retain the original fault when closing/validation also fails."""
         try:
             self._writer.close(status)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - preserve originating run fault if archive close fails
             self._state = ApplicationState.FAULT
             original_reason = reason
             reason += f"\nArchive close failed: {exc}"
@@ -1173,11 +1249,11 @@ class RecipeRunner:
                 self._on_event("storage_close_failed", {
                     "error": str(exc), "original_error": original_reason,
                     "correlation_id": self._correlation_id,
-                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    "timestamp_utc": datetime.now(UTC).isoformat(),
                     "state_snapshot": self._runtime_state_snapshot(),
                 })
-            except Exception:
-                pass
+            except Exception:  # diagnostic callback must not mask original fault
+                logger.debug("storage_close_failed callback raised an exception.", exc_info=True)
         return reason
 
     def _run_pending_finally(
@@ -1205,7 +1281,7 @@ class RecipeRunner:
                     "safe_finally_finished",
                     {"node_id": action.node_id, "kind": action.kind},
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - continue remaining finally actions and record fault
                 cleanup_ok = False
                 self._emit_after_fault(
                     "safe_finally_error",
@@ -1364,17 +1440,71 @@ class RecipeRunner:
                 "keithley", f"channel_{request.channel}", requested=request,
                 actual=self._active_safety_context[f"keithley.{request.channel}"],
             )
-        elif action.kind == "update_keithley_level":
-            actual = self._keithley.update_source_level(
-                payload["channel"],
-                mode=payload["mode"],
-                level_si=payload["level_si"],
-            )
-            key = f"keithley.{payload['channel']}"
+        elif action.kind in {"update_keithley_level", "ramp_keithley_current"}:
+            channel = payload["channel"]
+            key = f"keithley.{channel}"
             context = self._active_safety_context.get(key, {})
+            ramp_evidence = {}
+            target = payload["level_si"]
+            reentry = payload.get("_compliance_reentry")
+            scoped_ramp = (action.kind == "ramp_keithley_current"
+                           and channel in self._compliance_scope_channels(action))
+            active = self._keithley_output_active[channel]
+            source = self._actual_setpoint_value(f"keithley.{channel}.current")
+            if (active and action.kind == "update_keithley_level"
+                    and channel in self._keithley_limited_currents and reentry is None):
+                raise ExecutionError("After compliance, a current change requires a bounded sweep point or ramp.")
+            crossing_zero = source is not None and source * target < 0
+            if active and channel in self._keithley_compliance_holds and (scoped_ramp or reentry):
+                if source is None:
+                    raise ExecutionError("Missing verified Keithley current for compliance recovery.")
+                destination = reentry[2] if reentry is not None else target
+                if source * destination >= 0 and not keithley_compliance_retreat(source, destination):
+                    raise KeithleyComplianceBlocked(channel, source)
+                if reentry is not None and "target" not in payload:
+                    if not keithley_compliance_retreat(source, target):
+                        # Generated against the planned start of the point.
+                        # Leave the source at its verified level until a
+                        # transition actually heads toward the return target.
+                        return None
+            bounded_reentry = (
+                reentry is not None and channel in self._keithley_limited_currents and active
+                and source is not None and (
+                    abs(target - source) > reentry[0] + 1e-12
+                    or (crossing_zero and channel in self._keithley_compliance_holds)
+                )
+            )
+            if bounded_reentry or (action.kind == "ramp_keithley_current" and not self.outputs_forced_off):
+                if context.get("mode") != "current" or not self._keithley_output_active[channel]:
+                    raise ExecutionError("Keithley current ramp requires a configured current source with OUTPUT ON.")
+                if bounded_reentry:
+                    step, settle, _ = reentry
+                    deadline = self._policy.command_timeout_s
+                else:
+                    step, settle, deadline = payload["step_si"], payload["settle_time_s"], payload["deadline_s"]
+                ramp_options = {"allow_compliance_retreat": True} if scoped_ramp or bounded_reentry else {}
+                result = self._keithley.ramp_to_level(
+                    KeithleyRampRequest(channel, target, step, settle, deadline),
+                    cancellation_token=self._stop_requested,
+                    **ramp_options,
+                )
+                actual = result.actual_si
+                ramp_evidence = {"ramp_start_si": result.start_si, "ramp_steps": len(result.levels_si)}
+                if scoped_ramp or bounded_reentry:
+                    self._observe_keithley_compliance(result.final_measurement)
+                    if result.limited_by_compliance:
+                        measurements[f"{key}.compliance_detected"] = 1.0
+            else:
+                actual = self._keithley.update_source_level(channel, mode=payload["mode"], level_si=target)
             context["source_level_si"] = actual
+            self._keithley_zeroed[channel] = abs(actual) <= 1e-15
             self._active_safety_context[key] = context
-            self._record_device_state("keithley", f"channel_{payload['channel']}", requested=payload, actual=context)
+            self._record_device_state("keithley", f"channel_{channel}", requested=payload, actual={**context, **ramp_evidence})
+            if (reentry is not None and active and not bounded_reentry
+                    and payload["_compliance_check_after_update"]):
+                self._sample_keithley(channel, measurements)
+            if (reentry or scoped_ramp) and channel not in self._keithley_compliance_holds:
+                self._keithley_limited_currents.discard(channel)
         elif action.kind == "update_keithley_compliance":
             actual = self._keithley.update_source_compliance(
                 payload["channel"],
@@ -1388,12 +1518,27 @@ class RecipeRunner:
             self._record_device_state("keithley", f"channel_{payload['channel']}", requested=payload, actual=context)
         elif action.kind == "configure_anritsu":
             config = payload["config"]
-            actual = self._anritsu.configure_spectrum(config)
-            if config.changed_fields is None and self._anritsu_owns_output and actual is not None:
-                # The qualified full-mode transition queries and confirms RF
-                # OFF. A selected-field patch carries no such output proof.
-                self._anritsu_sg_output_active = False
-                self._confirm_output_state("anritsu.sg", False)
+            require_rf_off_proof = config.is_complete_configuration and self._anritsu_owns_output
+            if require_rf_off_proof:
+                try:
+                    actual = self._anritsu.configure_spectrum(config, require_rf_off_proof=True)
+                except TypeError as exc:
+                    if "require_rf_off_proof" not in str(exc):
+                        raise
+                    actual = self._anritsu.configure_spectrum(config)
+            else:
+                actual = self._anritsu.configure_spectrum(config)
+            if require_rf_off_proof and actual is not None:
+                if getattr(actual, "rf_off_confirmed", False) is True:
+                    # The qualified full-mode transition physically verified RF OFF
+                    # before switching to Spectrum Analyzer mode.
+                    self._anritsu_sg_output_active = False
+                    self._confirm_output_state("anritsu.sg", False)
+                elif hasattr(actual, "rf_off_confirmed"):
+                    self._mark_output_unknown("anritsu.sg")
+                    raise ExecutionError(
+                        "Anritsu Spectrum transition did not confirm SG RF OFF."
+                    )
             if actual is None:
                 # Qualified AnritsuAdapter implementations return a verified
                 # snapshot. Keep passive test/dry-run doubles compatible while
@@ -1427,6 +1572,7 @@ class RecipeRunner:
                 "preamplifier_enabled": actual.preamplifier_enabled,
                 "sweep_time_auto": actual.sweep_time_auto,
                 "sweep_time_s": actual.sweep_time_s,
+                "timing_context": actual.timing_context,
             }
             self._record_device_state(
                 "anritsu", "advanced_spectrum", requested=config,
@@ -1512,6 +1658,9 @@ class RecipeRunner:
                 payload["channel"], effective_enabled
             )
             self._keithley_output_active[payload["channel"]] = actual_enabled
+            if not actual_enabled:
+                self._keithley_compliance_holds.discard(payload["channel"])
+                self._keithley_limited_currents.discard(payload["channel"])
             self._confirm_output_state(
                 f"keithley.{payload['channel']}", actual_enabled
             )
@@ -1542,6 +1691,8 @@ class RecipeRunner:
         elif action.kind == "ramp_keithley_to_zero":
             self._keithley.ramp_to_zero(payload["channel"], deadline_s=payload["deadline_s"])
             channel = payload["channel"]
+            self._keithley_compliance_holds.discard(channel)
+            self._keithley_limited_currents.discard(channel)
             self._keithley_zeroed[channel] = True
             # A successful adapter ramp confirms both the zero level and OFF.
             # Publish that state, rather than retaining the last sweep setpoint
@@ -1801,8 +1952,14 @@ class RecipeRunner:
             processed: tuple[float, ...] | None = None
             processed_unit: str | None = None
             acquisition_metadata = block.processing_metadata or {}
+            # A compatible archived reference can be selected later in Results
+            # even when the spectrum is stored without any recipe processing.
+            link_reference = operation != "none" or (
+                self._reference_index is not None
+                and self._matching_spectrum_reference(trace, acquisition_metadata) is not None
+            )
             metadata = {"schema": "recipe-spectrum-processing-v1", "processing": payload.get("processing", {}),
-                        "reference_operation": operation, "reference_origin": dict(self._reference_origin) if operation != "none" else {},
+                        "reference_operation": operation, "reference_origin": dict(self._reference_origin) if link_reference else {},
                         "configuration_fingerprint": acquisition_metadata.get("configuration_fingerprint"),
                         "acquisition_mode": payload.get("acquisition_mode", "single_sweep"),
                         "source_spectra_stored": bool(block.source_sweep_indices),
@@ -1854,7 +2011,7 @@ class RecipeRunner:
                 processed_values=processed,
                 processed_unit=processed_unit,
                 processing_operation=operation,
-                reference_index=self._reference_index if payload.get("reference_operation", "none") != "none" else None,
+                reference_index=self._reference_index if link_reference else None,
                 source_sweep_indices=block.source_sweep_indices,
                 processing_metadata=metadata,
             )
@@ -1899,6 +2056,7 @@ class RecipeRunner:
     def _sample_keithley(self, channel: str, measurements: dict[str, float]) -> None:
         """Read IV/compliance and validate measured trips without changing settings."""
         result = self._keithley.measure(channel)
+        self._observe_keithley_compliance(result)
         prefix = f"keithley.{channel}"
         measurements[f"{prefix}.voltage_v"] = result.voltage_v
         measurements[f"{prefix}.current_a"] = result.current_a
@@ -1934,6 +2092,45 @@ class RecipeRunner:
                     "resistance_definition": "abs(measured_voltage_v / measured_current_a)",
                     "resistance_min_abs_current_a": minimum_current_a},
         )
+
+    def _observe_keithley_compliance(self, result: KeithleyMeasurement) -> None:
+        channel = result.channel
+        if (result.output_enabled and result.compliance_detected and not result.compliance_stop_required
+                and result.source_mode == "current" and self._keithley.compliance_policy(channel) == "warn_clamp"):
+            self._keithley_compliance_holds.add(channel)
+        else:
+            self._keithley_compliance_holds.discard(channel)
+
+    @staticmethod
+    def _compliance_scope_channels(action: PlanAction) -> set[str]:
+        channels = set(action.payload.get("_compliance_scope_ends", {}))
+        if action.payload.get("_compliance_scan_approach"):
+            channels.add(action.payload["channel"])
+        return channels
+
+    def _scoped_soft_compliance(self, action: PlanAction, measurements: dict[str, float]) -> set[str]:
+        return {
+            channel for channel in self._compliance_scope_channels(action) & self._keithley_compliance_holds
+            if measurements.get(f"keithley.{channel}.compliance_detected")
+        }
+
+    def _skip_outward_current_points(
+        self, actions: tuple[PlanAction, ...], index: int, channel: str,
+    ) -> int:
+        """Advance across consecutive points beyond the last qualified current."""
+        source = self._actual_setpoint_value(f"keithley.{channel}.current")
+        if source is None:
+            return index
+        while index < len(actions):
+            payload = actions[index].payload
+            reentry = payload.get("_compliance_reentry")
+            if reentry is None or payload["channel"] != channel:
+                break
+            destination = reentry[2]
+            if source * destination < 0 or keithley_compliance_retreat(source, destination):
+                break
+            index = payload["_compliance_scope_ends"][channel]
+        return index
 
     def _moke_ramp_progress(self, sample) -> None:
         """Project confirmed DAC steps without adding I/O or durable event traffic."""
@@ -2002,7 +2199,8 @@ class RecipeRunner:
             raise ExecutionError("Analyzer settings changed since reference; acquire or load a matching reference.")
         if instrument_average:
             return self._acquire_instrument_spectrum(
-                before, measurements, duration_s=instrument_duration_s, sweep_count=instrument_count,
+                before, measurements, action=action,
+                duration_s=instrument_duration_s, sweep_count=instrument_count,
             )
         averager = LinearPowerAverager()
         history = deque(maxlen=24)
@@ -2028,7 +2226,7 @@ class RecipeRunner:
                     self._interruptible_wait(delay)
                     self._raise_if_stop_requested()
                 latest, safety_channels, safety_sampled_at = self._read_recipe_source_trace(
-                    trace_name, measurements, live=live, previous=latest,
+                    trace_name, measurements, action=action, live=live, previous=latest,
                 )
                 if latest is None:
                     return None
@@ -2099,11 +2297,12 @@ class RecipeRunner:
                                  "safety_sampling": "active_smu_iv_before_each_raw_frame"}, history_dbm=tuple(history))
 
     def _acquire_instrument_spectrum(
-        self, before, measurements: dict[str, float], *, duration_s: float | None, sweep_count: int | None,
+        self, before, measurements: dict[str, float], *, action: PlanAction,
+        duration_s: float | None, sweep_count: int | None,
     ) -> _AcquiredSpectrum | None:
         self._raise_if_stop_requested()
         self._sample_spectrum_channels(measurements)
-        if self._compliance_channels(measurements):
+        if self._compliance_channels(measurements) or self._scoped_soft_compliance(action, measurements):
             return None
         start = time.monotonic()
         trace, count, sweep_time_s = self._anritsu.acquire_instrument_average(
@@ -2112,7 +2311,7 @@ class RecipeRunner:
         elapsed = time.monotonic() - start
         self._raise_if_stop_requested()
         self._sample_spectrum_channels(measurements)
-        if self._compliance_channels(measurements):
+        if self._compliance_channels(measurements) or self._scoped_soft_compliance(action, measurements):
             return None
         after = self._read_spectrum_identity()
         if before is None or after is None or before[3] != after[3]:
@@ -2140,6 +2339,7 @@ class RecipeRunner:
         trace_name: str,
         measurements: dict[str, float],
         *,
+        action: PlanAction,
         live: bool,
         previous: SpectrumTrace | None,
     ) -> tuple[SpectrumTrace | None, list[str], float | None]:
@@ -2149,9 +2349,9 @@ class RecipeRunner:
             if time.monotonic() >= deadline:
                 raise ExecutionError("Timed out waiting for a distinct Anritsu Live spectrum.")
             safety_channels = self._sample_spectrum_channels(measurements)
-            if self._compliance_channels(measurements):
+            if self._compliance_channels(measurements) or self._scoped_soft_compliance(action, measurements):
                 return None, safety_channels, None
-            sampled_at = datetime.now(timezone.utc).timestamp() if safety_channels else None
+            sampled_at = datetime.now(UTC).timestamp() if safety_channels else None
             if not live:
                 return self._anritsu.acquire_unaveraged_sweep(trace_name), safety_channels, sampled_at
             try:
@@ -2348,7 +2548,7 @@ class RecipeRunner:
                     attempted_devices.add(name)
                     with self._cleanup_operation(device, slots=max(1, len(shutdown_scope - attempted_devices) + 1)):
                         self._shutdown_owned_device(name, device, retained_outputs=retained_outputs)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - continue shutting down every remaining device
                 confirmed = False
                 self._emit_after_fault(
                     "shutdown_error",
@@ -2369,7 +2569,7 @@ class RecipeRunner:
                 attempted_devices.add(name)
                 with self._cleanup_operation(devices[name], slots=max(1, len(fallback_scope - attempted_devices) + 1)):
                     self._shutdown_owned_device(name, devices[name], retained_outputs=retained_outputs)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - continue fallback shutdown across all owned devices
                 confirmed = False
                 self._emit_after_fault(
                     "shutdown_error",
@@ -2430,7 +2630,7 @@ class RecipeRunner:
                             raise ExecutionError("Output OFF was not confirmed.")
                     self._confirm_output_state(endpoint, actual)
                     self._emit_after_fault("completion_output_confirmed", {"endpoint": endpoint, "enabled": actual})
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - mark endpoint unknown and keep checking remaining channels
                     self._mark_output_unknown(endpoint)
                     errors.append(f"{endpoint}: {exc}")
             if errors:
@@ -2480,7 +2680,7 @@ class RecipeRunner:
                 })
                 if not result.safe_target_confirmed:
                     raise ExecutionError("MOKE programming-signal zero was not confirmed.")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - record failure and still zero remaining MOKE channels
                 errors.append(f"VOUT {channel}: {exc}")
         if errors:
             raise ExecutionError("; ".join(errors))
@@ -2521,7 +2721,7 @@ class RecipeRunner:
         self._device_states.setdefault(device, {})[section] = {
             "requested": self._jsonable(requested),
             "actual": self._jsonable(actual),
-            "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+            "recorded_at_utc": datetime.now(UTC).isoformat(),
         }
 
     def _apply_actual_setpoints(self, setpoints: dict[str, float]) -> None:
@@ -2544,9 +2744,9 @@ class RecipeRunner:
                 (axis == "level" and mode == "current") or mode == axis
             ):
                 field = "source_level_si"
-            elif axis == "compliance_voltage" and mode == "current":
-                field = "compliance_si"
-            elif axis == "compliance_current" and mode == "voltage":
+            elif (axis == "compliance_voltage" and mode == "current") or (
+                axis == "compliance_current" and mode == "voltage"
+            ):
                 field = "compliance_si"
             elif axis == "settling_time":
                 field = "settle_time_s"
@@ -2696,7 +2896,7 @@ class RecipeRunner:
             self._emit("dry_run_output_guard_started", {"device": name})
             try:
                 self._shutdown_owned_device(name, device)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - attempt dry-run OFF guard on every owned device
                 errors.append(f"{name}: {exc}")
                 self._emit_after_fault(
                     "dry_run_output_guard_error",
@@ -2773,7 +2973,7 @@ class RecipeRunner:
 
     def _emit(self, name: str, data: dict[str, object], *, notify=True) -> dict[str, object]:
         payload = {
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "timestamp_utc": datetime.now(UTC).isoformat(),
             **data,
             "correlation_id": self._correlation_id,
             "cancellation_token_id": self._correlation_id,
@@ -2788,7 +2988,7 @@ class RecipeRunner:
                 "run_fault",
                 "shutdown_error",
             }
-            else "info"
+            else "warning" if name == "sweep_compliance_limited" else "info"
         )
         self._writer.append_event(name, payload, severity=severity)
         if notify:
@@ -2800,8 +3000,8 @@ class RecipeRunner:
 
         try:
             self._emit(name, data)
-        except Exception:
+        except Exception:  # storage/callback fault must never halt emergency shutdown
             # A storage failure is itself already the originating fault.  The
             # hardware must still receive every emergency-off command.
-            pass
+            logger.debug("Post-fault event %r could not be emitted.", name, exc_info=True)
 

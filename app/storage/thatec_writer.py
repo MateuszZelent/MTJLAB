@@ -45,6 +45,7 @@ class ThatecHdf5Writer:
         expected_points: int | None = None,
         recipe_source: str = "",
         settings_source: str = "",
+        allow_skipped_checkpoints: bool = False,
     ) -> None:
         import h5py
         import numpy as np
@@ -53,7 +54,8 @@ class ThatecHdf5Writer:
         self._np = np
         self._text = h5py.string_dtype("utf-8")
         self._schema = ThatecSchemaMapper.from_recipe_source(
-            recipe_source, expected_points=expected_points
+            recipe_source, expected_points=expected_points,
+            allow_skipped_checkpoints=allow_skipped_checkpoints,
         )
         self._expected_points = self._schema.point_count
         self._dynamic_checkpoint_axis = (
@@ -144,6 +146,8 @@ class ThatecHdf5Writer:
         self._append_log("Process started.")
 
         self._definition = file.create_group("scan_definition")
+        if allow_skipped_checkpoints:
+            self._definition.attrs["allow_skipped_checkpoints"] = True
         for index, axis in enumerate(self._schema.axes):
             self._create_axis_row(index, axis)
         self._tree_view = self._definition.create_dataset(
@@ -170,7 +174,8 @@ class ThatecHdf5Writer:
         self._np = np
         self._text = h5py.string_dtype("utf-8")
         self._schema = ThatecSchemaMapper.from_recipe_source(
-            recipe_source, expected_points=expected_points
+            recipe_source, expected_points=expected_points,
+            allow_skipped_checkpoints=bool(file["scan_definition"].attrs.get("allow_skipped_checkpoints", False)),
         )
         self._expected_points = self._schema.point_count
         self._dynamic_checkpoint_axis = (

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +17,7 @@ from qfluentwidgets import (
     CardWidget,
     CheckBox,
     ComboBox,
+    DropDownPushButton,
     IndeterminateProgressBar,
     LineEdit,
     PrimaryPushButton,
@@ -76,6 +77,14 @@ class _RecordingInputError(ValueError):
     def __init__(self, message, editor):
         super().__init__(message)
         self.editor = editor
+
+
+class _MenuAction(Action):
+    """Fluent menu action supporting programmatic .click() activation."""
+
+    def click(self) -> None:
+        if self.isEnabled():
+            self.trigger()
 
 
 class SpectrumCorrectionWorkspace(QWidget):
@@ -159,7 +168,17 @@ class SpectrumCorrectionWorkspace(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(8)
-        self.recording_status = CardWidget(self)
+        self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.workspace_splitter.setChildrenCollapsible(False)
+        root.addWidget(self.workspace_splitter, 1)
+
+        left_pane = QWidget(self.workspace_splitter)
+        left_pane.setMinimumWidth(330)
+        left_layout = QVBoxLayout(left_pane)
+        left_layout.setContentsMargins(0, 0, 4, 0)
+        left_layout.setSpacing(8)
+
+        self.recording_status = CardWidget(left_pane)
         self.recording_status.setObjectName("spectrumRecordingStatus")
         self.recording_status.setAccessibleName("Spectrum recording status")
         status_layout = QVBoxLayout(self.recording_status)
@@ -193,10 +212,11 @@ class SpectrumCorrectionWorkspace(QWidget):
         self.confirm_interleaved_state.setAccessibleName("Confirm a stable state and acquire the next interleaved block")
         self.confirm_interleaved_state.hide()
         status_layout.addWidget(self.confirm_interleaved_state)
-        root.addWidget(self.recording_status)
-        controls = CardWidget(self)
+        left_layout.addWidget(self.recording_status)
+
+        controls = CardWidget(left_pane)
         grid = QGridLayout(controls)
-        grid.setContentsMargins(12, 10, 12, 10)
+        grid.setContentsMargins(12, 10, 16, 10)
         grid.setSpacing(8)
         grid.addWidget(StrongBodyLabel("Quantitative background correction", controls), 0, 0, 1, 2)
         self.reference_state = LineEdit(controls)
@@ -225,12 +245,12 @@ class SpectrumCorrectionWorkspace(QWidget):
         grid.addWidget(self.mode, 4, 1)
         self.acquire_reference = PrimaryPushButton("Record background…", controls)
         self.acquire_signal = PushButton("Record corrected spectra…", controls)
-        self.stop = PushButton("Stop acquisition", controls)
+        self.stop = PushButton("Stop acquisition", self)
         self.stop.setAccessibleName("Stop quantitative spectrum acquisition")
-        self.freeze = CheckBox("Freeze displayed frame", controls)
+        self.freeze = CheckBox("Freeze displayed frame", self)
         self.load_profile = PushButton("Load background profile…", controls)
         self.save_profile = PushButton("Export background profile…", controls)
-        self.finalize_button = SplitPushButton("Finalize between two references…", controls)
+        self.finalize_button = SplitPushButton("Finalize between two references…", self)
         self.finalize_button.setAccessibleName("Spectrum finalization")
         self.finalize_button.dropButton.setAccessibleName("Choose finalization workflow")
         self.finalize_button.setToolTip("Finalize a whole archive, or use the arrow to choose profiles and SIGNAL points.")
@@ -248,15 +268,15 @@ class SpectrumCorrectionWorkspace(QWidget):
         self.resume_batch_action.triggered.connect(self._open_finalization_resume)
         finalization_menu.addAction(self.resume_batch_action)
         self.finalize_button.setFlyout(finalization_menu)
-        grid.addWidget(self.acquire_reference, 5, 0)
-        grid.addWidget(self.acquire_signal, 5, 1)
+        grid.addWidget(self.acquire_reference, 5, 0, 1, 2)
+        grid.addWidget(self.acquire_signal, 6, 0, 1, 2)
         self.acquire_interleaved = PushButton("Record alternating REF / SIGNAL…", controls)
         self.acquire_interleaved.setAccessibleName("Record alternating background and signal blocks")
-        grid.addWidget(self.acquire_interleaved, 6, 0, 1, 2)
+        grid.addWidget(self.acquire_interleaved, 7, 0, 1, 2)
         self.signal_state = LineEdit(controls)
         self.signal_state.setPlaceholderText("Describe the SIGNAL state; keep the same RF input path")
         self.signal_state.setAccessibleName("Interleaved SIGNAL state description")
-        grid.addWidget(self.signal_state, 7, 0, 1, 2)
+        grid.addWidget(self.signal_state, 8, 0, 1, 2)
         policy = settings.anritsu.spectrum_correction.reference_policy
         self.interleaved_ref_duration = LineEdit(controls)
         self.interleaved_ref_duration.setText(policy.block_duration)
@@ -275,12 +295,12 @@ class SpectrumCorrectionWorkspace(QWidget):
             "More REF sweeps give a better estimated mean but delay the next SIGNAL block. "
             "Two sweeps are a protocol minimum, not a noise qualification."
         )
-        grid.addWidget(BodyLabel("Alternating REF duration", controls), 8, 0)
-        grid.addWidget(self.interleaved_ref_duration, 8, 1)
-        grid.addWidget(BodyLabel("Alternating SIGNAL duration", controls), 9, 0)
-        grid.addWidget(self.interleaved_signal_duration, 9, 1)
-        grid.addWidget(BodyLabel("Minimum REF sweeps", controls), 10, 0)
-        grid.addWidget(self.interleaved_minimum_sweeps, 10, 1)
+        grid.addWidget(BodyLabel("Alternating REF duration", controls), 9, 0)
+        grid.addWidget(self.interleaved_ref_duration, 9, 1)
+        grid.addWidget(BodyLabel("Alternating SIGNAL duration", controls), 10, 0)
+        grid.addWidget(self.interleaved_signal_duration, 10, 1)
+        grid.addWidget(BodyLabel("Minimum REF sweeps", controls), 11, 0)
+        grid.addWidget(self.interleaved_minimum_sweeps, 11, 1)
         self.new_signal_segment = PushButton("New SIGNAL segment", controls)
         self.new_signal_segment.setAccessibleName("Restart the current SIGNAL average")
         self.new_signal_segment.setToolTip(
@@ -288,10 +308,10 @@ class SpectrumCorrectionWorkspace(QWidget):
         )
         self.segment_status = CaptionLabel("New segments restart averaging; they do not change the instruments.", controls)
         self.segment_status.setWordWrap(True)
-        grid.addWidget(self.new_signal_segment, 11, 0)
-        grid.addWidget(self.segment_status, 11, 1)
-        grid.addWidget(self.load_profile, 12, 0)
-        grid.addWidget(self.save_profile, 12, 1)
+        grid.addWidget(self.new_signal_segment, 12, 0, 1, 2)
+        grid.addWidget(self.segment_status, 13, 0, 1, 2)
+        grid.addWidget(self.load_profile, 14, 0, 1, 2)
+        grid.addWidget(self.save_profile, 15, 0, 1, 2)
         self.interference_mode = ComboBox(controls)
         self.interference_mode.setAccessibleName("Background correction model for the next recording")
         self.interference_mode.addItem("Mean reference subtraction", userData=None)
@@ -300,53 +320,78 @@ class SpectrumCorrectionWorkspace(QWidget):
         self.clear_interference = PushButton("Use mean background", controls)
         self.interference_status = CaptionLabel("Background processing: mean reference subtraction.", controls)
         self.interference_status.setWordWrap(True)
-        grid.addWidget(BodyLabel("Background model", controls), 13, 0)
-        grid.addWidget(self.interference_mode, 13, 1)
-        grid.addWidget(self.load_interference, 14, 0)
-        grid.addWidget(self.clear_interference, 14, 1)
-        grid.addWidget(self.interference_status, 15, 0, 1, 2)
-        self.analyze_resonance = PushButton("Analyze recorded resonance…", controls)
-        grid.addWidget(self.analyze_resonance, 16, 0, 1, 2)
-        self.compare_recorded = PushButton("Compare recorded REF / SIGNAL…", controls)
-        grid.addWidget(self.compare_recorded, 17, 0, 1, 2)
-        self.train_model = PushButton("Prepare model from recorded REF…", controls)
-        grid.addWidget(self.train_model, 18, 0, 1, 2)
-        self.validate_model = PushButton("Validate model on separate REF…", controls)
-        grid.addWidget(self.validate_model, 19, 0, 1, 2)
-        self.diagnose_reference = PushButton("Inspect recorded REF stability…", controls)
-        grid.addWidget(self.diagnose_reference, 20, 0, 1, 2)
+        grid.addWidget(BodyLabel("Background model", controls), 16, 0)
+        grid.addWidget(self.interference_mode, 16, 1)
+        grid.addWidget(self.load_interference, 17, 0, 1, 2)
+        grid.addWidget(self.clear_interference, 18, 0, 1, 2)
+        grid.addWidget(self.interference_status, 19, 0, 1, 2)
+
+        self.offline_analysis_button = DropDownPushButton("Offline analysis…", controls)
+        self.offline_analysis_button.setAccessibleName("Offline analysis tools")
+        self.offline_analysis_button.setToolTip(
+            "Analyze recorded resonances, compare REF/SIGNAL blocks, or prepare, validate, and inspect background models."
+        )
+        offline_menu = RoundMenu(parent=self.offline_analysis_button)
+        self.analyze_resonance = _MenuAction("Analyze recorded resonance…", self)
+        self.compare_recorded = _MenuAction("Compare recorded REF / SIGNAL…", self)
+        self.train_model = _MenuAction("Prepare model from recorded REF…", self)
+        self.validate_model = _MenuAction("Validate model on separate REF…", self)
+        self.diagnose_reference = _MenuAction("Inspect recorded REF stability…", self)
+        for action in (
+            self.analyze_resonance,
+            self.compare_recorded,
+            self.train_model,
+            self.validate_model,
+            self.diagnose_reference,
+        ):
+            offline_menu.addAction(action)
+        self.offline_analysis_button.setMenu(offline_menu)
+        grid.addWidget(self.offline_analysis_button, 20, 0, 1, 2)
         grid.setColumnStretch(1, 1)
-        self.controls_scroll = ScrollArea(self)
+        self.controls_scroll = ScrollArea(left_pane)
         self.controls_scroll.setWidgetResizable(True)
         self.controls_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.controls_scroll.setWidget(controls)
-        self.controls_scroll.setMinimumHeight(120)
-        root.addWidget(self.controls_scroll)
+        self.controls_scroll.enableTransparentBackground()
+        left_layout.addWidget(self.controls_scroll, 1)
+
+        right_pane = QWidget(self.workspace_splitter)
+        right_pane.setMinimumWidth(400)
+        right_layout = QVBoxLayout(right_pane)
+        right_layout.setContentsMargins(4, 0, 0, 0)
+        right_layout.setSpacing(8)
         actions = QHBoxLayout()
         actions.addWidget(self.stop)
         actions.addWidget(self.freeze)
         actions.addStretch(1)
         actions.addWidget(self.finalize_button)
-        root.addLayout(actions)
-        plots = QSplitter(Qt.Orientation.Vertical, self)
+        right_layout.addLayout(actions)
+        plots = QSplitter(Qt.Orientation.Vertical, right_pane)
         self.raw_plot = SpectrumPlotWidget(plots, compact_toolbar=True)
         self.raw_plot.set_labels(y="Raw power", y_unit="dBm")
         self.raw_plot.set_title("Raw and reference")
-        self.raw_plot.setMinimumHeight(150)
+        self.raw_plot.setMinimumHeight(180)
         self.corrected_plot = SpectrumPlotWidget(plots, compact_toolbar=True)
         self.corrected_plot.set_labels(y="Signed residual", y_unit="W")
         self.corrected_plot.set_title("Reference correction — provisional")
-        self.corrected_plot.setMinimumHeight(180)
+        self.corrected_plot.setMinimumHeight(200)
         plots.addWidget(self.raw_plot)
         plots.addWidget(self.corrected_plot)
         plots.setChildrenCollapsible(False)
         plots.setStretchFactor(0, 1)
         plots.setStretchFactor(1, 2)
-        root.addWidget(plots, 1)
-        self.frame_label = CaptionLabel("No displayed spectrum.", self)
+        right_layout.addWidget(plots, 1)
+        self.frame_label = CaptionLabel("No displayed spectrum.", right_pane)
         self.frame_label.setWordWrap(True)
-        root.addWidget(self.frame_label)
+        right_layout.addWidget(self.frame_label)
+
+        self.workspace_splitter.addWidget(left_pane)
+        self.workspace_splitter.addWidget(right_pane)
+        self.workspace_splitter.setStretchFactor(0, 0)
+        self.workspace_splitter.setStretchFactor(1, 1)
+        self.workspace_splitter.setSizes([400, 580])
+
         self.acquire_reference.clicked.connect(lambda: self._start_dialog("reference"))
         self.background_averaging.backend.currentIndexChanged.connect(lambda: self.set_available(self._allowed))
         self.acquire_signal.clicked.connect(lambda: self._start_dialog("signal"))
@@ -358,28 +403,35 @@ class SpectrumCorrectionWorkspace(QWidget):
         self.load_profile.clicked.connect(self._load_profile)
         self.save_profile.clicked.connect(self._save_profile)
         self.finalize_button.clicked.connect(self._finalize_dialog)
-        self.analyze_resonance.clicked.connect(self._open_resonance_analysis)
-        self.compare_recorded.clicked.connect(self._open_difference_analysis)
-        self.train_model.clicked.connect(self._open_model_training)
-        self.validate_model.clicked.connect(self._open_model_validation)
-        self.diagnose_reference.clicked.connect(self._open_reference_diagnostics)
+        self.analyze_resonance.triggered.connect(self._open_resonance_analysis)
+        self.compare_recorded.triggered.connect(self._open_difference_analysis)
+        self.train_model.triggered.connect(self._open_model_training)
+        self.validate_model.triggered.connect(self._open_model_validation)
+        self.diagnose_reference.triggered.connect(self._open_reference_diagnostics)
         self.load_interference.clicked.connect(self._load_interference)
         self.clear_interference.clicked.connect(lambda: self.interference_mode.setCurrentIndex(0))
         self.interference_mode.currentIndexChanged.connect(self._interference_selection_changed)
-        self.freeze.toggled.connect(lambda _value: self._render())
+        self.freeze.toggled.connect(self._freeze_toggled)
         self._render_timer = QTimer(self)
         self._render_timer.setInterval(round(1000 * parse_quantity(
             settings.anritsu.spectrum_correction.render_interval, DIMENSION_TIME,
         ).si_value))
         self._render_timer.timeout.connect(self._tick)
-        self._render_timer.start()
         self.set_available(False)
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        # Keep both data views useful in a short/narrow page. All controls
-        # remain keyboard-accessible through the Fluent scroll viewport.
-        self.controls_scroll.setMaximumHeight(max(120, min(420, round(self.height() * 0.40))))
+    def _sync_render_timer(self) -> None:
+        should_run = self._running or (
+            self._dirty_view and not self.freeze.isChecked() and self.isVisible()
+        )
+        if should_run:
+            if not self._render_timer.isActive():
+                self._render_timer.start()
+        elif self._render_timer.isActive():
+            self._render_timer.stop()
+
+    def _freeze_toggled(self, _value: bool) -> None:
+        self._render()
+        self._sync_render_timer()
 
     @property
     def running(self) -> bool:
@@ -438,11 +490,13 @@ class SpectrumCorrectionWorkspace(QWidget):
         self.load_profile.setEnabled(not self._running and not self._profile_io_busy)
         self.save_profile.setEnabled(not self._running and not self._profile_io_busy and self._profile is not None)
         self.finalize_button.setEnabled(not self._running and not self._profile_io_busy)
-        self.analyze_resonance.setEnabled(not self._running and not self._profile_io_busy)
-        self.compare_recorded.setEnabled(not self._running and not self._profile_io_busy)
-        self.train_model.setEnabled(not self._running and not self._profile_io_busy)
-        self.validate_model.setEnabled(not self._running and not self._profile_io_busy)
-        self.diagnose_reference.setEnabled(not self._running and not self._profile_io_busy)
+        offline_ready = not self._running and not self._profile_io_busy
+        self.offline_analysis_button.setEnabled(offline_ready)
+        self.analyze_resonance.setEnabled(offline_ready)
+        self.compare_recorded.setEnabled(offline_ready)
+        self.train_model.setEnabled(offline_ready)
+        self.validate_model.setEnabled(offline_ready)
+        self.diagnose_reference.setEnabled(offline_ready)
         idle = not self._running and not self._profile_io_busy
         self.load_interference.setEnabled(idle and self._profile is not None and self._context is not None
                                           and self._profile.averaging_source == "pc")
@@ -507,7 +561,7 @@ class SpectrumCorrectionWorkspace(QWidget):
             return
         self._start_feedback.clear_message()
         directory = getattr(self, "_sample_measurement_directory", None) or Path(str(self._settings.storage.get("output_directory", "./measurements")))
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S_%fZ")
         destination, _filter = StationFileDialog.getSaveFileName(
             self, "Save instrument background" if instrument_target else "Record every raw spectrum",
             str(directory / f"spectrum_{kind}_{stamp}.h5"),
@@ -597,6 +651,7 @@ class SpectrumCorrectionWorkspace(QWidget):
         self._recording_failed = False
         self._committed_count = 0
         self._last_rejection_message = ""
+        self._sync_render_timer()
         self.recording_title.setText(
             "Starting instrument background…" if instrument_target is not None else
             "Starting background recording…" if kind == "reference" else "Starting corrected spectrum recording…"
@@ -737,6 +792,7 @@ class SpectrumCorrectionWorkspace(QWidget):
         self._message(detail)
         self.busy_changed.emit(False)
         self.set_available(self._allowed)
+        self._sync_render_timer()
         self.recording_finished.emit("reference", succeeded)
 
     def _start_processor(self, first_trace):
@@ -924,6 +980,7 @@ class SpectrumCorrectionWorkspace(QWidget):
             self.archive_label.setText(f"Archive closed: {result}" if result is not None
                                        else f"No archive was opened: {self._archive_path}")
             self._dirty_view = True
+            self._sync_render_timer()
             self.recording_finished.emit(self._kind, succeeded)
         elif operation == "import_profile":
             self._profile_io_busy = False
@@ -940,6 +997,7 @@ class SpectrumCorrectionWorkspace(QWidget):
             self._reset_plot_on_render = True
             self.reference_state.setText(self._profile.reference_state)
             self._dirty_view = True
+            self._sync_render_timer()
             self.set_available(self._allowed)
             self._message(
                 "Instrument mean loaded. Empirical variance unavailable. Analyzer settings will be checked before acquisition."
@@ -992,11 +1050,12 @@ class SpectrumCorrectionWorkspace(QWidget):
             self._final_profiles = tuple(by_id[identity][1] for identity, _weight in block.result.profile_weights)
             self._latest_raw = SpectrumTrace(
                 tuple(self._context.frequencies_hz), tuple(10 * np.log10(block.raw_mean_w) + 30),
-                datetime.fromtimestamp(block.result.completed_at_s, timezone.utc), "RAW_BLOCK_MEAN",
+                datetime.fromtimestamp(block.result.completed_at_s, UTC), "RAW_BLOCK_MEAN",
             )
             self._latest_result = block.result
             self._result_archive_path = destination
             self._dirty_view = self._reset_plot_on_render = True
+            self._sync_render_timer()
             self.set_available(self._allowed)
             self.archive_label.setText(f"Finalized artifact: {destination}")
             self._message("Final block saved. Reference interpolation remains unqualified; no confidence interval.")
@@ -1199,6 +1258,7 @@ class SpectrumCorrectionWorkspace(QWidget):
             self._running = self._stopping = False
         self.busy_changed.emit(self._running)
         self.set_available(self._allowed)
+        self._sync_render_timer()
         self.recording_finished.emit(self._kind, False)
 
     def _receive_committed_view(self, view: CorrectionViewSnapshot):
@@ -1221,6 +1281,7 @@ class SpectrumCorrectionWorkspace(QWidget):
         # bounded preview refresh rate; freeze still defers drawing.
         if first_corrected_frame:
             self._render()
+        self._sync_render_timer()
 
     def live_performance_text(self):
         if not self._live_timings_s:
@@ -1233,6 +1294,11 @@ class SpectrumCorrectionWorkspace(QWidget):
         super().showEvent(event)
         self._dirty_view = True
         self._render()
+        self._sync_render_timer()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._sync_render_timer()
 
     def _tick(self):
         if (self._running and not self._stopping and self._kind == "signal" and self._context is not None
@@ -1242,6 +1308,8 @@ class SpectrumCorrectionWorkspace(QWidget):
             except BufferError:
                 pass  # Preview request can wait; raw ingestion is never dropped.
         self._render()
+        if not self._running and not self._dirty_view:
+            self._render_timer.stop()
 
     def _render(self):
         if self.freeze.isChecked() or not self._dirty_view:
@@ -1466,7 +1534,7 @@ class SpectrumCorrectionWorkspace(QWidget):
         dialog.show()
 
     def _save_profile(self):
-        if self._profile is None or self._context is None:
+        if self._running or self._profile_io_busy or self._profile is None or self._context is None:
             return
         path, _filter = StationFileDialog.getSaveFileName(self, "Export background profile", "background.h5", "HDF5 (*.h5)")
         if path:
@@ -1476,7 +1544,10 @@ class SpectrumCorrectionWorkspace(QWidget):
             self.recording_activity.start()
             self._message(f"Saving background profile: {path}")
             self.set_available(self._allowed)
-            self._cpu.save_profile(self._context, self._profile, Path(path))
+            try:
+                self._cpu.save_profile(self._context, self._profile, Path(path))
+            except (ValueError, BufferError) as exc:
+                self._failed("export_profile", str(exc))
 
     def _open_resonance_analysis(self):
         if self._running or self._profile_io_busy:

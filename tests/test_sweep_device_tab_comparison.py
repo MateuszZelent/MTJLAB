@@ -134,7 +134,7 @@ def test_main_action_opens_complete_read_only_overview_of_actual_recipe(app, tmp
         channel=channel, source_range="1 A" if channel == "A" else "100 mA"))
     page._apply_builder_source(source, "Test")
     requested_runs = []
-    page.run_requested.connect(lambda *args: requested_runs.append(args))
+    page.execution_preview_requested.connect(lambda *args: requested_runs.append(args))
     page.resize(1360, 900)
     page.show()
     app.processEvents()

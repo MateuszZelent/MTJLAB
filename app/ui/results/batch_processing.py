@@ -29,7 +29,7 @@ from .analysis_export import (
     write_analysis_manifest,
 )
 from .heatmap_cache import HeatmapSourceCache
-from .heatmap_coordinates import HeatmapCoordinates, HeatmapRequest, _selected_checkpoints
+from .heatmap_coordinates import HeatmapCoordinates, HeatmapRequest, _selected_checkpoints, _selection_range
 from .map_processing import MapProcessing
 from .processing import (
     ResultProcessing,
@@ -109,6 +109,22 @@ def measurement_title(parameters):
                       for _, label, unit, low, high in parameters)
 
 
+def heatmap_title(coordinates, request, parameters):
+    axes = {request.x_id, request.y_id}
+    fixed = [parameter for parameter in parameters
+             if parameter[0] not in axes and parameter[3] == parameter[4]]
+    frequency = request.filters.get("frequency")
+    if "frequency" not in axes and frequency is not None:
+        bounds = _selection_range(frequency)
+        if bounds.minimum == bounds.maximum:
+            fixed.append(("frequency", "Frequency", "Hz", bounds.minimum, bounds.maximum))
+    if fixed:
+        return measurement_title(fixed)
+    x = coordinates.dimension(request.x_id).label
+    y = coordinates.dimension(request.y_id).label
+    return f"{y} × {x}"
+
+
 def plan_heatmaps(coordinates, request, points=()):
     """Group the archive in recorded order, including repeated visits."""
     axes = {request.x_id, request.y_id}
@@ -123,8 +139,9 @@ def plan_heatmaps(coordinates, request, points=()):
     for values, checkpoints in groups.items():
         parameters = measurement_parameters(coordinates, checkpoints, points_by_index)
         filters = {**carry, **dict(zip((axis.id for axis in fixed), values, strict=True))}
-        items.append(BatchItem(measurement_title(parameters), tuple(checkpoints),
-                               HeatmapRequest(request.x_id, request.y_id, filters), parameters))
+        plane = HeatmapRequest(request.x_id, request.y_id, filters)
+        items.append(BatchItem(heatmap_title(coordinates, plane, parameters),
+                               tuple(checkpoints), plane, parameters))
     return tuple(items)
 
 

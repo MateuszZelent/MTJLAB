@@ -150,11 +150,13 @@ def test_raw_only_checkpoint_reports_matching_reference_difference_for_preview(t
     preview = next(payload for name, payload in events if name == "spectrum_preview")
     assert stored.processed_values is None
     if mismatch is None:
+        assert stored.reference_index == baseline.index
         np.testing.assert_allclose(
             preview["raw_minus_reference_db"],
             np.asarray(stored.powers_dbm) - baseline.powers_dbm,
         )
     else:
+        assert stored.reference_index is None
         assert preview["raw_minus_reference_db"] is None
 
 

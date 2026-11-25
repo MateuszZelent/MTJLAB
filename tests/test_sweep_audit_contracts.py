@@ -11,9 +11,10 @@ import h5py
 import pytest
 
 from app.bootstrap import StationComposition
+from app.devices.keithley_2600.adapter import KeithleyAdapter
 from app.devices.registry import built_in_device_registry
-from app.devices.simulators import simulated_station_settings
-from app.domain.errors import ConfigurationError, ExecutionError, SafetyViolation
+from app.devices.simulators import KeithleySimulator, simulated_station_settings
+from app.domain.errors import ConfigurationError, DeviceError, ExecutionError, SafetyViolation
 from app.domain.models import MeasurementPoint
 from app.engine.compiler import RecipeCompiler
 from app.engine.runner import RecipeRunner
@@ -21,7 +22,7 @@ from app.recipes import parse_recipe_text
 from app.recipes.semantic_tree import normalize_recipe_tree
 from app.recipes.sweep_points import generate_sweep_points
 from app.settings.models import StationSettings
-from app.storage.hdf5_reader import iter_recipe_spectrum_sweeps
+from app.storage.hdf5_reader import Hdf5RunReader, iter_recipe_spectrum_sweeps
 from app.storage.hdf5_writer import Hdf5RunWriter
 from app.storage.thatec_validator import ThatecCompatibilityValidator
 from tests.helpers import loaded_settings
@@ -56,6 +57,107 @@ def compile_source(settings, children):
     return RecipeCompiler(settings).compile(parse_recipe_text(
         "schema_version: 1\nname: audit-probe\nroot:\n  id: root\n  type: sequence\n  children:\n" + children
     ))
+
+
+KEITHLEY_RAMP = """    - {id: source, type: configure_keithley, channel: A, mode: current, level: '0 mA', compliance: '20 mV', source_range: '10 mA'}
+    - {id: enable, type: set_keithley_output, channel: A, enabled: true}
+    - {id: approach, type: ramp_keithley_current, channel: A, level: '-0.2 mA', step: '100 uA', settle_time: '2 ms'}
+    - {id: trace, type: acquire_spectrum, store_source_spectra: false}
+    - {id: return, type: ramp_keithley_current, channel: A, level: '0 mA', step: '100 uA', settle_time: '2 ms'}
+    - {id: disable, type: set_keithley_output, channel: A, enabled: false}
+"""
+
+
+def test_keithley_current_ramp_is_one_action_and_spectrum_has_ramped_setpoint(tmp_path, monkeypatch):
+    settings = audit_settings(tmp_path)
+    plan = compile_source(settings, KEITHLEY_RAMP)
+    assert len(plan.actions) == 6 and plan.total_spectra == plan.total_points == 1
+    calls = []
+    ramp_to_level = KeithleyAdapter.ramp_to_level
+
+    def record_ramp(adapter, request, cancellation_token=None):
+        assert cancellation_token is not None
+        result = ramp_to_level(adapter, request, cancellation_token)
+        calls.append((result, request))
+        return result
+
+    monkeypatch.setattr(KeithleyAdapter, "ramp_to_level", record_ramp)
+    path = tmp_path / "ramped-point.h5"
+    result, _ = execute(settings, plan, path, monkeypatch)
+    assert result.error is None, result.error
+    assert result.stored_points == 1
+    assert [ramp.target_si for ramp, _ in calls] == pytest.approx([-0.0002, 0.0])
+    for ramp, request in calls:
+        assert ramp.channel == "A" and ramp.final_measurement.output_enabled
+        assert request.settle_time_s == pytest.approx(0.002)
+        assert all(abs(level - previous) <= 0.0001 + 1e-12 for previous, level in zip(
+            (ramp.start_si, *ramp.levels_si), ramp.levels_si,
+        ))
+    point, = Hdf5RunReader.points(path)
+    assert point.setpoints["keithley.A.current"] == pytest.approx(-0.0002)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_keithley_current_ramp_failure_never_retries_or_stores_a_spectrum(tmp_path, monkeypatch, cancel):
+    settings = audit_settings(tmp_path)
+    plan = compile_source(settings, KEITHLEY_RAMP)
+    ramp_attempts = []
+    confirmed_shutdowns = []
+    emergency_off = KeithleyAdapter.emergency_off
+
+    def fault(adapter, request, cancellation_token=None):
+        ramp_attempts.append(request)
+        assert adapter.read_output_states()["A"]
+        if cancel:
+            cancellation_token.set()
+        raise DeviceError("Injected ramp fault")
+
+    def capture_shutdown(adapter):
+        result = emergency_off(adapter)
+        if result:
+            confirmed_shutdowns.append(adapter.read_output_states())
+        return result
+
+    monkeypatch.setattr(KeithleyAdapter, "ramp_to_level", fault)
+    monkeypatch.setattr(KeithleyAdapter, "emergency_off", capture_shutdown)
+    result, _ = execute(settings, plan, tmp_path / "failed-ramp.h5", monkeypatch)
+    assert result.error and result.stored_points == 0
+    assert len(ramp_attempts) == 1
+    assert confirmed_shutdowns and all(states == {"A": False, "B": False} for states in confirmed_shutdowns)
+
+
+@pytest.mark.parametrize(("replacement", "message"), [
+    (("enabled: true", "enabled: false"), "OUTPUT ON"),
+    (("step: '100 uA'", "step: '100 mA'"), "ramp step"),
+    (("level: '-0.2 mA'", "level: '-20 mA'"), "outside"),
+    (("settle_time: '2 ms'", "settle_time: '2 s', deadline: '1 s'"), "deadline"),
+])
+def test_keithley_current_ramp_preflight_rejects_invalid_transitions(tmp_path, replacement, message):
+    with pytest.raises((ConfigurationError, SafetyViolation), match=message):
+        compile_source(audit_settings(tmp_path), KEITHLEY_RAMP.replace(*replacement, 1))
+
+
+def test_keithley_sweep_limits_physical_transitions_without_extra_checkpoints(tmp_path, monkeypatch):
+    raw = audit_settings(tmp_path).model_dump(mode="python")
+    raw["devices"]["keithley"]["safety"]["channels"]["A"]["lab_limits"]["ramp_current_step_max"] = "100 uA"
+    settings = StationSettings.model_validate(raw)
+    plan = compile_source(settings, """    - {id: a-config, type: configure_keithley, channel: A, mode: current, level: '-102 uA', compliance: '20 mV', source_range: '10 mA'}
+    - {id: a-on, type: set_keithley_output, channel: A, enabled: true}
+    - id: scan
+      type: sweep
+      target: keithley.A.current
+      respect_ramp_step: true
+      segments: [{start: '-102 uA', stop: '102 uA', points: 3}]
+      children: [{id: record, type: checkpoint}]
+""")
+    updates = [a.payload["level_si"] for a in plan.actions if a.kind == "update_keithley_level"]
+    assert updates == pytest.approx([-102e-6, -51e-6, 0, 51e-6, 102e-6])
+    checkpoints = [a.setpoints_si["keithley.A.current"] for a in plan.actions if a.kind == "checkpoint"]
+    assert checkpoints == pytest.approx([-102e-6, 0, 102e-6])
+    assert plan.total_points == 3
+    result, _ = execute(settings, plan, tmp_path / "bounded-transition.h5", monkeypatch)
+    assert result.error is None
+    assert result.stored_points == 3
 
 
 SETUP = """    - {id: analyzer, type: configure_anritsu, start_frequency: '1 MHz', stop_frequency: '2 MHz', reference_level: '0 dBm', points: 101}
@@ -96,14 +198,18 @@ AXES = """    - id: moke-axis
 """
 
 
-def execute(settings, plan, path, monkeypatch):
+def execute(settings, plan, path, monkeypatch, *, keithley_resistance_ohm=None):
     composition = StationComposition(settings, simulation=True)
     devices = {name: composition.create_adapter(name) for name in ("rigol", "keithley", "anritsu", "moke_box")}
     for adapter in devices.values():
         adapter.connect()
+    if keithley_resistance_ohm is not None:
+        session = devices["keithley"]._require_session()
+        session.resistance_ohm = dict.fromkeys(("smua", "smub"), keithley_resistance_ohm)
     writer = Hdf5RunWriter(path, recipe_source=plan.recipe_source,
         settings_source=settings.model_dump_json(), plan_hash=plan.sha256,
         expected_points=plan.total_points, device_idn={name: adapter.identity.idn for name, adapter in devices.items()},
+        allow_skipped_checkpoints=plan.may_skip_compliance_points,
         device_capabilities={name: adapter.capabilities for name, adapter in devices.items()},
         simulation_metadata={"enabled": True}, csv_summary_path=path.with_suffix(".csv"))
     runner = RecipeRunner(rigol=devices["rigol"], keithley=devices["keithley"],
@@ -119,6 +225,132 @@ def execute(settings, plan, path, monkeypatch):
     return result, waits
 
 
+@pytest.mark.parametrize("polarity", [1, -1])
+@pytest.mark.parametrize("policy", ["warn_clamp", "stop", "measured_trip"])
+def test_current_sweep_compliance_skips_outward_points_and_takes_bounded_return(
+    tmp_path, monkeypatch, polarity, policy,
+):
+    raw = audit_settings(tmp_path).model_dump(mode="python")
+    raw["devices"]["keithley"]["safety"].update(
+        compliance_policy="stop" if policy == "stop" else "warn_clamp",
+        stop_on_compliance=policy == "stop",
+    )
+    raw["devices"]["keithley"]["safety"]["channels"]["A"]["lab_limits"]["ramp_current_step_max"] = "100 uA"
+    settings = StationSettings.model_validate(raw)
+    commands = []
+    original_write = KeithleySimulator._write
+
+    def record_write(simulator, command):
+        simulator.resistance_ohm["smua"] = 100.0
+        if simulator.output["smua"] and command.startswith("smua.source.leveli = "):
+            commands.append(float(command.rsplit(" ", 1)[-1]))
+        return original_write(simulator, command)
+
+    monkeypatch.setattr(KeithleySimulator, "_write", record_write)
+    original_measure = KeithleySimulator._measured_iv
+
+    def trip_measurement(simulator, smu):
+        voltage, current = original_measure(simulator, smu)
+        if smu == "smua" and abs(simulator.level[smu]) >= 0.0002:
+            current = polarity * 0.004
+        return voltage, current
+
+    if policy == "measured_trip":
+        monkeypatch.setattr(KeithleySimulator, "_measured_iv", trip_measurement)
+    plan = compile_source(settings, f"""    - {{id: cfg, type: configure_keithley, channel: A, mode: current, level: '0 uA', compliance: '20 mV', source_range: '10 mA'}}
+    - {{id: on, type: set_keithley_output, channel: A, enabled: true}}
+    - id: scan
+      type: sweep
+      target: keithley.A.current
+      respect_ramp_step: true
+      segments:
+      - {{value: '0 uA'}}
+      - {{value: '{100 * polarity} uA'}}
+      - {{value: '{300 * polarity} uA'}}
+      - {{value: '{500 * polarity} uA'}}
+      - {{value: '{100 * polarity} uA'}}
+      children:
+      - {{id: trace, type: acquire_spectrum, store_source_spectra: false}}
+    - {{id: off, type: ramp_keithley_to_zero, channel: A}}
+""")
+    path = tmp_path / "clipped.h5"
+    result, _ = execute(settings, plan, path, monkeypatch)
+    assert all(abs(level) <= 0.0002 + 1e-12 for level in commands)
+    assert all(abs(b - a) <= 0.0001 + 1e-12 for a, b in zip([0.0, *commands], commands))
+    if policy == "stop":
+        assert result.error and "final checkpoint" in result.error
+        assert result.stored_points == 3
+        return
+    if policy == "measured_trip":
+        assert result.error and "measurement safety trip" in result.error
+        assert result.stored_points == 2
+        return
+    assert result.error is None
+    assert result.compliance_points_skipped == 2
+    assert result.completed_actions == len(plan.actions)
+    stored = Hdf5RunReader.points(path)
+    assert [point.setpoints["keithley.A.current"] for point in stored] == pytest.approx(
+        [0, polarity * 0.0001, polarity * 0.0001],
+    )
+    with h5py.File(path) as file:
+        events = file["events/name"].asstr()[:].tolist()
+        assert "sweep_compliance_limited" in events
+        assert "run_fault" not in events
+        assert file["scan_definition"].attrs["allow_skipped_checkpoints"]
+    assert ThatecCompatibilityValidator().validate(path).valid
+
+
+@pytest.mark.parametrize("hit_mid_scan", [False, True])
+def test_unreachable_b_bias_skips_dependent_scan_and_allows_next_bias(tmp_path, monkeypatch, hit_mid_scan):
+    raw = audit_settings(tmp_path).model_dump(mode="python")
+    raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]["ramp_current_step_max"] = "100 uA"
+    settings = StationSettings.model_validate(raw)
+    written_b = []
+    original_write = KeithleySimulator._write
+
+    def record_write(simulator, command):
+        if not hit_mid_scan or (
+            command.startswith("smua.source.leveli = 0.0001") and simulator.level["smub"] >= 0.0004
+        ):
+            simulator.resistance_ohm["smub"] = 100.0
+        if simulator.output["smub"] and command.startswith("smub.source.leveli = "):
+            written_b.append(float(command.rsplit(" ", 1)[-1]))
+        return original_write(simulator, command)
+
+    monkeypatch.setattr(KeithleySimulator, "_write", record_write)
+    initial = """    - {id: cfg-a, type: configure_keithley, channel: A, mode: current, level: '0 uA', compliance: '20 mV', source_range: '10 mA'}
+    - {id: cfg-b, type: configure_keithley, channel: B, mode: current, level: '0 uA', compliance: '20 mV', source_range: '100 mA'}
+    - {id: on-a, type: set_keithley_output, channel: A, enabled: true}
+    - {id: on-b, type: set_keithley_output, channel: B, enabled: true}
+"""
+    for group, bias in (("first", 400), ("further", 500), ("return", 100)):
+        initial += f"""    - id: {group}
+      type: sequence
+      children:
+      - {{id: {group}-bias, type: ramp_keithley_current, channel: B, level: '{bias} uA', step: '100 uA', settle_time: '2 ms'}}
+      - {{id: {group}-approach, type: ramp_keithley_current, channel: A, level: '0 uA', step: '100 uA', settle_time: '2 ms'}}
+      - id: {group}-scan
+        type: sweep
+        target: keithley.A.current
+        segments: [{{start: '0 uA', stop: '100 uA', points: 2, spacing: linear}}]
+        children:
+        - {{id: {group}-trace, type: acquire_spectrum, store_source_spectra: false}}
+      - {{id: {group}-return, type: ramp_keithley_current, channel: A, level: '0 uA', step: '100 uA', settle_time: '2 ms'}}
+"""
+    plan = compile_source(settings, initial)
+    path = tmp_path / "bias-clipped.h5"
+    result, _ = execute(settings, plan, path, monkeypatch)
+    assert result.error is None
+    assert result.compliance_points_skipped == (3 if hit_mid_scan else 4)
+    forward = [0.0001, 0.0002, 0.0003, 0.0004] if hit_mid_scan else [0.0001, 0.0002]
+    assert written_b == pytest.approx([*forward, *reversed(forward[:-1])])
+    stored = Hdf5RunReader.points(path)
+    expected_b = [0.0004, 0.0001, 0.0001] if hit_mid_scan else [0.0001, 0.0001]
+    expected_a = [0, 0, 0.0001] if hit_mid_scan else [0, 0.0001]
+    assert [point.setpoints["keithley.B.current"] for point in stored] == pytest.approx(expected_b)
+    assert [point.setpoints["keithley.A.current"] for point in stored] == pytest.approx(expected_a)
+
+
 def test_requested_three_axis_topology_and_durable_simulated_archive(tmp_path, monkeypatch):
     settings = audit_settings(tmp_path)
     plan = compile_source(settings, SETUP + AXES)
@@ -128,7 +360,8 @@ def test_requested_three_axis_topology_and_durable_simulated_archive(tmp_path, m
     assert sum(action.kind == "update_keithley_level" and action.payload["channel"] == "B" for action in plan.actions) == 6
     assert sum(action.kind == "update_keithley_level" and action.payload["channel"] == "A" for action in plan.actions) == 18
     path = tmp_path / "cartesian.h5"
-    result, waits = execute(settings, plan, path, monkeypatch)
+    # Keep this storage/topology fixture inside the 20 mV compliance envelope.
+    result, waits = execute(settings, plan, path, monkeypatch, keithley_resistance_ohm=0.1)
     assert result.error is None, result.error
     assert result.stored_points == 18 and waits == [3.0] * 18
     expected = list(product((0.0, 0.1), (-0.08, 0.0, 0.08), (0.0002, 0.0008, 0.0014)))
@@ -299,7 +532,7 @@ def test_raw_source_setpoints_match_checkpoint_readback(tmp_path, monkeypatch):
     settings = audit_settings(tmp_path)
     plan = compile_source(settings, SETUP + AXES)
     path = tmp_path / "readback.h5"
-    result, _ = execute(settings, plan, path, monkeypatch)
+    result, _ = execute(settings, plan, path, monkeypatch, keithley_resistance_ohm=0.1)
     assert result.error is None
     raw = list(iter_recipe_spectrum_sweeps(path))[-1][2]
     with h5py.File(path) as file:
@@ -314,7 +547,7 @@ def test_checkpoint_keeps_confirmed_current_axis_readback(tmp_path, monkeypatch)
     settings = audit_settings(tmp_path)
     plan = compile_source(settings, SETUP + AXES)
     path = tmp_path / "semantic-readback.h5"
-    result, _ = execute(settings, plan, path, monkeypatch)
+    result, _ = execute(settings, plan, path, monkeypatch, keithley_resistance_ohm=0.1)
     assert result.error is None
     with h5py.File(path) as file:
         metadata = json.loads(file["points/17/metadata_json"].asstr()[()])
@@ -410,7 +643,7 @@ def test_archive_upper_estimate_covers_actual_simulated_archive(tmp_path, monkey
     settings = audit_settings(tmp_path)
     plan = compile_source(settings, SETUP + AXES)
     path = tmp_path / "estimate.h5"
-    result, _ = execute(settings, plan, path, monkeypatch)
+    result, _ = execute(settings, plan, path, monkeypatch, keithley_resistance_ohm=0.1)
     assert result.error is None
     assert PlanEstimator(settings).estimate(plan).uncompressed_hdf5_bytes >= path.stat().st_size
 

@@ -13,6 +13,7 @@ from app.domain.spectrum_correction import (
     SpectrumFrameEnvelope,
     SpectrumFrameRole,
 )
+
 from .streaming_statistics import VectorWelford, finite_vector
 from .sweep_counter_guard import SweepCounterGuard
 

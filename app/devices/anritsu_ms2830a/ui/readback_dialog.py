@@ -5,12 +5,13 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QHBoxLayout,
+    QHeaderView,
     QSizePolicy,
     QTableWidgetItem,
     QWidget,
@@ -21,6 +22,7 @@ from qfluentwidgets import (
     PushButton,
     StrongBodyLabel,
     TableWidget,
+    isDarkTheme,
 )
 
 from app.devices.anritsu_ms2830a.adapter import AnritsuFullConfigurationReadback
@@ -30,7 +32,54 @@ from app.domain.quantities import (
     format_quantity_auto,
 )
 from app.safety.anritsu import normalize_anritsu_detector
+from app.ui.design_system import tokens_for
 from app.ui.dialogs import StationDialog
+
+
+def _relative_luminance(color: QColor) -> float:
+    def channel(value: float) -> float:
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+    return (
+        0.2126 * channel(color.redF())
+        + 0.7152 * channel(color.greenF())
+        + 0.0722 * channel(color.blueF())
+    )
+
+
+def _contrast_ratio(foreground: QColor, background: QColor) -> float:
+    low, high = sorted((_relative_luminance(foreground), _relative_luminance(background)))
+    return (high + 0.05) / (low + 0.05)
+
+
+def _ensure_wcag_aa(
+    foreground: QColor,
+    background: QColor,
+    *,
+    dark: bool,
+    min_ratio: float = 4.5,
+) -> QColor:
+    candidate = QColor(foreground)
+    for _ in range(12):
+        if _contrast_ratio(candidate, background) >= min_ratio:
+            return candidate
+        candidate = candidate.lighter(110) if dark else candidate.darker(110)
+    return candidate
+
+
+def _format_vbw_mode_label(vbw_auto: Any, vbw_hz: float | None) -> str:
+    if isinstance(vbw_auto, str):
+        normalized = vbw_auto.strip().lower()
+        if normalized == "auto":
+            return "Auto"
+        if normalized == "off":
+            return "OFF"
+        if normalized == "manual":
+            return "Manual"
+        return vbw_auto
+    if vbw_auto:
+        return "Auto"
+    return "OFF" if vbw_hz is None else "Manual"
 
 
 class AnritsuReadbackDialog(StationDialog):
@@ -45,7 +94,7 @@ class AnritsuReadbackDialog(StationDialog):
         form_values: dict[str, Any],
         parent: QWidget,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent, resizable=True)
         self._readback = readback
         self._form_values = form_values
         self.setObjectName("anritsuReadbackDialog")
@@ -54,7 +103,6 @@ class AnritsuReadbackDialog(StationDialog):
         self.setWindowModality(Qt.WindowModality.NonModal)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setMinimumSize(QSize(860, 560))
-        self.setSizeGripEnabled(True)
 
         screen = QApplication.primaryScreen()
         if screen is None:
@@ -189,7 +237,7 @@ class AnritsuReadbackDialog(StationDialog):
             (
                 "vbw_auto",
                 "VBW mode",
-                "Auto" if readback.vbw_auto else "Manual",
+                _format_vbw_mode_label(readback.vbw_auto, readback.vbw_hz),
                 readback.vbw_auto,
                 form_values.get("vbw_auto"),
                 True,
@@ -243,6 +291,8 @@ class AnritsuReadbackDialog(StationDialog):
         self.table.setRowCount(len(self._param_definitions))
         self._status_items: dict[str, QTableWidgetItem] = {}
         self._action_buttons: dict[str, PushButton] = {}
+        self._readonly_action_items: list[QTableWidgetItem] = []
+        match_color, mismatch_color, muted_color = self._semantic_colors()
 
         for row, (key, display_name, hw_text, hw_raw, form_raw, is_assignable) in enumerate(
             self._param_definitions
@@ -259,7 +309,7 @@ class AnritsuReadbackDialog(StationDialog):
             matches = self._check_match(key, hw_raw, form_raw)
             status_text = self._status_text(key, matches, form_raw)
             status_item = QTableWidgetItem(status_text)
-            color = QColor("#168a45" if matches else "#c43b3b")
+            color = match_color if matches else mismatch_color
             hw_item.setForeground(color)
             status_item.setForeground(color)
             self.table.setItem(row, 2, status_item)
@@ -268,9 +318,10 @@ class AnritsuReadbackDialog(StationDialog):
             # Action
             if not is_assignable:
                 action_item = QTableWidgetItem("—")
-                action_item.setForeground(self.palette().color(QPalette.ColorRole.Mid))
+                action_item.setForeground(muted_color)
                 action_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row, 3, action_item)
+                self._readonly_action_items.append(action_item)
             else:
                 btn = PushButton("Use hardware value", self.table)
                 btn.setProperty("compact", True)
@@ -281,13 +332,23 @@ class AnritsuReadbackDialog(StationDialog):
                 self.table.setCellWidget(row, 3, btn)
                 self._action_buttons[key] = btn
 
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.resizeColumnsToContents()
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        header.setStretchLastSection(False)
+        self.table.setColumnWidth(3, 172)
         layout.addWidget(self.table, 1)
 
-        # Footer actions
+        # Footer actions (standard right-aligned compact modal footer)
         footer_layout = QHBoxLayout()
         footer_layout.setSpacing(8)
+        footer_layout.addStretch(1)
+
+        self.close_button = PushButton("Close", surface)
+        self.close_button.clicked.connect(self.close)
+        footer_layout.addWidget(self.close_button)
 
         self.use_all_button = PrimaryPushButton("Use all compatible values", surface)
         self.use_all_button.setToolTip(
@@ -296,18 +357,34 @@ class AnritsuReadbackDialog(StationDialog):
         self.use_all_button.clicked.connect(self._on_use_all)
         footer_layout.addWidget(self.use_all_button)
 
-        footer_layout.addStretch(1)
-
-        self.close_button = PushButton("Close", surface)
-        self.close_button.clicked.connect(self.close)
-        footer_layout.addWidget(self.close_button)
-
         layout.addLayout(footer_layout)
         self.refresh_form_values(form_values)
+
+    def _semantic_colors(self) -> tuple[QColor, QColor, QColor]:
+        dark = isDarkTheme()
+        tokens = tokens_for("dark" if dark else "light")
+        surface = QColor(tokens.dialog_surface)
+        return (
+            _ensure_wcag_aa(QColor(tokens.success), surface, dark=dark),
+            _ensure_wcag_aa(QColor(tokens.danger), surface, dark=dark),
+            _ensure_wcag_aa(QColor(tokens.text_muted), surface, dark=dark),
+        )
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.StyleChange,
+        } and hasattr(self, "_status_items"):
+            self.refresh_form_values(self._form_values)
 
     def refresh_form_values(self, form_values: dict[str, Any]) -> None:
         """Compare against the actual form after its owner handles a request."""
         self._form_values = dict(form_values)
+        match_color, mismatch_color, muted_color = self._semantic_colors()
+        for item in self._readonly_action_items:
+            item.setForeground(muted_color)
         for row, (key, _, _, hardware, _, assignable) in enumerate(self._param_definitions):
             current = form_values.get(key)
             compared = key in form_values and not (
@@ -321,17 +398,21 @@ class AnritsuReadbackDialog(StationDialog):
                 text = "Not compared (automatic or unavailable)"
             else:
                 text = "MATCH" if matches else self._status_text(key, False, current)
-            color = (QColor("#168a45" if matches else "#c43b3b")
-                     if assignable and compared else self.palette().color(QPalette.ColorRole.PlaceholderText))
+            color = (
+                (match_color if matches else mismatch_color)
+                if assignable and compared
+                else muted_color
+            )
             status.setText(text)
             status.setToolTip(text)
             status.setForeground(color)
-            self.table.item(row, 1).setForeground(color)
+            hw_item = self.table.item(row, 1)
+            if hw_item is not None:
+                hw_item.setForeground(color)
             button = self._action_buttons.get(key)
             if button is not None:
                 button.setEnabled(not matches)
                 button.setText("Matches form" if matches else "Use hardware value")
-        self.table.resizeColumnsToContents()
 
     @staticmethod
     def _check_match(key: str, hw_val: Any, form_val: Any) -> bool:
@@ -339,31 +420,47 @@ class AnritsuReadbackDialog(StationDialog):
             return hw_val is None
         if key == "detector":
             return normalize_anritsu_detector(str(hw_val)) == normalize_anritsu_detector(str(form_val))
+        if isinstance(hw_val, bool) or isinstance(form_val, bool):
+            return isinstance(hw_val, bool) and isinstance(form_val, bool) and hw_val == form_val
         if isinstance(hw_val, float) and isinstance(form_val, (float, int)):
-            return (math.isfinite(hw_val) and math.isfinite(float(form_val))
-                    and math.isclose(hw_val, float(form_val), rel_tol=5e-9, abs_tol=1e-12))
+            return (
+                math.isfinite(hw_val)
+                and math.isfinite(float(form_val))
+                and math.isclose(hw_val, float(form_val), rel_tol=5e-9, abs_tol=1e-12)
+            )
         if isinstance(hw_val, int) and isinstance(form_val, int):
             return hw_val == form_val
-        if isinstance(hw_val, bool) and isinstance(form_val, bool):
-            return hw_val == form_val
+        if isinstance(hw_val, int) and isinstance(form_val, float):
+            return math.isfinite(form_val) and math.isclose(
+                float(hw_val), form_val, rel_tol=5e-9, abs_tol=1e-12
+            )
         if isinstance(hw_val, str) and isinstance(form_val, str):
             return hw_val.strip().upper() == form_val.strip().upper()
-        return str(hw_val) == str(form_val)
+        return False
 
     def _status_text(self, key: str, matches: bool, form_val: Any) -> str:
         if form_val is None:
             return "Info (read-only)"
         if matches:
             return "MATCH"
-        # Format form value nicely
+        if isinstance(form_val, str):
+            if key == "vbw_mode":
+                upper = form_val.strip().upper()
+                if upper in {"VID", "POW"}:
+                    return f"Form: {'Video' if upper == 'VID' else 'Power'}"
+            elif key == "vbw_auto":
+                return f"Form: {_format_vbw_mode_label(form_val, None)}"
+            return f"Form: {form_val}"
+        # Format numeric / boolean form value cleanly
         if key in {"start_hz", "stop_hz", "center_hz", "span_hz", "rbw_hz", "vbw_hz"}:
-            if form_val is not None:
-                return f"Form: {format_quantity_auto(float(form_val), DIMENSION_FREQUENCY)}"
-        elif key == "reference_level_dbm":
+            return f"Form: {format_quantity_auto(float(form_val), DIMENSION_FREQUENCY)}"
+        if key == "reference_level_dbm":
             return f"Form: {float(form_val):.9g} dBm"
-        elif key in {"rbw_auto", "vbw_auto"}:
+        if key == "rbw_auto":
             return f"Form: {'Auto' if form_val else 'Manual'}"
-        elif key == "vbw_mode":
+        if key == "vbw_auto":
+            return f"Form: {'Auto' if form_val else 'Manual'}"
+        if key == "vbw_mode":
             return f"Form: {'Video' if form_val == 'VID' else 'Power'}"
         return f"Form: {form_val}"
 

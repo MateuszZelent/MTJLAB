@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict
 
 from .adapter import AdvancedSpectrumSnapshot, AnritsuFullConfigurationReadback
+from .sweep_timing import timing_comparison_key
 
 
 def spectrum_configuration_fingerprint(
@@ -19,9 +20,13 @@ def spectrum_configuration_fingerprint(
     # Continuous versus single acquisition does not change the RF input path;
     # sweep-completion evidence remains a separate archive contract.
     values.pop("continuous_sweep", None)
+    values.pop("timing_context", None)
     advanced_values = asdict(advanced)
     # Already represented by full.vbw_mode; keep existing fingerprint identity.
     advanced_values.pop("vbw_filter_mode", None)
+    timing = timing_comparison_key(advanced_values.pop("timing_context", None))
+    if timing is not None:
+        advanced_values["timing"] = json.loads(timing)
     return json.dumps({
         "device_idn": device_idn, "full": values, "advanced": advanced_values,
         "sweep_method": sweep_method, "trace": "TRAC1",

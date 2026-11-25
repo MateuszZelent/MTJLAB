@@ -3,7 +3,10 @@
 from enum import StrEnum
 
 from app.domain.spectrum_correction import SpectrumFrameEnvelope, SpectrumFrameRole
-from app.domain.spectrum_interleaved import InterleavedSpectrumConfig, SpectrumOperatorStateConfirmation
+from app.domain.spectrum_interleaved import (
+    InterleavedSpectrumConfig,
+    SpectrumOperatorStateConfirmation,
+)
 
 
 class InterleavedPhase(StrEnum):
@@ -18,7 +21,7 @@ class InterleavedPhase(StrEnum):
 class InterleavedSpectrumAcquisition:
     def __init__(self, config: InterleavedSpectrumConfig):
         if not isinstance(config, InterleavedSpectrumConfig):
-            raise ValueError("Interleaved acquisition requires a typed configuration.")
+            raise TypeError("Interleaved acquisition requires a typed configuration.")
         self.config = config
         self.phase = InterleavedPhase.WAIT_REFERENCE
         self.reference_blocks = 0

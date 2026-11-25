@@ -460,6 +460,10 @@ def test_every_literal_configure_field_is_authored_even_without_a_device_snapsho
         aliases["mode"] = "source_mode"
     if kind == "configure_rigol_output":
         aliases.update(mode="output_mode", polarity="output_polarity")
+    constraints = {
+        "configure_moke_box": {"minimum_voltage", "maximum_voltage", "calibration_id"},
+        "configure_rigol": {"dut_min_impedance"},
+    }.get(kind, set())
     for field, value in data.items():
         if field == "channel":
             assert all(e.channel == value for e in rows if e.source_id == "literal")
@@ -467,7 +471,10 @@ def test_every_literal_configure_field_is_authored_even_without_a_device_snapsho
         candidates = [
             e for e in rows if e.source_id == "literal" and e.parameter == aliases.get(field, field)
         ]
-        assert any(e.sweep_value == value and e.action == "set" for e in candidates), (kind, field)
+        action = "constraint" if field in constraints else "set"
+        if kind == "configure_keithley" and field in {"settle_time", "settling_time"}:
+            action = "timing"
+        assert any(e.sweep_value == value and e.action == action for e in candidates), (kind, field)
 
 
 def test_literal_analyzer_points_override_card_and_snapshot_ui_policy_is_omitted():

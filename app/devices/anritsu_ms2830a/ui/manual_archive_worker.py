@@ -20,7 +20,7 @@ class ManualArchiveWorker(QObject):
                 self.archive.close()
             else:
                 raise ValueError("Unsupported manual archive operation.")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - worker boundary must report all archive errors
             error = str(exc)
         try:
             self.completed.emit(result, error)

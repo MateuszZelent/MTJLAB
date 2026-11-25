@@ -11,6 +11,7 @@ from app.engine.estimation import PlanEstimator
 from app.engine.runner import RecipeRunner
 from app.storage.hdf5_reader import Hdf5RunReader, iter_recipe_spectrum_sweeps
 from app.storage.thatec_validator import ThatecCompatibilityValidator
+from app.ui.results.processing import ResultProcessing, read_processed_private
 from tests.test_sweep_audit_contracts import audit_settings, compile_source, execute
 
 
@@ -74,6 +75,64 @@ def test_instrument_average_writes_one_trace_with_measured_count_per_block(
             assert acquisition["trace_storage_mode"] == "LAV"
     report = ThatecCompatibilityValidator().validate(path, require_pythat=True)
     assert report.valid, report.errors
+
+
+def test_each_current_point_keeps_both_smu_readings_and_one_raw_mean(tmp_path, monkeypatch):
+    settings = audit_settings(tmp_path)
+    plan = compile_source(settings, """
+    - {id: analyzer, type: configure_anritsu, start_frequency: '1 MHz', stop_frequency: '2 MHz', reference_level: '0 dBm', points: 101}
+    - {id: reference, type: acquire_reference, instrument_average_count: 50, store_source_spectra: false}
+    - {id: a-config, type: configure_keithley, channel: A, mode: current, level: '0 mA', compliance: '20 mV', source_range: '10 mA'}
+    - {id: b-config, type: configure_keithley, channel: B, mode: current, level: '1 mA', compliance: '20 mV', source_range: '100 mA'}
+    - {id: a-on, type: set_keithley_output, channel: A, enabled: true}
+    - {id: b-on, type: set_keithley_output, channel: B, enabled: true}
+    - id: scan
+      type: sweep
+      target: keithley.A.current
+      segments: [{start: '0.1 mA', stop: '0.3 mA', points: 3}]
+      children:
+        - {id: read-a, type: measure_keithley, channel: A}
+        - {id: read-b, type: measure_keithley, channel: B}
+        - {id: spectrum, type: acquire_spectrum, instrument_average_count: 50, store_source_spectra: false, reference_operation: none, store_processed: false}
+""")
+    previews = []
+    emit_telemetry = RecipeRunner._emit_telemetry
+
+    def capture_preview(runner, name, payload):
+        if name == "spectrum_preview":
+            previews.append(payload)
+        emit_telemetry(runner, name, payload)
+
+    monkeypatch.setattr(RecipeRunner, "_emit_telemetry", capture_preview)
+    path = tmp_path / "scan.h5"
+    result, _ = execute(settings, plan, path, monkeypatch)
+
+    assert result.error is None
+    assert plan.total_points == result.stored_points == len(previews) == 3
+    reference = Hdf5RunReader.reference(path, 0)
+    assert reference.average_count == 50
+    for index, point in enumerate(Hdf5RunReader.points(path)):
+        assert point.setpoints["keithley.A.current"] == pytest.approx((index + 1) * 0.0001)
+        assert point.setpoints["keithley.B.current"] == pytest.approx(0.001)
+        for channel in ("A", "B"):
+            prefix = f"keithley.{channel}"
+            assert point.measurements[f"{prefix}.resistance_ohm"] == pytest.approx(abs(
+                point.measurements[f"{prefix}.voltage_v"] / point.measurements[f"{prefix}.current_a"]
+            ))
+        stored = Hdf5RunReader.spectrum(path, index)
+        assert stored.reference_index == 0 and stored.processed_values is None
+        assert point.metadata["spectrum_processing"] == "none"
+        assert point.metadata["spectrum_processing_v1"]["reference_operation"] == "none"
+        assert previews[index]["instrument_average"]["sweep_count"] == 50
+        difference = np.asarray(stored.powers_dbm) - reference.powers_dbm
+        np.testing.assert_allclose(previews[index]["raw_minus_reference_db"], difference)
+        raw = read_processed_private(path, point, ResultProcessing())
+        corrected = read_processed_private(path, point, ResultProcessing("difference_db"))
+        assert raw.unit == "dBm" and corrected.unit == "dB"
+        np.testing.assert_array_equal(raw.values, stored.powers_dbm)
+        np.testing.assert_allclose(corrected.values, difference)
+    assert not list(iter_recipe_spectrum_sweeps(path))
+    assert ThatecCompatibilityValidator().validate(path, require_pythat=True).valid
 
 
 def test_instrument_average_does_not_retry_with_unconfirmed_restore(tmp_path, monkeypatch):

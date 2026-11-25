@@ -16,11 +16,34 @@ def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
     return AnritsuAdapter(settings, session_factory=SimulatedVisaFactory("anritsu") if simulation else None)
 
 
+def _dispatch_unaveraged_sweep(adapter: AnritsuAdapter, payload: object) -> object:
+    if isinstance(payload, dict):
+        trace = str(payload.get("trace") or "TRAC1")
+        restore_continuous = bool(payload.get("restore_continuous", False))
+        binary = bool(payload.get("binary", False))
+        return adapter.acquire_unaveraged_sweep(
+            trace,
+            restore_continuous=restore_continuous,
+            binary=binary,
+        )
+    if isinstance(payload, tuple) and len(payload) == 2:
+        trace, restore_continuous = payload
+        return adapter.acquire_unaveraged_sweep(
+            str(trace or "TRAC1"),
+            restore_continuous=bool(restore_continuous),
+        )
+    return adapter.acquire_unaveraged_sweep(str(payload or "TRAC1"))
+
+
 def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object:
     if not isinstance(adapter, AnritsuAdapter):
         raise TypeError("Anritsu module received an incompatible adapter.")
     if operation.startswith("read_background_filter_configuration:"):
         return adapter.read_acquisition_configuration()
+    if operation in {"read_sweep_timing", "configure_sweep_timing"}:
+        timing = (adapter.read_sweep_timing() if operation == "read_sweep_timing"
+                  else adapter.configure_sweep_timing(payload))
+        return timing, adapter.read_advanced_spectrum_configuration()
     if operation in {"instrument_average", "instrument_average_live"}:
         if not isinstance(payload, InstrumentAverageTarget):
             raise TypeError("Anritsu instrument averaging requires a sweep count or duration target.")
@@ -30,7 +53,7 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         "read_advanced_spectrum": adapter.read_advanced_spectrum_configuration,
         "configure_advanced_spectrum": lambda: adapter.configure_advanced_spectrum(payload),
         "configure": lambda: adapter.configure_spectrum(payload),
-        "start_live": lambda: adapter.start_live(bool(payload)),
+        "start_live": lambda: adapter.start_live(bool(payload), allow_synchronized=True),
         "stop_live": adapter.stop_live,
         "abort_acquisition": adapter.abort_acquisition,
         "fetch_trace": lambda: adapter.fetch_trace(str(payload or "TRAC1")),
@@ -38,9 +61,10 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         "read_acquisition_configuration": adapter.read_acquisition_configuration,
         "fetch_current_trace": lambda: adapter.fetch_current_trace(str(payload or "TRAC1")),
         "fetch_current_trace_fast": lambda: adapter.fetch_current_trace_fast(str(payload or "TRAC1")),
+        "poll_synchronized_live": lambda: adapter.poll_synchronized_live(str(payload or "TRAC1")),
         "acquire_fresh_trace": lambda: adapter.acquire_fresh_trace(str(payload or "TRAC1")),
-        "single_sweep": lambda: adapter.acquire_unaveraged_sweep(str(payload or "TRAC1")),
-        "unaveraged_sweep": adapter.acquire_unaveraged_sweep,
+        "single_sweep": lambda: _dispatch_unaveraged_sweep(adapter, payload),
+        "unaveraged_sweep": lambda: _dispatch_unaveraged_sweep(adapter, payload),
         "read_signal_generator": adapter.read_signal_generator_configuration,
         "configure_signal_generator": lambda: adapter.configure_signal_generator(payload),
         "update_signal_generator": lambda: adapter.update_signal_generator(payload),

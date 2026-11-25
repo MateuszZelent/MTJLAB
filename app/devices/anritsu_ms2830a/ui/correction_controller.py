@@ -2,37 +2,63 @@
 
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import asdict, dataclass, replace
 import json
+import time
+from collections import deque
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock
-import time
 
 import numpy as np
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 
 from app.devices.anritsu_ms2830a import InstrumentAverageResult, SpectrumTrace
+from app.domain.errors import ProcessingCancelled
 from app.domain.models import MeasurementPoint
+from app.domain.spectrum_correction import (
+    BackgroundProfile,
+    CorrectedSpectrumFrame,
+    CorrectionConfig,
+    SpectrumAcquisitionContext,
+    SpectrumFrameEnvelope,
+)
 from app.domain.spectrum_decisions import SpectrumDecisionOperation, SpectrumProcessingChange
 from app.domain.spectrum_finalization import (
-    SpectrumFinalizationBatchRequest, SpectrumFinalizationRequest,
-    SpectrumFinalizationResumeRequest, SpectrumResumeInspectionRequest,
-)
-from app.domain.errors import ProcessingCancelled
-from app.domain.spectrum_correction import (
-    BackgroundProfile, CorrectedSpectrumFrame, CorrectionConfig,
-    SpectrumAcquisitionContext, SpectrumFrameEnvelope,
+    SpectrumFinalizationBatchRequest,
+    SpectrumFinalizationRequest,
+    SpectrumFinalizationResumeRequest,
+    SpectrumResumeInspectionRequest,
 )
 from app.domain.spectrum_interference import SpectrumInterferenceCalibration
-from app.domain.spectrum_interleaved import InterleavedSpectrumConfig, SpectrumOperatorStateConfirmation
+from app.domain.spectrum_interleaved import (
+    InterleavedSpectrumConfig,
+    SpectrumOperatorStateConfirmation,
+)
 from app.spectrum.realtime_processor import RealtimeSpectrumProcessor
+from app.spectrum.reference_diagnostics import ReferenceDiagnosticConfig
 from app.spectrum.resonance_bootstrap import ResonanceBootstrapConfig
 from app.spectrum.spectral_difference_test import SpectralDifferenceTestConfig
-from app.spectrum.reference_diagnostics import ReferenceDiagnosticConfig
 from app.spectrum.streaming_statistics import dbm_to_w
-from app.storage.hdf5_writer import Hdf5RunWriter
 from app.storage.background_profile_store import BackgroundProfileHdf5Store
+from app.storage.hdf5_writer import Hdf5RunWriter
+
+_NON_SESSION_OPERATIONS = frozenset({
+    "import_profile",
+    "export_profile",
+    "import_interference",
+    "save_instrument_background",
+    "finalize",
+    "finalize_batch",
+    "resume_batch",
+    "inspect_batch_resume",
+    "inspect_finalization",
+    "inspect_interleaved_blocks",
+    "bootstrap_resonance",
+    "spectral_difference",
+    "train_interference",
+    "validate_interference",
+    "diagnose_reference",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +134,7 @@ class SpectrumResonanceBootstrapRequest:
     initial_fwhm_hz: float
     shape: str = "gaussian"
     discard_partial_tail: bool = False
-    config: ResonanceBootstrapConfig = ResonanceBootstrapConfig()
+    config: ResonanceBootstrapConfig = field(default_factory=ResonanceBootstrapConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +146,7 @@ class SpectrumDifferenceRequest:
     search_start_hz: float
     search_stop_hz: float
     discard_partial_tail: bool = False
-    config: SpectralDifferenceTestConfig = SpectralDifferenceTestConfig()
+    config: SpectralDifferenceTestConfig = field(default_factory=SpectralDifferenceTestConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +159,7 @@ class SpectrumInterferenceTrainingRequest:
         if not isinstance(self.specification_json, str) or len(self.specification_json.encode("utf-8")) > 65536:
             raise ValueError("Training specification must be bounded immutable JSON text.")
         if not isinstance(json.loads(self.specification_json), dict):
-            raise ValueError("Training specification must be a JSON object.")
+            raise ValueError("Training specification must be a JSON object.")  # noqa: TRY004
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,11 +189,11 @@ class SpectrumReferenceDiagnosticRequest:
     reference_path: Path
     destination: Path
     bin_indices: tuple[int, ...] | None = None
-    config: ReferenceDiagnosticConfig = ReferenceDiagnosticConfig()
+    config: ReferenceDiagnosticConfig = field(default_factory=ReferenceDiagnosticConfig)
 
     def __post_init__(self):
         if not isinstance(self.config, ReferenceDiagnosticConfig):
-            raise ValueError("Reference diagnostics require a typed bounded configuration.")
+            raise ValueError("Reference diagnostics require a typed bounded configuration.")  # noqa: TRY004
         bins = self.bin_indices
         if bins is not None and (not isinstance(bins, tuple) or not 1 <= len(bins) <= self.config.maximum_bins
                 or any(type(index) is not int or index < 0 for index in bins) or len(set(bins)) != len(bins)):
@@ -210,12 +236,13 @@ class _CorrectionWorker(QObject):
                 self.completed.emit(operation, result)
             except ProcessingCancelled:
                 self.cancelled.emit(operation)
-            except Exception as exc:
-                try:
-                    self._close_writer("faulted")
-                except Exception as close_error:
-                    self.failed.emit("archive_close", str(close_error))
-                self._processor = None
+            except Exception as exc:  # noqa: BLE001 - worker boundary must report all failures to GUI
+                if operation not in _NON_SESSION_OPERATIONS:
+                    try:
+                        self._close_writer("faulted")
+                    except Exception as close_error:  # noqa: BLE001 - report archive close failure cleanly
+                        self.failed.emit("archive_close", str(close_error))
+                    self._processor = None
                 self.failed.emit(operation, str(exc))
             if operation == "shutdown":
                 self.shutdown.emit()
@@ -350,8 +377,11 @@ class _CorrectionWorker(QObject):
                 raise ValueError("Resume inspection requires idle processing and a typed journal selection.")
             return inspect_spectrum_resume(payload, cancellation_check=self._check_processing_cancel)
         if operation in {"finalize_batch", "resume_batch"}:
-            from app.storage.spectrum_finalization_batch_store import finalize_spectrum_batch, resume_spectrum_batch
             from app.storage.hdf5_reader import Hdf5RunReader
+            from app.storage.spectrum_finalization_batch_store import (
+                finalize_spectrum_batch,
+                resume_spectrum_batch,
+            )
 
             expected_type = SpectrumFinalizationBatchRequest if operation == "finalize_batch" else SpectrumFinalizationResumeRequest
             if self._writer is not None or not isinstance(payload, expected_type):
@@ -503,7 +533,7 @@ class _CorrectionWorker(QObject):
             raise ValueError(f"Unknown correction operation {operation!r}.")
         envelope, trace = payload
         if not isinstance(envelope, SpectrumFrameEnvelope) or not isinstance(trace, SpectrumTrace):
-            raise ValueError("Correction ingest requires a typed envelope and raw trace.")
+            raise ValueError("Correction ingest requires a typed envelope and raw trace.")  # noqa: TRY004
         if not np.array_equal(trace.frequencies_hz, self._processor.context.frequencies_hz):
             raise ValueError("Raw trace frequency grid differs from its acquisition context.")
         processing_started = time.perf_counter()
@@ -609,6 +639,7 @@ class SpectrumCorrectionController(QObject):
         self._processing_cancel = Event()
         self._offline_busy = False
         self._session_pending = False
+        self._thread_started = False
         self._thread = QThread(self)
         self._thread.setObjectName("anritsu-spectrum-correction")
         self._worker = _CorrectionWorker(self._queue, self._lock, self._wake, self._queue_state,
@@ -625,7 +656,11 @@ class SpectrumCorrectionController(QObject):
         self._worker.processing_progress.connect(self.processing_progress)
         self._worker.shutdown.connect(self._thread.quit, Qt.ConnectionType.DirectConnection)
         self._thread.finished.connect(self._worker.deleteLater)
-        self._thread.start()
+
+    def _ensure_thread_started(self) -> None:
+        if not self._thread_started:
+            self._thread_started = True
+            self._thread.start()
 
     @property
     def queued_count(self):
@@ -635,6 +670,7 @@ class SpectrumCorrectionController(QObject):
     def _submit(self, operation, payload=None):
         if self._closing:
             raise ValueError("Spectrum correction worker is shutting down.")
+        self._ensure_thread_started()
         wake = False
         with self._lock:
             if operation == "snapshot" and self._queue_state["snapshot_pending"]:
@@ -678,7 +714,7 @@ class SpectrumCorrectionController(QObject):
         if not self._session_pending or self._offline_busy:
             raise ValueError("State confirmation requires an active acquisition session.")
         if not isinstance(confirmation, SpectrumOperatorStateConfirmation):
-            raise ValueError("State confirmation must be an immutable typed report.")
+            raise ValueError("State confirmation must be an immutable typed report.")  # noqa: TRY004
         self._submit("operator_state_confirmation", confirmation)
 
     def stop_session(self, status="completed"):
@@ -687,15 +723,21 @@ class SpectrumCorrectionController(QObject):
         self._submit("stop", status)
 
     def load_profile(self, path: Path, *, require_raw_sweeps=False):
+        if self._session_pending:
+            raise ValueError("Stop the active spectrum session before loading a background profile.")
         self._submit("import_profile", (path, require_raw_sweeps))
 
     def save_profile(self, context, profile, destination: Path):
+        if self._session_pending:
+            raise ValueError("Stop the active spectrum session before exporting a background profile.")
         self._submit("export_profile", (context, profile, destination))
 
     def save_instrument_background(self, request: InstrumentBackgroundRequest):
         self._submit_offline("save_instrument_background", request)
 
     def load_interference_calibrations(self, request: SpectrumInterferenceImportRequest):
+        if self._session_pending:
+            raise ValueError("Stop the active spectrum session before loading interference calibrations.")
         self._submit("import_interference", request)
 
     def finalize_archives(self, request: SpectrumFinalizationRequest):
@@ -715,7 +757,7 @@ class SpectrumCorrectionController(QObject):
 
     def inspect_interleaved_blocks(self, path: Path):
         if not isinstance(path, Path):
-            raise ValueError("Interleaved block selection requires an explicit path.")
+            raise ValueError("Interleaved block selection requires an explicit path.")  # noqa: TRY004
         self._submit_offline("inspect_interleaved_blocks", path)
 
     def bootstrap_archives(self, request: SpectrumResonanceBootstrapRequest):
@@ -755,9 +797,10 @@ class SpectrumCorrectionController(QObject):
         if operation == "stop":
             self._session_pending = False
 
-    def _acquisition_failed(self, *_args):
-        # Worker failures close the writer before publishing their failure.
-        self._session_pending = False
+    def _acquisition_failed(self, operation, *_args):
+        # Only session operations close the writer before publishing their failure.
+        if operation not in _NON_SESSION_OPERATIONS:
+            self._session_pending = False
 
     def cancel_processing(self):
         """Interrupt offline computation; acquisition checkpoints still drain."""
@@ -768,8 +811,13 @@ class SpectrumCorrectionController(QObject):
         if not self._closing:
             self.cancel_processing()
             self._closing = True
+            if not self._thread_started:
+                self._worker.deleteLater()
+                return True
             with self._lock:
                 self._queue.append(("shutdown", None))
                 self._queue_state["wake_pending"] = True
             self._wake.emit()
+        if not self._thread_started:
+            return True
         return self._thread.wait(wait_ms)

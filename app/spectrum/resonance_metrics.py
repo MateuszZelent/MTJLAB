@@ -1,7 +1,7 @@
 """Signed linear-power resonance hypotheses, fitted offline without inferred CI."""
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 import numpy as np
 

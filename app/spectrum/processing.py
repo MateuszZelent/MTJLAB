@@ -79,15 +79,15 @@ def average_dbm_traces(traces: Sequence[Sequence[float]]) -> tuple[float, ...]:
     return averager.result()
 
 
-def apply_reference_operation(
+def _apply_reference_operation_array(
     signal_dbm: Sequence[float],
     reference_dbm: Sequence[float],
     operation: str,
-) -> tuple[tuple[float, ...], str]:
-    """Apply point-wise reference math and return values plus an honest unit."""
+) -> tuple[np.ndarray, str]:
+    """Vectorized core for point-wise reference math returning a float64 array."""
 
-    sig = np.asarray(signal_dbm, dtype=float)
-    ref = np.asarray(reference_dbm, dtype=float)
+    sig = np.asarray(signal_dbm, dtype=np.float64)
+    ref = np.asarray(reference_dbm, dtype=np.float64)
     if sig.ndim != 1 or ref.ndim != 1:
         raise ValueError("Signal and reference spectra must be one-dimensional.")
     if sig.shape != ref.shape or sig.size < 2:
@@ -131,16 +131,42 @@ def apply_reference_operation(
         valid &= (res != 0) | (sig == ref)
     if not np.all(valid):
         raise ValueError(f"Reference operation {operation} exceeds the numeric range of {unit}.")
+    return res, unit
+
+
+def apply_reference_operation(
+    signal_dbm: Sequence[float],
+    reference_dbm: Sequence[float],
+    operation: str,
+) -> tuple[tuple[float, ...], str]:
+    """Apply point-wise reference math and return values plus an honest unit."""
+
+    res, unit = _apply_reference_operation_array(signal_dbm, reference_dbm, operation)
     return tuple(res.tolist()), unit
 
 
 def frequency_grids_match(left: Sequence[float], right: Sequence[float], *, relative: float = 1e-9) -> bool:
+    if relative < 0:
+        raise ValueError("tolerances must be non-negative")
     if len(left) != len(right) or len(left) < 2:
         return False
-    return all(
-        math.isclose(a, b, rel_tol=relative, abs_tol=max(abs(a), abs(b), 1.0) * 1e-12)
-        for a, b in zip(left, right, strict=True)
-    )
+    left_arr = np.asarray(left, dtype=np.float64)
+    if left_arr.ndim != 1 or left_arr.size < 2:
+        return False
+    if left is right:
+        return bool(not np.any(np.isnan(left_arr)))
+    right_arr = np.asarray(right, dtype=np.float64)
+    if right_arr.ndim != 1 or left_arr.shape != right_arr.shape:
+        return False
+    if np.array_equal(left_arr, right_arr):
+        return True
+    effective_rel = max(float(relative), 1e-12)
+    with np.errstate(invalid="ignore"):
+        diff = np.abs(left_arr - right_arr)
+        scale = np.maximum(np.abs(left_arr), np.abs(right_arr))
+        tol = np.maximum(effective_rel * scale, 1e-12)
+        close = (left_arr == right_arr) | (np.isfinite(left_arr) & np.isfinite(right_arr) & (diff <= tol))
+    return bool(np.all(close))
 
 
 def peak_preserving_indices(values: Sequence[float], max_points: int) -> tuple[int, ...]:
@@ -151,25 +177,36 @@ def peak_preserving_indices(values: Sequence[float], max_points: int) -> tuple[i
         return tuple(range(count))
     if max_points < 3:
         return (0, count - 1)[:max_points]
+    arr = np.asarray(values, dtype=np.float64)
     interior = count - 2
     bucket_count = max(1, (max_points - 2) // 2)
-    selected = {0, count - 1}
-    for bucket in range(bucket_count):
-        start = 1 + interior * bucket // bucket_count
-        stop = 1 + interior * (bucket + 1) // bucket_count
-        candidates = [index for index in range(start, stop) if math.isfinite(values[index])]
-        if not candidates:
-            continue
-        selected.add(min(candidates, key=values.__getitem__))
-        selected.add(max(candidates, key=values.__getitem__))
-    ordered = sorted(selected)
-    if len(ordered) > max_points:
+    bucket_ids = np.arange(bucket_count, dtype=np.intp)
+    starts = 1 + (interior * bucket_ids) // bucket_count
+    stops = 1 + (interior * (bucket_ids + 1)) // bucket_count
+    width = int(np.max(stops - starts))
+    offsets = np.arange(width, dtype=np.intp)
+    idx_grid = starts[:, None] + offsets[None, :]
+    valid_slot = idx_grid < stops[:, None]
+    safe_idx = np.where(valid_slot, idx_grid, 0)
+    bucket_vals = arr[safe_idx]
+    finite = valid_slot & np.isfinite(bucket_vals)
+    has_finite = np.any(finite, axis=1)
+    if np.any(has_finite):
+        min_pos = np.argmin(np.where(finite, bucket_vals, np.inf), axis=1)
+        max_pos = np.argmax(np.where(finite, bucket_vals, -np.inf), axis=1)
+        min_indices = starts[has_finite] + min_pos[has_finite]
+        max_indices = starts[has_finite] + max_pos[has_finite]
+        ordered = np.unique(np.concatenate((np.array([0, count - 1], dtype=np.intp), min_indices, max_indices)))
+    else:
+        ordered = np.array([0, count - 1], dtype=np.intp)
+    if ordered.size > max_points:
         # Preserve endpoints and the globally strongest extrema when an odd
         # point budget leaves one slot fewer than a complete min/max pair.
         interior_indices = ordered[1:-1]
-        center = sum(values[index] for index in interior_indices if math.isfinite(values[index])) / max(
-            1, sum(math.isfinite(values[index]) for index in interior_indices)
-        )
-        interior_indices.sort(key=lambda index: abs(values[index] - center), reverse=True)
-        ordered = sorted([0, *interior_indices[: max_points - 2], count - 1])
-    return tuple(ordered)
+        interior_vals = arr[interior_indices]
+        finite_interior = np.isfinite(interior_vals)
+        center = float(np.sum(interior_vals[finite_interior])) / max(1, int(np.count_nonzero(finite_interior)))
+        order = np.argsort(-np.abs(interior_vals - center), kind="stable")
+        kept = interior_indices[order[: max_points - 2]]
+        ordered = np.sort(np.concatenate((np.array([0, count - 1], dtype=np.intp), kept)))
+    return tuple(ordered.tolist())

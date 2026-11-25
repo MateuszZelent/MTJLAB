@@ -34,6 +34,10 @@ class HeatmapDimension:
     values: tuple[float, ...]
     is_frequency: bool = False
 
+    @property
+    def is_constant(self) -> bool:
+        return bool(self.values) and all(value == self.values[0] for value in self.values)
+
 
 @dataclass(frozen=True, slots=True)
 class HeatmapCoordinates:
@@ -43,6 +47,13 @@ class HeatmapCoordinates:
     checkpoint_count: int
     fallback_reason: str | None = None
     sweep_dimension_ids: tuple[str, ...] = ()
+
+    @property
+    def axis_dimensions(self) -> tuple[HeatmapDimension, ...]:
+        return tuple(
+            dimension for dimension in self.dimensions
+            if dimension.is_frequency or dimension.id == _CHECKPOINT_ID or not dimension.is_constant
+        )
 
     def dimension(self, dimension_id: str) -> HeatmapDimension:
         for dimension in self.dimensions:
@@ -124,9 +135,9 @@ def build_heatmap_coordinates(
     if not dimensions:
         dimensions = _recipe_dimensions(run, checkpoint_count)
     fallback_reason: str | None = None
-    if not dimensions:
+    if not any(not dimension.is_constant for dimension in dimensions):
         fallback_reason = (
-            "No complete physical sweep coordinate is stored for this spectrum; "
+            "No varying physical coordinate is stored for this spectrum; "
             "using checkpoint order."
         )
         dimensions = (
@@ -136,6 +147,7 @@ def build_heatmap_coordinates(
                 "",
                 tuple(float(index) for index in range(checkpoint_count)),
             ),
+            *dimensions,
         )
     # A return sweep can store several spectra at identical physical settings.
     # Give each occurrence its own selector instead of merging measurements.
@@ -156,7 +168,7 @@ def build_heatmap_coordinates(
         fallback_reason=fallback_reason,
         sweep_dimension_ids=tuple(
             key for key in _recipe_axis_ids(run, checkpoint_count)
-            if any(dimension.id == key for dimension in dimensions)
+            if any(dimension.id == key and not dimension.is_constant for dimension in dimensions)
         ),
     )
 
@@ -194,7 +206,7 @@ def default_heatmap_ranges(
         active_groups = np.unique(groups)
         best = None
         for dimension in dimensions:
-            if dimension.id in axis_ids:
+            if dimension.id in axis_ids or dimension.is_constant:
                 continue
             values = values_by_id[dimension.id][selected]
             lows, highs = np.full(group_count, np.inf), np.full(group_count, -np.inf)
@@ -273,7 +285,7 @@ def read_heatmap_matrix(
     missing_filters = [
         dimension.label
         for dimension in filter_dimensions
-        if dimension.id not in request.filters
+        if dimension.id not in request.filters and not dimension.is_constant
     ]
     if missing_filters:
         raise ValueError(
@@ -423,7 +435,7 @@ def _private_dimensions(
     dimensions: list[HeatmapDimension] = []
     for key in ordered_keys:
         values = tuple(float(point.setpoints[key]) for point in points)
-        if not _finite_and_varying(values):
+        if not _finite_coordinates(values):
             continue
         dimensions.append(_dimension_for_key(key, values))
     return tuple(dimensions)
@@ -455,7 +467,7 @@ def _public_control_dimensions(
             coordinate_values = tuple(float(value) for value in values)
         except (TypeError, ValueError):
             continue
-        if not _finite_and_varying(coordinate_values):
+        if not _finite_coordinates(coordinate_values):
             continue
         label, unit = _label_and_unit(row.control_name or row.id)
         dimensions.append(HeatmapDimension(f"public:{row.id}", label, unit, coordinate_values))
@@ -477,7 +489,6 @@ def _recipe_dimensions(run: ThatecRun, checkpoint_count: int) -> tuple[HeatmapDi
             tuple(float(value) for value in meshes[index].ravel()),
         )
         for index, axis in enumerate(schema.axes)
-        if _finite_and_varying(tuple(float(value) for value in meshes[index].ravel()))
     )
 
 
@@ -496,8 +507,8 @@ def _label_and_unit(value: str) -> tuple[str, str]:
     return value, ""
 
 
-def _finite_and_varying(values: tuple[float, ...]) -> bool:
-    return bool(values) and all(math.isfinite(value) for value in values) and len(set(values)) > 1
+def _finite_coordinates(values: tuple[float, ...]) -> bool:
+    return bool(values) and all(math.isfinite(value) for value in values)
 
 
 def _selected_checkpoints(

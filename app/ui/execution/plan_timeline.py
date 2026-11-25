@@ -11,8 +11,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
 from qfluentwidgets import BodyLabel, CardWidget, CheckBox, PlainTextEdit, PushButton, SpinBox, StrongBodyLabel, isDarkTheme
 
-from app.domain.quantities import format_quantity_auto
+from app.domain.quantities import DIMENSION_TIME, format_quantity_auto
 from app.recipes.parameter_registry import PARAMETERS_BY_TARGET
+from app.recipes.spectrum_processing import acquisition_summary
 from app.ui.design_system import tokens_for, plot_theme
 from app.ui.widgets.plot_ownership import coalesce_plot_refresh, create_plot_widget
 from app.ui.execution.rigol_projection import project_rigol
@@ -49,7 +50,7 @@ def action_values(action):
         for key, field in (("start_frequency", "start_hz"), ("stop_frequency", "stop_hz"), ("reference_level", "reference_level_dbm"), ("points", "points")):
             if config.changed_fields is None or field in config.changed_fields:
                 values[f"anritsu.spectrum.{key}"] = getattr(config, field)
-    elif kind == "update_keithley_level":
+    elif kind in {"update_keithley_level", "ramp_keithley_current"}:
         values[f"keithley.{channel}.{p['mode']}"] = p["level_si"]
     elif kind == "update_moke_voltage":
         values[f"moke_box.vout{channel}.voltage"] = p["voltage_v"]
@@ -71,6 +72,7 @@ def planned_series(actions, *, rigol_level_modes=None, rigol_projection=None):
     prior_context = {}
     held = {}
     modes = {}
+    keithley_source_targets = set()
     moke_safe = {}
     active_moke = None
     for action in actions:
@@ -79,9 +81,20 @@ def planned_series(actions, *, rigol_level_modes=None, rigol_projection=None):
             moke_safe[f"moke_box.vout{profile.channel}.voltage"] = profile.safe_v
     for step, action in enumerate(actions, 1):
         context = dict(action.setpoints_si)
-        values = {k: v for k, v in context.items() if prior_context.get(k) != v}
+        # The recipe context can retain a previous axis's value when entering
+        # another device's sweep. Hold the last physical source command once
+        # the plan has established a Keithley level.
+        mutations = action_values(action)
+        keithley_source_targets.update(
+            target for target in mutations
+            if target.startswith("keithley.") and target.endswith((".current", ".voltage"))
+        )
+        values = {
+            key: value for key, value in context.items()
+            if key not in keithley_source_targets and prior_context.get(key) != value
+        }
         prior_context = context
-        values.update(action_values(action))
+        values.update(mutations)
         for target in projection.masked[step - 1]:
             values.pop(target, None)
         values.update(projection.changes[step - 1])
@@ -94,7 +107,9 @@ def planned_series(actions, *, rigol_level_modes=None, rigol_projection=None):
             channel = action.payload.get("channel")
             mode = modes.get(channel)
             if mode in {"current", "voltage"}:
-                values[f"keithley.{channel}.{mode}"] = 0.0
+                target = f"keithley.{channel}.{mode}"
+                keithley_source_targets.add(target)
+                values[target] = 0.0
         if action.kind == "stop_moke_voltage":
             if active_moke in moke_safe:
                 values[active_moke] = moke_safe[active_moke]
@@ -119,6 +134,32 @@ def format_planned(target, value):
         return "ON" if value else "OFF"
     descriptor = PARAMETERS_BY_TARGET[target]
     return format_quantity_auto(value, descriptor.dimension)
+
+
+def _acquisition_label(action):
+    if action.kind == "acquire_spectrum":
+        return "Acquire spectrum"
+    if action.kind == "acquire_reference":
+        if action.payload.get("source_file"):
+            return f"Load {action.payload.get('file_kind', 'reference')}"
+        return f"Acquire {action.payload.get('purpose', 'reference')}"
+    return None
+
+
+def _acquisition_details(action, label):
+    fields = dict(action.payload)
+    for seconds_key, recipe_key in (
+        ("instrument_average_duration_s", "instrument_average_duration"),
+        ("minimum_duration_s", "minimum_duration"),
+    ):
+        if seconds_key in fields:
+            fields[recipe_key] = format_quantity_auto(fields[seconds_key], DIMENSION_TIME)
+    summary = acquisition_summary(fields, reference_only=action.kind == "acquire_reference")
+    if fields.get("source_file"):
+        return summary
+    if "instrument_average_count" in fields or "instrument_average_duration" in fields:
+        summary = f"Anritsu Lin Average · {summary}"
+    return f"{label} · {summary}"
 
 
 class ExecutionPlanTimeline(CardWidget):
@@ -160,6 +201,7 @@ class ExecutionPlanTimeline(CardWidget):
         self.legend.setWordWrap(True)
         layout.addWidget(self.legend)
         self.details = BodyLabel("No accepted plan yet.", self)
+        self.details.setTextFormat(Qt.TextFormat.PlainText)
         self.details.setWordWrap(True)
         # A changing setpoint must not resize the whole scrollable execution
         # page on every frame. Full details remain available on hover.
@@ -196,7 +238,8 @@ class ExecutionPlanTimeline(CardWidget):
         # curves' bounds after every addItem makes construction quadratic.
         self.plot.disableAutoRange()
         self.plot.clear()
-        theme = plot_theme(tokens_for("dark" if isDarkTheme() else "light"))
+        tokens = tokens_for("dark" if isDarkTheme() else "light")
+        theme = plot_theme(tokens)
         self.plot.setBackground(theme.background)
         for name in ('left', 'bottom'):
             axis = self.plot.getAxis(name)
@@ -204,10 +247,22 @@ class ExecutionPlanTimeline(CardWidget):
             axis.setTextPen(pg.mkPen(theme.axes))
         self.plot.setLabel('bottom', 'Action number', color=theme.axes)
         ticks = [(0, "Actions")]
+        acquisitions = {}
+        marker_groups = {}
+        for step, action in enumerate(self.actions, 1):
+            label = _acquisition_label(action)
+            if label is not None:
+                acquisitions.setdefault(label, []).append(step)
+            else:
+                marker_groups.setdefault(self._action_marker_style(action), []).append(step)
+        if acquisitions:
+            ticks.append((1, "Anritsu acquisition"))
+        setpoint_lane = len(ticks)
         # Distinct parameter colours; plots retain SI-derived engineering labels.
         colours = ("#1677ff", "#d46b08", "#389e0d", "#9254de", "#c41d7f", "#08979c")
         legends = []
-        for lane, row in enumerate(self.series, 1):
+        for index, row in enumerate(self.series):
+            lane = setpoint_lane + index
             finite = [value for value in row.values if math.isfinite(value)]
             lo, hi = min(finite), max(finite)
             label = row.label or (PARAMETERS_BY_TARGET[row.target].ui_label if row.target in PARAMETERS_BY_TARGET else row.target)
@@ -218,36 +273,32 @@ class ExecutionPlanTimeline(CardWidget):
                 end = row.steps[i + 1] if i + 1 < len(row.steps) else len(self.actions) + 1
                 xs.extend((step, end))
                 ys.extend((y, y))
-            self.plot.plot(xs, ys, pen=pg.mkPen(colours[(lane - 1) % len(colours)], width=2))
-            legends.append(f'<span style="color:{colours[(lane - 1) % len(colours)]}">● {escape(label)}</span>')
-        self.legend.setText(" &nbsp; ".join(legends))
+            colour = colours[index % len(colours)]
+            self.plot.plot(xs, ys, pen=pg.mkPen(colour, width=2))
+            legends.append(f'<span style="color:{colour}">● {escape(label)}</span>')
         self.plot.getAxis("left").setTicks([ticks])
-        self.plot.setYRange(-0.5, max(1, len(self.series)) + 0.6, padding=0)
+        self.plot.setYRange(-0.5, max(1, ticks[-1][0]) + 0.6, padding=0)
         self.plot.setXRange(1, max(2, len(self.actions) + 1), padding=0)
-        def marker_style(action):
-            if action.kind.startswith("set_") and "output" in action.kind:
-                return ("t1", "#389e0d") if action.payload.get("enabled") else ("t", "#cf1322")
-            if action.kind.startswith("configure_"):
-                return "s", "#9254de"
-            if action.kind.startswith(("acquire_", "measure_")):
-                return "o", "#08979c"
-            if action.kind == "wait":
-                return "o", "#8c8c8c"
-            return "d", "#1677ff"
-        marker_groups = {}
-        for step, action in enumerate(self.actions, 1):
-            marker_groups.setdefault(marker_style(action), []).append(step)
-        self.legend.setText(self.legend.text() + '<br>Actions: ▲ ON · ▼ OFF · ■ Configuration · ● Measurement / wait · ◆ Other')
-        # One shared symbol/brush per category. Passing a brush per action
-        # constructs thousands of QBrush objects and atlas entries on the GUI.
         for (symbol, colour), steps in marker_groups.items():
-            markers = pg.ScatterPlotItem(
-                x=steps, y=[0] * len(steps), size=6, pen=None,
-                brush=colour, symbol=symbol, hoverable=True, data=steps,
-                tip=lambda x, y, data: self.action_description(int(data)),
+            self._plot_markers(steps, lane=0, size=6, symbol=symbol, colour=colour)
+        acquisition_legend = []
+        for label, steps in acquisitions.items():
+            if label == "Acquire spectrum":
+                glyph, symbol, colour, size = "●", "o", tokens.plot_measurement, 4
+            elif label.startswith("Load "):
+                glyph, symbol, colour, size = "■", "s", tokens.text_muted, 8
+            else:
+                glyph, symbol, colour, size = "▲", "t1", tokens.plot_reference, 10
+            self._plot_markers(steps, lane=1, size=size, symbol=symbol, colour=colour)
+            location = f"step {steps[0]:,}" if len(steps) == 1 else f"{len(steps):,} steps"
+            acquisition_legend.append(
+                f'<span style="color:{colour}">{glyph} {escape(label)} · {location}</span>'
             )
-            markers.sigClicked.connect(self._clicked)
-            self.plot.addItem(markers)
+        self.legend.setText("<br>".join(filter(None, (
+            " &nbsp; ".join(acquisition_legend),
+            " &nbsp; ".join(legends),
+            "Actions: ▲ ON · ▼ OFF · ■ Configuration · ● Measurement / wait · ◆ Other",
+        ))))
         self.cursor = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen(colours[0], width=2))
         self.plot.addItem(self.cursor)
         self.step.setRange(1, max(1, len(self.actions)))
@@ -258,16 +309,43 @@ class ExecutionPlanTimeline(CardWidget):
         self.current_step = 0
         self.inspect_step(1)
 
+    @staticmethod
+    def _action_marker_style(action):
+        if action.kind.startswith("set_") and "output" in action.kind:
+            return ("t1", "#389e0d") if action.payload.get("enabled") else ("t", "#cf1322")
+        if action.kind.startswith("configure_"):
+            return "s", "#9254de"
+        if action.kind.startswith(("acquire_", "measure_")):
+            return "o", "#08979c"
+        if action.kind == "wait":
+            return "o", "#8c8c8c"
+        return "d", "#1677ff"
+
+    def _plot_markers(self, steps, *, lane, size, symbol, colour):
+        # Share the symbol and brush across each category to keep dense plans cheap to draw.
+        markers = pg.ScatterPlotItem(
+            x=steps, y=[lane] * len(steps), size=size, pen=None,
+            brush=colour, symbol=symbol, hoverable=True, data=steps,
+            tip=lambda x, y, data: self.action_description(int(data)),
+        )
+        markers.sigClicked.connect(self._clicked)
+        self.plot.addItem(markers)
+
     def action_description(self, step):
         if not self.actions:
             return "No accepted plan yet."
         action = self.actions[step - 1]
+        label = _acquisition_label(action)
+        operation = _acquisition_details(action, label) if label is not None else action.kind
+        if action.kind == "ramp_keithley_current":
+            target = format_planned(action.payload["target"], action.payload["level_si"])
+            operation = f"Ramp Keithley {action.payload['channel']} to {target}"
         values = []
         for row in self.series:
             index = bisect_right(row.steps, step) - 1
             if index >= 0 and math.isfinite(row.values[index]):
                 values.append(f"{row.label or row.target}: {format_planned(row.target, row.values[index])}")
-        return f"Action {step}/{len(self.actions)} · {action.kind} · {action.node_id}" + (" · FINALLY" if action.is_finally else "") + "\n" + " · ".join(values)
+        return f"Action {step}/{len(self.actions)} · {operation} · {action.node_id}" + (" · FINALLY" if action.is_finally else "") + "\n" + " · ".join(values)
 
     def inspect_step(self, step):
         description = self.action_description(step)

@@ -983,6 +983,7 @@ class MainWindowTests(unittest.TestCase):
     def test_dry_run_selection_reaches_controller_and_execution_monitor(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
+            window._ensure_route("sweeps")
             plan = ExecutionPlan(
                 recipe_name="dry-run-ui-contract",
                 actions=(
@@ -1023,7 +1024,7 @@ class MainWindowTests(unittest.TestCase):
                 str(sample_sweeps),
             )
             window.inventory_store.measurement_directory_for.assert_called_once_with(
-                "SAMPLE-1", "sweeps"
+                "SAMPLE-1", "sweeps", row="1", col="1"
             )
             self.assertEqual(window.run_monitor.state.text(), "DRY RUN — OUTPUTS OFF")
             self.assertIn("forced OFF", window.run_monitor.state.toolTip())
@@ -1045,8 +1046,7 @@ class MainWindowTests(unittest.TestCase):
             for controller in window._controllers.values():
                 controller.call = Mock()
 
-            dialog = window._open_sweep_readiness(plan)
-            dialog.connect_missing_button.click()
+            window._open_sweep_readiness(plan)
 
             window._controllers["keithley"].call.assert_called_once_with("connect")
             window._controllers["rigol"].call.assert_called_once_with("connect")
@@ -1204,7 +1204,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(tuple(floating._rows), targets)
             self.assertEqual(
                 window.anritsu_page.quick_controls_button.text(),
-                "Quick controls...",
+                "Quick controls…",
             )
             self.assertEqual(
                 window.rigol_page.quick_controls_button.text(),
@@ -2614,7 +2614,7 @@ class MainWindowTests(unittest.TestCase):
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             keithley = window.keithley_page
-            keithley._device_state_changed("verified")
+            keithley._device_state_changed("output_off")
 
             for channel in ("A", "B"):
                 card = keithley.channel_cards[channel]
@@ -2622,7 +2622,7 @@ class MainWindowTests(unittest.TestCase):
                 self.assertEqual(card["output"].text(), "OUTPUT OFF")
                 self.assertEqual(
                     card["output_on_action"].property("controlState"),
-                    "available",
+                    "output-neutral",
                 )
                 self.assertFalse(card["output_on_action"].isChecked())
                 self.assertTrue(card["output_on_action"].isEnabled())
@@ -2649,6 +2649,59 @@ class MainWindowTests(unittest.TestCase):
                 self.assertEqual(card["led"].property("outputState"), "neutral")
                 self.assertFalse(card["output_off_action"].isEnabled())
         finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_output_buttons_render_confirmed_state_in_both_themes(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+
+        def background(button: QPushButton) -> str:
+            self.assertTrue(button.isVisible())
+            image = button.grab().toImage()
+            return image.pixelColor(
+                round(8 * image.devicePixelRatio()), image.height() // 2
+            ).name()
+
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("keithley")
+            keithley = window.keithley_page
+            for theme in ("light", "dark"):
+                with self.subTest(theme=theme):
+                    keithley._device_state_changed("output_off")
+                    window._set_theme_mode(theme, persist=False)
+                    self.application.processEvents()
+                    red = tokens_for(theme).output_active
+
+                    for channel, other in (("A", "B"), ("B", "A")):
+                        card = keithley.channel_cards[channel]
+                        on = card["output_on_action"]
+                        off = card["output_off_action"]
+                        self.assertEqual(background(on), "#ffffff")
+                        self.assertEqual(background(off), "#ffffff")
+                        on.setChecked(True)
+                        self.assertEqual(background(on), "#ffffff")
+
+                        keithley._set_channel_output(channel, True)
+                        self.assertEqual(background(on), red)
+                        self.assertEqual(background(off), "#ffffff")
+                        self.assertEqual(
+                            background(keithley.channel_cards[other]["output_on_action"]),
+                            "#ffffff",
+                        )
+                        on.setEnabled(False)
+                        self.assertEqual(background(on), red)
+                        keithley._set_channel_output(channel, False)
+                        self.assertEqual(background(on), "#ffffff")
+
+                    keithley._set_channel_output("A", True)
+                    keithley._device_state_changed("disconnected")
+                    card = keithley.channel_cards["A"]
+                    self.assertEqual(card["output"].text(), "OUTPUT UNKNOWN")
+                    self.assertNotIn(background(card["output_on_action"]), ("#ffffff", red))
+        finally:
+            window._set_theme_mode("system", persist=False)
             window.close()
             self.application.processEvents()
 
@@ -3055,6 +3108,7 @@ class MainWindowTests(unittest.TestCase):
         try:
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
+            anritsu._device_state_changed("verified")
 
             anritsu.read_once()
 
@@ -3111,6 +3165,7 @@ class MainWindowTests(unittest.TestCase):
         try:
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
+            anritsu._device_state_changed("verified")
             anritsu._device_idn = "ANRITSU,MS2830A,SERIAL,7.03"
             anritsu.set_capabilities(
                 DeviceCapabilities(
@@ -3382,6 +3437,7 @@ class MainWindowTests(unittest.TestCase):
         try:
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
+            anritsu._device_state_changed("verified")
             with (
                 patch(
                     "app.devices.anritsu_ms2830a.ui.page.time.monotonic",
@@ -3476,6 +3532,7 @@ class MainWindowTests(unittest.TestCase):
         try:
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
+            anritsu._device_state_changed("verified")
             first = SpectrumTrace((1e6, 2e6), (-50.0, -40.0), datetime.now(timezone.utc), "TRAC1")
             second = SpectrumTrace((3e6, 4e6), (-30.0, -20.0), datetime.now(timezone.utc), "TRAC1")
 
@@ -4672,6 +4729,7 @@ class MainWindowTests(unittest.TestCase):
         try:
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
+            anritsu._device_state_changed("verified")
             anritsu.read_configuration.click()
             anritsu._controller.call.assert_called_once_with("read_configuration")
 
@@ -4741,6 +4799,7 @@ class MainWindowTests(unittest.TestCase):
         try:
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
+            anritsu._device_state_changed("verified")
             capabilities = DeviceCapabilities(
                 device_name="anritsu",
                 model="MS2830A",
@@ -4868,6 +4927,7 @@ class MainWindowTests(unittest.TestCase):
             try:
                 anritsu = window.anritsu_page
                 anritsu._controller.call = Mock()
+                anritsu._device_state_changed("verified")
                 with patch(
                     "app.devices.anritsu_ms2830a.ui.page.QMessageBox.question",
                     return_value=QMessageBox.StandardButton.Save,

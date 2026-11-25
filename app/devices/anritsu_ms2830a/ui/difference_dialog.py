@@ -2,13 +2,24 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CheckBox, LineEdit, PrimaryPushButton, ProgressBar, PushButton, ScrollArea, SpinBox, TitleLabel
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QFormLayout, QFrame, QHBoxLayout, QWidget
+from qfluentwidgets import (
+    BodyLabel,
+    CheckBox,
+    LineEdit,
+    PrimaryPushButton,
+    ProgressBar,
+    PushButton,
+    ScrollArea,
+    SpinBox,
+    TitleLabel,
+)
 
 from app.domain.quantities import DIMENSION_FREQUENCY, DIMENSION_RATIO, parse_quantity
 from app.spectrum.spectral_difference_test import SpectralDifferenceTestConfig
 from app.ui.dialogs import StationDialog, StationFileDialog
+
 from .correction_controller import SpectrumCorrectionController, SpectrumDifferenceRequest
 
 
@@ -31,6 +42,7 @@ class SpectrumDifferenceDialog(StationDialog):
         hint.setWordWrap(True)
         layout.addWidget(hint)
         scroll = ScrollArea(self)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content = QWidget(scroll)
@@ -75,6 +87,7 @@ class SpectrumDifferenceDialog(StationDialog):
         self._editors.extend((self.search_start, self.search_stop, self.blocks, self.permutations, self.alpha_input,
                               self.discard_tail, self.independent, self.exchangeable, self.evidence))
         scroll.setWidget(content)
+        scroll.enableTransparentBackground()
         layout.addWidget(scroll, 1)
         self.status = BodyLabel("Ready. Choose archives and enter the search range with units.", self)
         self.status.setWordWrap(True)
@@ -86,11 +99,13 @@ class SpectrumDifferenceDialog(StationDialog):
         self.result_label.setWordWrap(True)
         layout.addWidget(self.result_label)
         actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addStretch(1)
         self.start = PrimaryPushButton("Compare and save report", self)
         self.cancel = PushButton("Cancel comparison", self)
         self.cancel.setEnabled(False)
         self.close_button = PushButton("Close", self)
-        for button in (self.start, self.cancel, self.close_button):
+        for button in (self.close_button, self.cancel, self.start):
             actions.addWidget(button)
         layout.addLayout(actions)
         self.start.clicked.connect(self._start)

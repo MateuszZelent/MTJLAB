@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import BodyLabel, ComboBox, PushButton, ScrollArea, StrongBodyLabel
 
 from app.domain.quantities import DIMENSION_POWER, format_quantity_auto
@@ -20,12 +20,14 @@ class ProcessingQualityDialog(StationDialog):
         self.resize(660, 620)
         outer = self.modal_content_layout(spacing=12)
         scroll = ScrollArea(self)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content = QWidget(scroll)
         root = QVBoxLayout(content)
         root.setSpacing(12)
         scroll.setWidget(content)
+        scroll.enableTransparentBackground()
         outer.addWidget(scroll, 1)
         root.addWidget(StrongBodyLabel("Power average → correction → display filters", self))
         self.evidence = BodyLabel(self)

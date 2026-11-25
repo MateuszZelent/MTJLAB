@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -12,6 +13,18 @@ import pytest
 from app.storage.hdf5_reader import Hdf5RunReader
 from app.storage.thatec_validator import ThatecCompatibilityValidator
 from tools.benchmark_spectrum_stop_response import benchmark_stop_response
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_stop_benchmark_temp_files(request: pytest.FixtureRequest):
+    target = request.getfixturevalue("tmp_path") if "tmp_path" in request.fixturenames else None
+    yield
+    if target is not None and target.exists():
+        for child in list(target.iterdir()):
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize("kwargs", [{"cycles": True}, {"cycles": 0}, {"cycles": 101},

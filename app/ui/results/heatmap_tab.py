@@ -48,7 +48,7 @@ from app.ui.results.analysis_export import (
     processing_manifest,
     write_analysis_manifest,
 )
-from app.ui.results.batch_processing import HeatmapBatch, measurement_parameters, measurement_title, plan_heatmaps
+from app.ui.results.batch_processing import HeatmapBatch, heatmap_title, measurement_parameters, plan_heatmaps
 from app.ui.results.data_classifier import find_heatmap_rows
 from app.ui.results.filter_choices import FilterComboBox
 from app.ui.results.heatmap_cache import HeatmapSourceCache
@@ -181,6 +181,7 @@ class _HeatmapPayload:
     line_input_is_raw: bool = True
     corrected_frequencies_hz: tuple[float, ...] = ()
     instrument_averages: dict[int, dict] = field(default_factory=dict)
+    request: HeatmapRequest | None = None
 
 
 def _process_map_payload(payload, state, frequency_axis, *, cancelled=None):
@@ -260,6 +261,7 @@ def _read_heatmap_payload(
         line_input_dbm=matrix.input_values if matrix.input_unit == "dBm" else None,
         line_input_is_raw=not processed_row,
         instrument_averages=instrument_averages,
+        request=request,
     )
 
 
@@ -1259,8 +1261,10 @@ class HeatmapResultsTab(QWidget):
         )
         self._auto_colour_levels = tuple(map(float, self.heatmap.color_bar.levels()))
         checkpoints = np.unique(payload.cell_checkpoints[payload.cell_checkpoints >= 0]).tolist()
-        parameters = measurement_parameters(self._coordinates, checkpoints, {p.index: p for p in self._points})
-        title = measurement_title(parameters) or f"{payload.y_label} × {payload.x_label}"
+        request = payload.request or self._request()
+        coordinates = self._active_coordinates()
+        parameters = measurement_parameters(coordinates, checkpoints, {p.index: p for p in self._points})
+        title = heatmap_title(coordinates, request, parameters)
         self.heatmap.plot.setTitle(escape(title))
         self.heatmap.export_metadata = {
             "source_file": str(self._selected_path), "spectrum_row": row.id,
@@ -1269,7 +1273,7 @@ class HeatmapResultsTab(QWidget):
             "recorded_baselines": [processing_manifest(r) for r in payload.baselines],
             "map_processing": processing_manifest(self.map_controls.state),
             "line_classification_source": "Recorded dBm, same selected coordinate plane" if state.mask_lines else None,
-            "coordinate_selection": processing_manifest(self._request()),
+            "coordinate_selection": processing_manifest(request),
             "axes": {"x": {"label": payload.x_label, "unit": payload.x_unit},
                      "y": {"label": payload.y_label, "unit": payload.y_unit}},
             "value_unit": payload.z_unit, "notes": list(payload.processing_notes),
@@ -1474,23 +1478,21 @@ class HeatmapResultsTab(QWidget):
         self._coordinates = coordinates
         self._frequency_values = frequencies
         self._coordinate_row_id = row.id
+        axis_dimensions = coordinates.axis_dimensions
         for combo in (self.x_axis_combo, self.y_axis_combo):
             combo.blockSignals(True)
             combo.clear()
-            for dimension in coordinates.dimensions:
+            for dimension in axis_dimensions:
                 suffix = f" ({dimension.unit})" if dimension.unit else ""
                 combo.addItem(f"{dimension.label}{suffix}", userData=dimension.id)
         self.x_axis_combo.setCurrentIndex(0)
-        # Prefer the innermost authored sweep, rather than a derived setpoint
-        # appended after it (DC High/Low are recorded views of the offset).
+        # Prefer the innermost authored sweep. For sequential or partial runs
+        # without a Cartesian recipe mapping, favor the most sampled axis.
         if coordinates.sweep_dimension_ids:
-            self.y_axis_combo.setCurrentIndex(
-                self.y_axis_combo.findData(coordinates.sweep_dimension_ids[-1])
-            )
+            y_id = coordinates.sweep_dimension_ids[-1]
         else:
-            self.y_axis_combo.setCurrentIndex(
-                len(coordinates.dimensions) - 1 if len(coordinates.dimensions) > 1 else 0
-            )
+            y_id = max(reversed(axis_dimensions[1:]), key=lambda axis: len(set(axis.values))).id
+        self.y_axis_combo.setCurrentIndex(self.y_axis_combo.findData(y_id))
         for combo in (self.x_axis_combo, self.y_axis_combo):
             combo.blockSignals(False)
         self._rebuild_filters()
@@ -1507,13 +1509,18 @@ class HeatmapResultsTab(QWidget):
 
     def _request(self) -> HeatmapRequest:
         filters: dict[str, object] = {
+            dimension.id: dimension.values[0]
+            for dimension in self._active_coordinates().dimensions
+            if dimension.is_constant
+        }
+        filters.update({
             dimension_id: (
                 float(minimum.currentData()),
                 float(maximum.currentData()),
             )
             for dimension_id, (minimum, maximum) in self._range_combos.items()
             if minimum.currentData() is not None and maximum.currentData() is not None
-        }
+        })
         filters.update(
             {
                 dimension_id: float(combo.currentData())
@@ -1556,21 +1563,33 @@ class HeatmapResultsTab(QWidget):
         physical_dimensions = [
             dimension
             for dimension in self._coordinates.dimensions
-            if not dimension.is_frequency
+            if not dimension.is_frequency and dimension.values
         ]
-        if physical_dimensions:
-            range_hdr = CaptionLabel("Parameter ranges (inclusive):", self.filter_host)
-            range_hdr.setObjectName("muted")
-            self.filter_layout.addWidget(range_hdr)
+        section = None
+        physical_dimensions.sort(key=lambda dimension: dimension.id not in axes)
         for dimension in physical_dimensions:
+            heading = "Axis ranges" if dimension.id in axes else "Slice filters"
+            if section != heading:
+                section = heading
+                title = CaptionLabel(heading, self.filter_host)
+                title.setObjectName("muted")
+                self.filter_layout.addWidget(title)
             values = sorted({float(value) for value in dimension.values})
-            if not values:
-                continue
-            if dimension.id == VISIT_DIMENSION_ID and dimension.id not in axes:
+            if len(values) == 1:
+                value = self._format_coordinate_value(dimension, values[0])
+                label = CaptionLabel(f"{dimension.label}: {value}", self.filter_host)
+                label.setObjectName("heatmapFixedCoordinate")
+                label.setWordWrap(True)
+                self.filter_layout.addWidget(label)
+            elif dimension.id == VISIT_DIMENSION_ID and dimension.id not in axes:
                 self._add_visit_filter(values, defaults[dimension.id].minimum)
             else:
                 self._add_range_row(dimension, values, selected_range=defaults[dimension.id])
         if "frequency" not in axes:
+            if section != "Slice filters":
+                title = CaptionLabel("Slice filters", self.filter_host)
+                title.setObjectName("muted")
+                self.filter_layout.addWidget(title)
             row = QWidget(self.filter_host)
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)

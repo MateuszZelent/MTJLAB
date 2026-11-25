@@ -2,19 +2,29 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
-from random import Random
 import re
+from dataclasses import dataclass, replace
+from random import Random
 from typing import Literal
 
+from app.devices.anritsu_ms2830a.sweep_timing import (
+    GATE_FIELDS,
+    TIMING_PARAMETERS,
+    SpectrumTimingSettings,
+)
 from app.devices.base import InstrumentSession
 from app.devices.simulation import SimulationContext
 from app.domain.errors import ConnectionError, DeviceError
+from app.safety.keithley import (
+    KEITHLEY_2602A_CURRENT_RANGES,
+    KEITHLEY_2602A_VOLTAGE_RANGES,
+    selected_keithley_range,
+)
 from app.settings.models import StationSettings
-from app.safety.keithley import KEITHLEY_2602A_CURRENT_RANGES, KEITHLEY_2602A_VOLTAGE_RANGES, selected_keithley_range
 
 _SCPI_NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+_ANRITSU_TIMING_FIELDS = {parameter.header: field for field, parameter in TIMING_PARAMETERS.items()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -786,8 +796,24 @@ class AnritsuSimulator(_BaseSimulator):
         self.preamplifier_enabled = False
         self.sweep_time_auto = True
         self.sweep_time_s = 0.1
+        self.sweep_timing = SpectrumTimingSettings()
 
     def _write(self, command: str) -> None:
+        header, _, argument = command.upper().partition(" ")
+        timing_field = _ANRITSU_TIMING_FIELDS.get(header)
+        if timing_field is not None:
+            parameter = TIMING_PARAMETERS[timing_field]
+            if timing_field in GATE_FIELDS and not self.sweep_timing.gate_enabled:
+                self.error_queue.append('-221,"Settings conflict: enable Gate first"')
+                return
+            if timing_field == "fft_width_hz" and self.sweep_timing.sweep_rule != "PFFT":
+                self.error_queue.append('-221,"Settings conflict: select FFT priority first"')
+                return
+            value = parameter.parse(timing_field, argument.removesuffix(parameter.suffix))
+            self.sweep_timing = replace(self.sweep_timing, **{timing_field: value})
+            if self.sweep_timing.gate_enabled:
+                self.sweep_timing = replace(self.sweep_timing, sweep_rule="OSW")
+            return
         if command.upper().startswith("TRAC1:TYPE") and self.remote_language != "SCPI":
             self.error_queue.append('-113,"Undefined header;TRAC1:TYPE"')
             return
@@ -838,18 +864,26 @@ class AnritsuSimulator(_BaseSimulator):
                 switch_commands[switch.group(1).upper()],
                 switch.group(2).upper() in {"ON", "1"},
             )
+            if not self.sweep_time_auto:
+                self.sweep_timing = replace(self.sweep_timing, sweep_rule="OSW")
             return
         rbw = re.match(rf"^BAND\s+({_SCPI_NUMBER})HZ$", command, re.IGNORECASE)
         if rbw:
+            value = float(rbw.group(1))
+            if not math.isfinite(value) or value <= 0:
+                raise DeviceError(f"Anritsu simulator: invalid RBW {command!r}.")
             self.rbw_auto = False
-            self.rbw_hz = float(rbw.group(1))
+            self.rbw_hz = value
             return
         vbw = re.match(
             rf"^BAND:VID\s+({_SCPI_NUMBER})HZ$", command, re.IGNORECASE
         )
         if vbw:
+            value = float(vbw.group(1))
+            if not math.isfinite(value) or value <= 0:
+                raise DeviceError(f"Anritsu simulator: invalid VBW {command!r}.")
             self.vbw_auto = False
-            self.vbw_hz = float(vbw.group(1))
+            self.vbw_hz = value
             return
         if command.upper() == "BAND:VID OFF":
             self.vbw_auto = False
@@ -918,14 +952,27 @@ class AnritsuSimulator(_BaseSimulator):
         )
         if match:
             value = float(match.group(2))
+            if not math.isfinite(value) or value <= 0:
+                raise DeviceError(f"Anritsu simulator: invalid frequency {command!r}.")
             if match.group(1).upper() == "STAR":
+                if value >= self.stop_hz:
+                    raise DeviceError(
+                        f"Anritsu simulator: start frequency ({value:g} Hz) must be below stop frequency ({self.stop_hz:g} Hz)."
+                    )
                 self.start_hz = value
             else:
+                if value <= self.start_hz:
+                    raise DeviceError(
+                        f"Anritsu simulator: stop frequency ({value:g} Hz) must exceed start frequency ({self.start_hz:g} Hz)."
+                    )
                 self.stop_hz = value
             return
         match = re.match(r"^SWE:POIN\s+(\d+)$", command, re.IGNORECASE)
         if match:
-            self.points = int(match.group(1))
+            points = int(match.group(1))
+            if points < 2:
+                raise DeviceError(f"Anritsu simulator: sweep points must be >= 2 (got {points}).")
+            self.points = points
             return
         match = re.match(
             rf"^DISP:WIND:TRAC:Y:RLEV\s+({_SCPI_NUMBER})$",
@@ -953,6 +1000,15 @@ class AnritsuSimulator(_BaseSimulator):
         raise DeviceError(f"Anritsu simulator: unsupported write {command!r}.")
 
     def _query(self, command: str) -> str:
+        timing_field = _ANRITSU_TIMING_FIELDS.get(command.removesuffix("?"))
+        if command.endswith("?") and timing_field is not None:
+            value = getattr(self.sweep_timing, timing_field)
+            return str(int(value)) if isinstance(value, bool) else str(value)
+        if command in {"SWE:RUL:RTYP?", "SWE:RUL:FFT:RWID?"}:
+            using_fft = self.sweep_timing.sweep_rule == "PFFT" and self.sweep_timing.fft_width_hz == 2_000_000
+            if command == "SWE:RUL:RTYP?":
+                return "FFT" if using_fft else "SWE"
+            return str(self.sweep_timing.fft_width_hz) if using_fft else "***"
         if command == "*IDN?":
             return "ANRITSU,MS2830A,SIM000001,sim-1.0"
         if command == "SYST:LANG?":
@@ -1028,6 +1084,10 @@ class AnritsuSimulator(_BaseSimulator):
         if command == "DISP:WIND:TRAC:Y:RLEV?":
             return f"{self.reference_level:.12g}"
         if re.fullmatch(r"TRAC\?\s+TRAC1", command, re.IGNORECASE):
+            if self.points < 2 or self.start_hz <= 0 or self.stop_hz <= self.start_hz:
+                raise DeviceError(
+                    "Anritsu simulator: invalid frequency range or point count for trace acquisition."
+                )
             if self.continuous_sweep:
                 self.trace_frame += 1
             center = (self.start_hz + self.stop_hz) / 2
