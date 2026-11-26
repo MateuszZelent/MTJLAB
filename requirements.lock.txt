@@ -1,7 +1,7 @@
 # Qualified runtime environment. Install with: python -m pip install -r requirements.lock.txt
 # python==3.14.6
 annotated-types==0.6.0
-certifi==2026.6.17
+certifi==2026.10.18
 cftime==1.6.5
 click==8.4.1
 cloudpickle==3.1.2
@@ -24,7 +24,7 @@ numpy==2.5.1
 packaging==26.0
 pandas==3.0.3
 partd==1.4.2
-pillow==12.3.0
+pillow==13.0.0
 pydantic==2.13.4
 pydantic_core==2.46.4
 pyparsing==3.3.2
