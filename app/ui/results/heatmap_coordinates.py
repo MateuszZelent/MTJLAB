@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TypeAlias
 
@@ -22,6 +22,7 @@ from app.storage import (
 _FREQUENCY_ID = "frequency"
 _CHECKPOINT_ID = "measurement.checkpoint"
 VISIT_DIMENSION_ID = "measurement.visit"
+SERIES_DIMENSION_ID = "measurement.series"
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +53,8 @@ class HeatmapCoordinates:
     def axis_dimensions(self) -> tuple[HeatmapDimension, ...]:
         return tuple(
             dimension for dimension in self.dimensions
-            if dimension.is_frequency or dimension.id == _CHECKPOINT_ID or not dimension.is_constant
+            if dimension.id != SERIES_DIMENSION_ID
+            and (dimension.is_frequency or dimension.id == _CHECKPOINT_ID or not dimension.is_constant)
         )
 
     def dimension(self, dimension_id: str) -> HeatmapDimension:
@@ -149,7 +151,16 @@ def build_heatmap_coordinates(
             ),
             *dimensions,
         )
-    # A return sweep can store several spectra at identical physical settings.
+    numbers = ()
+    if len(points) == checkpoint_count and all(point.index == index for index, point in enumerate(points)):
+        numbers = tuple(
+            float(number) if type(number) is int and 0 < number < 2**53 else 0.0
+            for point in points for number in (point.metadata.get("series_number"),)
+        )
+    if any(numbers):
+        dimensions = (*dimensions, HeatmapDimension(SERIES_DIMENSION_ID, "Series", "", numbers))
+    # A return sweep can store several spectra at identical settings in the
+    # same series. A different series has its own sequence of visits.
     # Give each occurrence its own selector instead of merging measurements.
     visits = {}
     ordinals = []
@@ -206,7 +217,7 @@ def default_heatmap_ranges(
         active_groups = np.unique(groups)
         best = None
         for dimension in dimensions:
-            if dimension.id in axis_ids or dimension.is_constant:
+            if dimension.id in axis_ids or dimension.id == SERIES_DIMENSION_ID or dimension.is_constant:
                 continue
             values = values_by_id[dimension.id][selected]
             lows, highs = np.full(group_count, np.inf), np.full(group_count, -np.inf)
@@ -231,6 +242,53 @@ def default_heatmap_ranges(
     return ranges
 
 
+def linked_heatmap_ranges(
+    coordinates: HeatmapCoordinates,
+    x_id: str,
+    y_id: str,
+    *,
+    series: int | None = None,
+    preferred: Mapping[str, HeatmapRange] | None = None,
+) -> dict[str, tuple[list[float], HeatmapRange]]:
+    """Expose choices in recorded scope, then narrow to the selected child range."""
+    axes = {x_id, y_id}
+    dimensions = [d for d in coordinates.dimensions
+                  if not d.is_frequency and d.values and d.id != SERIES_DIMENSION_ID]
+    series_filter = {SERIES_DIMENSION_ID: series} if series is not None else {}
+    indices = np.asarray(_selected_checkpoints(coordinates, series_filter), dtype=int)
+    if not indices.size:
+        return {}
+    scope = replace(coordinates, checkpoint_count=len(indices), dimensions=tuple(
+        d if d.is_frequency else replace(d, values=tuple(np.asarray(d.values)[indices]))
+        for d in coordinates.dimensions
+    ))
+    defaults = default_heatmap_ranges(scope, x_id, y_id)
+    moke_ids = {d.id for d in dimensions if d.id.startswith("moke_box.vout")
+                and d.id.endswith(".voltage")}
+    device_order = {"keithley.B.current": 1, "keithley.A.current": 2}
+    device_order.update(dict.fromkeys(moke_ids, 0))
+    moke_scan = bool(moke_ids) and {"keithley.A.current", "keithley.B.current"} <= {d.id for d in dimensions}
+    dimensions.sort(key=lambda d: (
+        d.id in axes, d.id == VISIT_DIMENSION_ID, device_order.get(d.id, 3),
+    ))
+    chosen = {}
+    preferred = preferred or {}
+    for dimension in dimensions:
+        scoped_values = np.asarray(dimension.values)[indices]
+        options = np.unique(scoped_values)
+        desired = preferred.get(dimension.id, defaults[dimension.id])
+        if moke_scan and dimension.id in device_order and dimension.id not in axes and dimension.id not in preferred:
+            value = float(options[0])
+            desired = HeatmapRange(value, value)
+        matching = options[_selection_mask(options, desired)]
+        if not matching.size:
+            matching = options if dimension.id in axes or not _is_exact_range(desired) else options[:1]
+        bounds = HeatmapRange(matching[0], matching[-1])
+        chosen[dimension.id] = (options.tolist(), bounds)
+        indices = indices[_selection_mask(scoped_values, bounds)]
+    return chosen
+
+
 def read_heatmap_matrix(
     path: Path,
     row: ThatecRow,
@@ -250,6 +308,11 @@ def read_heatmap_matrix(
     if x_dimension.id == y_dimension.id:
         raise ValueError("Heatmap X and Y axes must be different.")
     known_dimension_ids = {dimension.id for dimension in coordinates.dimensions}
+    duplicate_cell_message = (
+        "Multiple checkpoints map to one heatmap cell; select a measurement series or refine the filters."
+        if SERIES_DIMENSION_ID in known_dimension_ids else
+        "Multiple checkpoints map to one heatmap cell; refine the filters."
+    )
     unknown_filters = sorted(set(request.filters) - known_dimension_ids)
     if unknown_filters:
         raise ValueError(
@@ -285,7 +348,7 @@ def read_heatmap_matrix(
     missing_filters = [
         dimension.label
         for dimension in filter_dimensions
-        if dimension.id not in request.filters and not dimension.is_constant
+        if dimension.id not in request.filters and dimension.id != SERIES_DIMENSION_ID and not dimension.is_constant
     ]
     if missing_filters:
         raise ValueError(
@@ -367,9 +430,7 @@ def read_heatmap_matrix(
             coordinate = _checkpoint_value(varying_dimension, checkpoint)
             row_index = _value_index(axis_values, coordinate)
             if np.any(cell_checkpoints[row_index] >= 0):
-                raise ValueError(
-                    "Multiple checkpoints map to one heatmap cell; refine the filters."
-                )
+                raise ValueError(duplicate_cell_message)
             matrix[row_index, :] = values
             if input_matrix is not None:
                 input_matrix[row_index, :] = input_traces[checkpoint]
@@ -395,9 +456,7 @@ def read_heatmap_matrix(
             x_index = _value_index(x_values, _checkpoint_value(x_dimension, checkpoint))
             y_index = _value_index(y_values, _checkpoint_value(y_dimension, checkpoint))
             if cell_checkpoints[y_index, x_index] >= 0:
-                raise ValueError(
-                    "Multiple checkpoints map to one heatmap cell; refine the filters."
-                )
+                raise ValueError(duplicate_cell_message)
             matrix[y_index, x_index] = values[frequency_index]
             if input_matrix is not None:
                 input_matrix[y_index, x_index] = input_traces[checkpoint][frequency_index]

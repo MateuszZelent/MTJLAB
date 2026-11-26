@@ -4,8 +4,29 @@ import numpy as np
 import pytest
 
 from app.ui.design_system import apply_application_theme
-from app.ui.results.heatmap_tab import HeatmapPlotWidget
+from app.ui.results.heatmap_tab import HeatmapPlotWidget, HeatmapResultsTab
 from tests.shell_test_isolation import shell_qt_application as shell_qt_application  # noqa: PLC0414
+
+
+def test_docked_heatmap_initializes_its_plot_layout_and_overlay(shell_qt_application):
+    tab = HeatmapResultsTab()
+    try:
+        tab.resize(1280, 850)
+        tab.heatmap_view.setCurrentWidget(tab.heatmap)
+        tab.show()
+        shell_qt_application.processEvents()
+        plot = tab.heatmap
+        assert plot.plot.isVisibleTo(tab)
+        assert plot.plot.height() > 200
+        assert plot.plot.geometry().bottom() >= plot.contentsRect().bottom() - 1
+        plot.set_dispersion_overlay([1e9, 2e9], [0.002, 0.003])
+        assert plot._dispersion_curve.isVisible()
+        plot.clear()
+        assert not plot._dispersion_curve.isVisible()
+    finally:
+        tab.close()
+        tab.deleteLater()
+        shell_qt_application.processEvents()
 
 
 @pytest.mark.parametrize("theme,size", [("light", (1100, 640)), ("dark", (760, 480))])

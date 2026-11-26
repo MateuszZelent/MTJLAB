@@ -8,12 +8,21 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QTimer, Signal
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
+    QHBoxLayout,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import ComboBox, FluentIcon, PushButton, SegmentedWidget
+from qfluentwidgets import (
+    CaptionLabel,
+    CardWidget,
+    ComboBox,
+    FluentIcon,
+    PushButton,
+    SegmentedWidget,
+    StrongBodyLabel,
+)
 
 from app.storage import RunDetail, ThatecRun
 from app.storage.pythat_reader import PyThatRunData
@@ -21,13 +30,13 @@ from app.ui.widgets.fluent_code_viewer import FluentCodeViewer
 
 
 class _FluentMetadataSections(QWidget):
-    """Compact Fluent segmented navigation for the immutable run-detail documents."""
+    """Clean Fluent SegmentedWidget navigation for the immutable run-detail documents."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
         self.navigation = SegmentedWidget(self)
         self.compact_navigation = ComboBox(self)
         self.compact_navigation.setAccessibleName("Result detail section")
@@ -115,7 +124,7 @@ class _FluentMetadataSections(QWidget):
 
 
 class MetadataPanel(QWidget):
-    """Fluent detail navigation for metadata, snapshots and device state."""
+    """Fluent overview KPIs and read-only detail navigation for metadata & snapshots."""
 
     pythat_requested = Signal()
 
@@ -123,6 +132,37 @@ class MetadataPanel(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        # --- Compact 4-Tile Overview KPI Strip ---
+        self.kpi_strip = QWidget(self)
+        kpi_layout = QHBoxLayout(self.kpi_strip)
+        kpi_layout.setContentsMargins(0, 0, 0, 0)
+        kpi_layout.setSpacing(8)
+        self._kpi_cards: dict[str, tuple[StrongBodyLabel, CaptionLabel]] = {}
+        for key, title in (
+            ("points", "Checkpoints / Spectra"),
+            ("status", "Run Status & Mode"),
+            ("instruments", "Instruments"),
+            ("provenance", "Provenance & PyThat"),
+        ):
+            tile = CardWidget(self.kpi_strip)
+            tile.setObjectName("resultsKpiTile")
+            tile_layout = QVBoxLayout(tile)
+            tile_layout.setContentsMargins(10, 7, 10, 7)
+            tile_layout.setSpacing(2)
+            heading = CaptionLabel(title, tile)
+            heading.setObjectName("muted")
+            value = StrongBodyLabel("—", tile)
+            subtitle = CaptionLabel("", tile)
+            subtitle.setObjectName("muted")
+            tile_layout.addWidget(heading)
+            tile_layout.addWidget(value)
+            tile_layout.addWidget(subtitle)
+            kpi_layout.addWidget(tile, 1)
+            self._kpi_cards[key] = (value, subtitle)
+        self.kpi_strip.hide()
+        layout.addWidget(self.kpi_strip)
 
         self.tabs = _FluentMetadataSections(self)
         self.section_navigation = self.tabs.navigation
@@ -155,11 +195,41 @@ class MetadataPanel(QWidget):
         pythat_layout.addWidget(self.pythat_data, 1)
         self.tabs.addTab(pythat_page, "PyThat data")
         self.tabs.addTab(self.device_state, "Device state")
-        layout.addWidget(self.tabs)
+        layout.addWidget(self.tabs, 1)
+
+    def _set_kpi(self, key: str, value: str, subtitle: str) -> None:
+        val_lbl, sub_lbl = self._kpi_cards[key]
+        val_lbl.setText(value)
+        sub_lbl.setText(subtitle)
 
     def show_detail(self, detail: RunDetail) -> None:
-        """Populate all tabs from a private HDF5 run detail."""
+        """Populate KPI tiles and all tabs from a private HDF5 run detail."""
         summary = detail.summary
+        sim = detail.simulation_metadata if isinstance(detail.simulation_metadata, dict) else {}
+        exec_mode = str(sim.get("execution_mode") or ("simulated" if sim.get("enabled") else "hardware"))
+        devices = sorted(detail.device_idn.keys())
+        plan_short = (summary.plan_sha256 or "—")[:12]
+        self._set_kpi(
+            "points",
+            f"{summary.point_count} / {summary.spectrum_count}",
+            "Committed points / spectra",
+        )
+        self._set_kpi(
+            "status",
+            summary.status.capitalize(),
+            f"Mode: {exec_mode}",
+        )
+        self._set_kpi(
+            "instruments",
+            f"{len(devices)} device(s)" if devices else "Offline / none",
+            ", ".join(devices[:3]) if devices else "No hardware IDNs",
+        )
+        self._set_kpi(
+            "provenance",
+            "Read-Only HDF5",
+            f"SHA-256: {plan_short}",
+        )
+        self.kpi_strip.show()
         lines = [
             "# --- Run Summary ---",
             f"File: {summary.path}",
@@ -212,6 +282,11 @@ class MetadataPanel(QWidget):
 
     def show_thatec_summary(self, path: Path, run: ThatecRun) -> None:
         """Show minimal metadata for a public THATEC file without private groups."""
+        self._set_kpi("points", f"{len(run.rows)} row(s)", "Public /measurement")
+        self._set_kpi("status", "THATEC Public", "Read-only archive")
+        self._set_kpi("instruments", f"{len(run.devices)} device(s)", "Recorded /devices")
+        self._set_kpi("provenance", "THATEC HDF5", path.name)
+        self.kpi_strip.show()
         self.metadata.setPlainText(
             f"# Public THATEC file\nFile: {path}\nRows: {len(run.rows)}\n"
             f"Devices: {len(run.devices)}"
@@ -220,6 +295,11 @@ class MetadataPanel(QWidget):
         self.settings_snapshot.clear()
 
     def show_heatmap_analysis(self, path, metadata):
+        self._set_kpi("points", "Derived Map", "Heatmap snapshot")
+        self._set_kpi("status", "Analysis Snapshot", "Read-only")
+        self._set_kpi("instruments", "From source HDF5", metadata.get("spectrum_row", "—"))
+        self._set_kpi("provenance", "heatmap-analysis.v1", path.name)
+        self.kpi_strip.show()
         self.metadata.setPlainText(f"# Derived heatmap snapshot\nFile: {path}\n\n" +
                                    json.dumps(metadata, ensure_ascii=False, indent=2))
         self.recipe_snapshot.clear()
@@ -228,6 +308,7 @@ class MetadataPanel(QWidget):
     def show_pythat(self, data: PyThatRunData | None) -> None:
         """Populate the PyThat tab."""
         if data is not None:
+            self._set_kpi("provenance", "PyThat Verified", f"{len(data.variables)} variable(s)")
             self.pythat_data.setPlainText(
                 "# Dimensions\n"
                 + _format_json(data.dimensions)
@@ -247,6 +328,9 @@ class MetadataPanel(QWidget):
 
     def clear(self) -> None:
         """Clear all tabs."""
+        self.kpi_strip.hide()
+        for key in self._kpi_cards:
+            self._set_kpi(key, "—", "")
         self.metadata.clear()
         self.recipe_snapshot.clear()
         self.settings_snapshot.clear()

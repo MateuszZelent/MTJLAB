@@ -109,10 +109,13 @@ from app.recipes import (
     unwrap_recipe_repeat,
 )
 from app.recipes.block_registry import ANRITSU_ACQUISITION_OPTION_FIELDS, ANRITSU_HARDWARE_AVERAGE_FIELDS
+from app.recipes.editing import set_completed_series
+from app.recipes.measurement_series import apply_series_selection, measurement_series
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS as _SWEEPABLE_PARAMETERS
 from app.recipes.parameter_registry import sweep_default as _sweep_default
 from app.recipes.semantic_tree import SemanticMeasurementTree, SemanticNodeKind, SemanticTreeNode, normalize_recipe_tree
+from app.ui.series_dialog import MeasurementSeriesDialog
 from app.security import AccessPolicy, Permission
 from app.settings.models import StationSettings
 from app.storage import Hdf5RunReader, ThatecDevice, ThatecRow, ThatecRun, ThatecRunReader, ThatecTreeNode
@@ -464,6 +467,12 @@ class RecipePage(QWidget):
         self.run_button = PrimaryPushButton("Go to Execute")
         self.run_button.setToolTip("Review the validated plan in Execution before starting.")
         self.run_button.setEnabled(False)
+        self.series_button = PushButton("Series…", self.document_card)
+        self.series_button.setToolTip("Choose which measurement series to run.")
+        self.series_button.clicked.connect(self._edit_measurement_series)
+        self.series_button.hide()
+        self._series_source = None
+        self._series_catalog = ()
         self.save_to_elab_check = CheckBox("Save finished run to eLab", self.document_card)
         self.save_to_elab_check.setEnabled(False)
         self.save_to_elab_check.setToolTip(
@@ -675,6 +684,7 @@ class RecipePage(QWidget):
         target_box.addWidget(self.sample_target_label)
         target_box.addWidget(self.change_sample_target_button)
         target_box.addStretch(1)
+        target_box.addWidget(self.series_button)
         execution_line.addLayout(target_box, 3, 0, 1, 3)
         execution_line.setColumnStretch(1, 1)
         document_layout.addLayout(execution_line)
@@ -774,6 +784,7 @@ class RecipePage(QWidget):
         self._selected_source_node_id: str | None = None
         self._historical_objects_by_semantic_id: dict[str, object] = {}
         self.tree_model = MeasurementTreeModel(parent=self)
+        self.tree_model.series_selection_requested.connect(self._set_series_measured)
         self.tree_model.set_outputs_forced_off(self.execution_mode.currentData() == "dry_run")
         self.measurement_tree = MeasurementTreeView(self)
         self.measurement_tree.setObjectName("semanticMeasurementTree")
@@ -951,6 +962,7 @@ class RecipePage(QWidget):
             self.output_directory_button,
             self.output_file_stem,
             self.run_button,
+            self.series_button,
             self.edit_device_button,
             self.edit_generator_button,
             self.add_baseline_button,
@@ -2374,6 +2386,8 @@ class RecipePage(QWidget):
         if not source.strip():
             source = self.editor.toPlainText()
         recipe = parse_recipe_text(source, origin=self.path.text() or "recipe")
+        if not update_editor and recipe.completed_series:
+            recipe = apply_series_selection(recipe, measurement_series(recipe))
         snapshot = normalize_recipe_tree(
             recipe, self._device_registry.sweep_providers(),
             safe_shutdown_actions=getattr(plan, "safe_shutdown_actions", None),
@@ -2583,6 +2597,52 @@ class RecipePage(QWidget):
         self._update_tree_history_controls()
         self._tree_drag_status_changed("", True)
         self._refresh_output_preview()
+        self._refresh_series_button(pending)
+
+    def _refresh_series_button(self, pending: bool) -> None:
+        if self._series_source != self._tree_source:
+            self._series_source = self._tree_source
+            try:
+                recipe = parse_recipe_text(self._tree_source)
+                self._series_catalog = measurement_series(recipe)
+            except ConfigurationError:
+                self._series_catalog = ()
+        catalog = self._series_catalog
+        self.tree_model.set_series(catalog if not self._historical_sweep_active else (), source_text=self._tree_source)
+        self.series_button.setVisible(bool(catalog) and not self._historical_sweep_active)
+        self.series_button.setEnabled(bool(catalog) and not pending and not self._execution_controlled)
+        if catalog:
+            planned = sum(not item.already_measured for item in catalog)
+            self.series_button.setText(f"Series · {planned}/{len(catalog)} planned…")
+
+    def _edit_measurement_series(self) -> None:
+        if not self._tree_editing_allowed() or not self._series_catalog:
+            return
+        dialog = MeasurementSeriesDialog(self._series_catalog, self)
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted or not self._tree_editing_allowed():
+                return
+            self._update_series_selection(dialog.completed_series_ids)
+        finally:
+            dialog.deleteLater()
+
+    def _set_series_measured(self, series_id: str, measured: bool) -> None:
+        if not self._tree_editing_allowed() or not any(item.id == series_id for item in self._series_catalog):
+            return
+        selection = tuple(
+            item.id for item in self._series_catalog
+            if (measured if item.id == series_id else item.already_measured)
+        )
+        self._update_series_selection(selection)
+
+    def _update_series_selection(self, selection: tuple[str, ...]) -> None:
+        recipe = parse_recipe_text(self._tree_source)
+        if selection != recipe.completed_series:
+            self._apply_builder_source(
+                set_completed_series(self._tree_source, selection),
+                "Series selection updated. Validate the sweep to review the new execution plan.",
+                series_selection_only=True,
+            )
 
     def _builder_source(self) -> str:
         if not self._tree_editing_allowed():
@@ -4582,6 +4642,7 @@ class RecipePage(QWidget):
         status: str,
         *,
         selected_node_id: str | None = None,
+        series_selection_only: bool = False,
     ) -> None:
         self._leave_historical_sweep_mode()
         previous = self._tree_source
@@ -4589,7 +4650,7 @@ class RecipePage(QWidget):
             from app.recipes.editing import canonical_recipe_source
             source = canonical_recipe_source(source)
             recipe = parse_recipe_text(source, origin="tree-builder")
-            snapshot = normalize_recipe_tree(
+            snapshot = None if series_selection_only else normalize_recipe_tree(
                 recipe, self._device_registry.sweep_providers(), show_safeguard_steps=False
             )
         except Exception as exc:
@@ -4617,8 +4678,9 @@ class RecipePage(QWidget):
         self._loading_source = False
         self._close_discard_confirmed = False
         self._tree_source = source
-        self.tree_model.replace_tree(snapshot)
-        self._select_source_node(selected_node_id or recipe.root.id)
+        if snapshot is not None:
+            self.tree_model.replace_tree(snapshot)
+            self._select_source_node(selected_node_id or recipe.root.id)
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
         self.summary.setText("Recipe tree changed; compile it again before running.")
@@ -7078,6 +7140,14 @@ class RecipePage(QWidget):
                 add_action("Apply YAML to tree", self.apply_yaml_to_tree)
             menu.exec(global_position)
             return
+        semantic = self._selected_semantic_node()
+        if semantic is not None:
+            series = next((item for item in self._series_catalog if item.id == semantic.semantic_id), None)
+            if series is not None:
+                add_action(
+                    "Include series in next run" if series.already_measured else "Mark series as already measured",
+                    lambda: self._set_series_measured(series.id, not series.already_measured),
+                )
         menu.addSeparator()
         add_action(
             "Add sequence / group",
@@ -7114,7 +7184,6 @@ class RecipePage(QWidget):
         move_up = add_action("Move selected node up", lambda: self._move_selected_sibling(-1))
         move_down = add_action("Move selected node down", lambda: self._move_selected_sibling(1))
         editable = self._tree_editing_allowed() and isinstance(node, RecipeNode)
-        semantic = self._selected_semantic_node()
         is_generated_row = bool(
             semantic is not None
             and semantic.kind in {

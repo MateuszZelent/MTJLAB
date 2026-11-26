@@ -42,6 +42,7 @@ class FilterComboBox(QComboBox):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("resultFilterCombo")
         self.options = FilterChoiceModel(self)
         self.setModel(self.options)
         self._popup_style = _BoundedComboStyle()

@@ -11,9 +11,18 @@ from datetime import UTC, datetime
 from math import prod
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSignalBlocker, Qt, QThreadPool, Signal
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QModelIndex,
+    QSignalBlocker,
+    Qt,
+    QThreadPool,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QSizePolicy,
@@ -28,7 +37,10 @@ from qfluentwidgets import (
     ComboBox,
     FluentIcon,
     PushButton,
+    ScrollArea,
+    Slider,
     SpinBox,
+    TogglePushButton,
     TreeView,
 )
 
@@ -45,6 +57,7 @@ from app.domain.quantities import (
     DIMENSION_VOLTAGE,
     format_quantity_auto,
 )
+from app.spectrum.spintronic_fits import SpectrumResonanceSummary, fit_spectrum_resonance
 from app.storage import (
     Hdf5RunReader,
     StoredPoint,
@@ -272,19 +285,170 @@ class SpectrumResultsTab(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(0)
 
-        # --- Fluent Controls Card (Sweeps style) ---
-        self.controls_card = CardWidget(self)
+        self._play_timer = QTimer(self)
+        self._play_timer.setInterval(260)
+        self._play_timer.timeout.connect(self._advance_playback)
+        self._last_fit_summary: SpectrumResonanceSummary | None = None
+        self._inspector_visible = True
+
+        # --- Data-First Horizontal Split (Left: Unobstructed Spectrum Plot | Right: Scrollable Inspector) ---
+        self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.workspace_splitter.setObjectName("resultsTabSplitter")
+        self.workspace_splitter.setChildrenCollapsible(False)
+
+        # ==================== LEFT STAGE: TELEMETRY + SPECTRUM CANVAS + SCRUBBER ====================
+        main_stage = QWidget(self.workspace_splitter)
+        stage_layout = QVBoxLayout(main_stage)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
+        stage_layout.setSpacing(4)
+
+        # Dedicated single-line command & telemetry strip ABOVE the plot (zero floating bubbles!)
+        telemetry_bar = QFrame(main_stage)
+        telemetry_bar.setObjectName("resultsTelemetryBar")
+        telemetry_layout = QHBoxLayout(telemetry_bar)
+        telemetry_layout.setContentsMargins(8, 4, 8, 4)
+        telemetry_layout.setSpacing(6)
+
+        self.fit_button = TogglePushButton("Curve Fit", telemetry_bar)
+        self.fit_button.setToolTip(
+            "Fit a Lorentzian or Gaussian resonance on linear power (SI W·Hz area)."
+        )
+        self.fit_button.toggled.connect(self._on_fit_toggled)
+        telemetry_layout.addWidget(self.fit_button)
+
+        self.fit_model_combo = ComboBox(telemetry_bar)
+        self.fit_model_combo.setAccessibleName("Resonance fit profile")
+        self.fit_model_combo.addItem("Lorentzian", userData="lorentzian")
+        self.fit_model_combo.addItem("Gaussian", userData="gaussian")
+        self.fit_model_combo.setFixedWidth(112)
+        self.fit_model_combo.hide()
+        self.fit_model_combo.currentIndexChanged.connect(lambda _idx: self._update_analysis_overlays())
+        telemetry_layout.addWidget(self.fit_model_combo)
+
+        self.ab_wipe_button = TogglePushButton("A/B Wipe", telemetry_bar)
+        self.ab_wipe_button.setToolTip(
+            "Split the trace with a draggable divider: Raw HDF5 (left) vs Processed (right)."
+        )
+        self.ab_wipe_button.toggled.connect(lambda _checked: self._update_analysis_overlays())
+        telemetry_layout.addWidget(self.ab_wipe_button)
+
+        self.fit_readout_label = CaptionLabel("", telemetry_bar)
+        self.fit_readout_label.setObjectName("resultsTelemetryMuted")
+        telemetry_layout.addWidget(self.fit_readout_label, 1)
+
+        self.inspector_toggle_button = TogglePushButton("Inspector", telemetry_bar)
+        self.inspector_toggle_button.setChecked(True)
+        self.inspector_toggle_button.setToolTip("Show or hide the right analysis & filter inspector")
+        self.inspector_toggle_button.toggled.connect(self.set_inspector_visible)
+        telemetry_layout.addWidget(self.inspector_toggle_button)
+        stage_layout.addWidget(telemetry_bar)
+
+        # Primary Spectrum Canvas (fills viewport height above the fold!)
+        self.spectrum_plot = ResultSpectrumWorkbench(main_stage)
+        self.spectrum_plot.batch_button.clicked.connect(self._open_batch)
+        self.peak_tools = ResultPeakTools(self)
+        self.spectrum_plot.absolute_changed.connect(self.peak_tools.spectrum_changed)
+        self.spectrum_plot.set_title("Select a stored or public spectrum")
+        self.spectrum_plot.setMinimumHeight(200)
+        self.spectrum_plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.spectrum_state = ResultsStateCard(main_stage)
+        self.spectrum_view = QStackedWidget(main_stage)
+        self.spectrum_view.setMinimumHeight(240)
+        self.spectrum_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.spectrum_view.addWidget(self.spectrum_state)
+        self.spectrum_view.addWidget(self.spectrum_plot)
+        stage_layout.addWidget(self.spectrum_view, 1)
+
+        # Compact Checkpoint Scrubber & Sweep Playback Bar
+        navigation_card = QFrame(main_stage)
+        navigation_card.setObjectName("resultsScrubberBar")
+        navigation = QHBoxLayout(navigation_card)
+        navigation.setContentsMargins(8, 4, 8, 4)
+        navigation.setSpacing(6)
+        self.prev_button = PushButton("Prev", navigation_card)
+        self.prev_button.setIcon(FluentIcon.LEFT_ARROW)
+        self.prev_button.setToolTip("Previous recorded spectrum")
+        self.play_button = PushButton(FluentIcon.PLAY, "Play", navigation_card)
+        self.play_button.setToolTip("Animate playback across recorded checkpoints")
+        self.play_button.setEnabled(False)
+        self.next_button = PushButton("Next", navigation_card)
+        self.next_button.setIcon(FluentIcon.RIGHT_ARROW)
+        self.next_button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.next_button.setToolTip("Next recorded spectrum")
+        self.prev_button.setEnabled(False)
+        self.next_button.setEnabled(False)
+        navigation.addWidget(self.prev_button)
+        navigation.addWidget(self.play_button)
+        navigation.addWidget(self.next_button)
+
+        self.checkpoint_slider = Slider(Qt.Orientation.Horizontal, navigation_card)
+        self.checkpoint_slider.setAccessibleName("Checkpoint scrubber")
+        self.checkpoint_slider.setRange(0, 0)
+        self.checkpoint_slider.setEnabled(False)
+        navigation.addWidget(self.checkpoint_slider, 1)
+
+        self.position_label = CaptionLabel("No spectrum selected", navigation_card)
+        self.position_label.setObjectName("resultsTelemetryMuted")
+        navigation.addWidget(self.position_label)
+        stage_layout.addWidget(navigation_card)
+
+        self.spectrum_info = CaptionLabel(
+            "Spectra are read from HDF5 without contacting instruments.",
+            main_stage,
+        )
+        self.spectrum_info.setObjectName("muted")
+        self.spectrum_info.setWordWrap(True)
+        self.spectrum_info.setFixedHeight(32)
+        stage_layout.addWidget(self.spectrum_info)
+        self.workspace_splitter.addWidget(main_stage)
+
+        # ==================== RIGHT DRAWER: SCROLLABLE ANALYSIS & FILTER INSPECTOR ====================
+        self.inspector_drawer = ScrollArea(self.workspace_splitter)
+        self.inspector_drawer.setObjectName("resultsInspectorScroll")
+        self.inspector_drawer.setWidgetResizable(True)
+        self.inspector_drawer.setFrameShape(ScrollArea.Shape.NoFrame)
+        self.inspector_drawer.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.inspector_drawer.setMinimumWidth(260)
+
+        inspector_host = QWidget(self.inspector_drawer)
+        inspector_host.setObjectName("resultsInspectorDrawer")
+        inspector_layout = QVBoxLayout(inspector_host)
+        inspector_layout.setContentsMargins(8, 6, 8, 8)
+        inspector_layout.setSpacing(6)
+
+        self.processing_controls = ResultProcessingControls(inspector_host)
+        inspector_layout.addWidget(self.processing_controls)
+        self.processing_controls.changed.connect(self._processing_changed)
+
+        self.view_controls = SpectrumViewControls(inspector_host)
+        inspector_layout.addWidget(self.view_controls)
+        self.view_controls.changed.connect(self._processing_changed)
+        self.view_controls.tools_requested.connect(self.spectrum_plot.show_tools)
+        self.view_controls.floating_requested.connect(self.spectrum_plot.show_floating)
+        self.view_controls.peaks_requested.connect(self.peak_tools.open)
+
+        self.series_controls = SweepSeriesControls(inspector_host)
+        self.series_controls.changed.connect(self._parameter_filter_changed)
+        inspector_layout.addWidget(self.series_controls)
+
+        self.baseline_controls = RecordedBaselineControls(inspector_host)
+        self.baseline_controls.show_requested.connect(self.show_reference)
+        self.baseline_controls.measurement_requested.connect(self._return_to_measurement)
+        inspector_layout.addWidget(self.baseline_controls)
+
+        # --- Fluent Controls Card (Checkpoint Filters & Public THATEC Rows) ---
+        self.controls_card = CardWidget(inspector_host)
         controls_layout = QVBoxLayout(self.controls_card)
-        controls_layout.setContentsMargins(12, 10, 12, 10)
-        controls_layout.setSpacing(8)
+        controls_layout.setContentsMargins(10, 8, 10, 8)
+        controls_layout.setSpacing(6)
 
         # Row 1: Checkpoint Filters & Stored View
         self.filter_selector = QGridLayout()
         filter_row = self.filter_selector
         filter_row.setContentsMargins(0, 0, 0, 0)
-        filter_row.setSpacing(10)
+        filter_row.setSpacing(6)
 
         param_layout = QVBoxLayout()
         param_layout.setSpacing(2)
@@ -292,7 +456,7 @@ class SpectrumResultsTab(QWidget):
         param_label.setObjectName("muted")
         param_layout.addWidget(param_label)
         self.filter_parameter_combo = FilterComboBox(self.controls_card)
-        self.filter_parameter_combo.setMinimumWidth(150)
+        self.filter_parameter_combo.setMinimumWidth(140)
         self.filter_parameter_combo.setAccessibleName("Result parameter filter")
         self.filter_parameter_combo.setToolTip(
             "Limit the checkpoint browser to one exact setpoint or result value."
@@ -309,7 +473,7 @@ class SpectrumResultsTab(QWidget):
         self.filter_value_combo.setMinimumWidth(110)
         self.filter_value_combo.setAccessibleName("Result parameter value filter")
         val_layout.addWidget(self.filter_value_combo)
-        filter_row.addLayout(val_layout, 0, 1)
+        filter_row.addLayout(val_layout, 1, 0)
 
         set_layout = QVBoxLayout()
         set_layout.setSpacing(2)
@@ -317,13 +481,13 @@ class SpectrumResultsTab(QWidget):
         set_label.setObjectName("muted")
         set_layout.addWidget(set_label)
         self.parameter_set_combo = FilterComboBox(self.controls_card)
-        self.parameter_set_combo.setMinimumWidth(160)
+        self.parameter_set_combo.setMinimumWidth(140)
         self.parameter_set_combo.setAccessibleName("Result parameter set filter")
         self.parameter_set_combo.setToolTip(
             "Choose one exact combination of checkpoint parameters."
         )
         set_layout.addWidget(self.parameter_set_combo)
-        filter_row.addLayout(set_layout, 0, 2)
+        filter_row.addLayout(set_layout, 2, 0)
 
         variant_layout = QVBoxLayout()
         variant_layout.setSpacing(2)
@@ -331,13 +495,13 @@ class SpectrumResultsTab(QWidget):
         variant_label.setObjectName("muted")
         variant_layout.addWidget(variant_label)
         self.spectrum_variant_combo = ComboBox(self.controls_card)
-        self.spectrum_variant_combo.setMinimumWidth(150)
+        self.spectrum_variant_combo.setMinimumWidth(140)
         self.spectrum_variant_combo.setAccessibleName("Stored spectrum view")
         self.spectrum_variant_combo.setToolTip(
             "Choose raw, processed, or reference data for the selected checkpoint."
         )
         variant_layout.addWidget(self.spectrum_variant_combo)
-        filter_row.addLayout(variant_layout, 0, 3)
+        filter_row.addLayout(variant_layout, 3, 0)
 
         btn_layout = QVBoxLayout()
         btn_layout.setSpacing(2)
@@ -349,17 +513,17 @@ class SpectrumResultsTab(QWidget):
         self.clear_filter_button.setEnabled(False)
         self.clear_filter_button.setToolTip("Reset parameter filters")
         btn_layout.addWidget(self.clear_filter_button)
-        filter_row.addLayout(btn_layout, 0, 4)
+        filter_row.addLayout(btn_layout, 4, 0)
         self._filter_fields = (param_layout, val_layout, set_layout, variant_layout, btn_layout)
 
         controls_layout.addLayout(filter_row)
 
-        # Row 2: Public THATEC/PyThat spectral rows (collapsible / only shown when rows exist)
+        # Row 2: Public THATEC/PyThat spectral rows (only shown when rows exist)
         self.public_row_container = QWidget(self.controls_card)
         self.public_selector = QGridLayout(self.public_row_container)
         public_row = self.public_selector
         public_row.setContentsMargins(0, 4, 0, 0)
-        public_row.setSpacing(10)
+        public_row.setSpacing(6)
 
         pub_row_layout = QVBoxLayout()
         pub_row_layout.setSpacing(2)
@@ -367,7 +531,7 @@ class SpectrumResultsTab(QWidget):
         pub_row_label.setObjectName("muted")
         pub_row_layout.addWidget(pub_row_label)
         self.thatec_row_combo = ComboBox(self.public_row_container)
-        self.thatec_row_combo.setMinimumWidth(220)
+        self.thatec_row_combo.setMinimumWidth(140)
         self.thatec_row_combo.setAccessibleName("Public spectrum row")
         self.thatec_row_combo.setToolTip(
             "Choose a spectral row stored in the public THATEC/PyThat result."
@@ -384,7 +548,7 @@ class SpectrumResultsTab(QWidget):
         self.thatec_checkpoint.setRange(0, 0)
         self.thatec_checkpoint.setAccessibleName("Spectrum checkpoint")
         pub_cp_layout.addWidget(self.thatec_checkpoint)
-        public_row.addLayout(pub_cp_layout, 0, 1)
+        public_row.addLayout(pub_cp_layout, 1, 0)
 
         pub_tr_layout = QVBoxLayout()
         pub_tr_layout.setSpacing(2)
@@ -398,12 +562,10 @@ class SpectrumResultsTab(QWidget):
             "Choose a channel from a multi-trace public spectrum."
         )
         pub_tr_layout.addWidget(self.thatec_trace_combo)
-        public_row.addLayout(pub_tr_layout, 0, 2)
+        public_row.addLayout(pub_tr_layout, 2, 0)
 
         pub_btn_layout = QVBoxLayout()
         pub_btn_layout.setSpacing(2)
-        pub_btn_spacer = CaptionLabel(" ", self.public_row_container)
-        pub_btn_layout.addWidget(pub_btn_spacer)
         self.show_thatec_button = PushButton("Show spectrum", self.public_row_container)
         self.show_thatec_button.setIcon(FluentIcon.VIEW)
         self.show_thatec_button.setEnabled(False)
@@ -411,101 +573,45 @@ class SpectrumResultsTab(QWidget):
             "Read the selected public spectrum without contacting an instrument."
         )
         pub_btn_layout.addWidget(self.show_thatec_button)
-        public_row.addLayout(pub_btn_layout, 0, 3)
+        public_row.addLayout(pub_btn_layout, 3, 0)
         self._public_fields = (pub_row_layout, pub_cp_layout, pub_tr_layout, pub_btn_layout)
 
         controls_layout.addWidget(self.public_row_container)
         self.public_row_container.hide()
+        inspector_layout.addWidget(self.controls_card)
 
-        layout.addWidget(self.controls_card)
-        self.series_controls = SweepSeriesControls(self)
-        self.series_controls.changed.connect(self._parameter_filter_changed)
-        layout.addWidget(self.series_controls)
-        self.baseline_controls = RecordedBaselineControls(self)
-        self.baseline_controls.show_requested.connect(self.show_reference)
-        self.baseline_controls.measurement_requested.connect(self._return_to_measurement)
-        layout.addWidget(self.baseline_controls)
-        self.processing_controls = ResultProcessingControls(self)
-        layout.addWidget(self.processing_controls)
-        self.processing_controls.changed.connect(self._processing_changed)
-        self.view_controls = SpectrumViewControls(self)
-        layout.addWidget(self.view_controls)
-        self.view_controls.changed.connect(self._processing_changed)
-
-        # --- Splitter (Points Table + Navigation + Spectrum Plot) ---
-        splitter = QSplitter(Qt.Orientation.Vertical)
-
-        self.points = TreeView(self)
+        # Compact Checkpoint Table inside Inspector
+        points_heading = CaptionLabel("Recorded checkpoints", inspector_host)
+        points_heading.setObjectName("muted")
+        inspector_layout.addWidget(points_heading)
+        self.points = TreeView(inspector_host)
         self.points_model = CheckpointModel(self._point_tooltip, self)
         self.points.setModel(self.points_model)
         self.points.setRootIsDecorated(False)
         self.points.setUniformRowHeights(True)
-        self.points.setAlternatingRowColors(True)
-        self.points.setMinimumHeight(80)
+        self.points.setAlternatingRowColors(False)
+        self.points.setMinimumHeight(150)
         header = self.points.header()
-        header.setMinimumSectionSize(60)
+        header.setMinimumSectionSize(50)
         header.setStretchLastSection(True)
-        self.points.setColumnWidth(0, 65)
-        self.points.setColumnWidth(1, 90)
-        self.points.setColumnWidth(2, 175)
-        splitter.addWidget(self.points)
+        self.points.setColumnWidth(0, 52)
+        self.points.setColumnWidth(1, 76)
+        self.points.setColumnWidth(2, 130)
+        inspector_layout.addWidget(self.points, 1)
 
-        navigation_card = CardWidget(self)
-        navigation = QHBoxLayout(navigation_card)
-        navigation.setContentsMargins(12, 6, 12, 6)
-        navigation.setSpacing(10)
-        self.prev_button = PushButton("Previous spectrum", navigation_card)
-        self.prev_button.setIcon(FluentIcon.LEFT_ARROW)
-        self.next_button = PushButton("Next spectrum", navigation_card)
-        self.next_button.setIcon(FluentIcon.RIGHT_ARROW)
-        self.next_button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-        self.prev_button.setEnabled(False)
-        self.next_button.setEnabled(False)
-        navigation.addWidget(self.prev_button)
-        navigation.addWidget(self.next_button)
-        self.position_label = CaptionLabel("No spectrum selected", navigation_card)
-        self.position_label.setObjectName("muted")
-        navigation.addWidget(self.position_label)
-        navigation.addStretch(1)
-        splitter.addWidget(navigation_card)
-
-        self.spectrum_plot = ResultSpectrumWorkbench(self)
-        self.spectrum_plot.batch_button.clicked.connect(self._open_batch)
-        self.view_controls.tools_requested.connect(self.spectrum_plot.show_tools)
-        self.view_controls.floating_requested.connect(self.spectrum_plot.show_floating)
-        self.peak_tools = ResultPeakTools(self)
-        self.spectrum_plot.absolute_changed.connect(self.peak_tools.spectrum_changed)
-        self.view_controls.peaks_requested.connect(self.peak_tools.open)
-        self.spectrum_plot.set_title("Select a stored or public spectrum")
-        self.spectrum_plot.setMinimumHeight(150)
-        self.spectrum_plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.spectrum_state = ResultsStateCard(self)
-        self.spectrum_view = QStackedWidget(self)
-        self.spectrum_view.setMinimumHeight(300)
-        self.spectrum_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.spectrum_view.addWidget(self.spectrum_state)
-        self.spectrum_view.addWidget(self.spectrum_plot)
-        splitter.addWidget(self.spectrum_view)
-
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        splitter.setStretchFactor(2, 4)
-        splitter.setSizes([140, 36, 500])
-        layout.addWidget(splitter, 1)
+        self.inspector_drawer.setWidget(inspector_host)
+        self.workspace_splitter.addWidget(self.inspector_drawer)
+        self.workspace_splitter.setStretchFactor(0, 3)
+        self.workspace_splitter.setStretchFactor(1, 1)
+        self.workspace_splitter.setSizes([640, 320])
+        layout.addWidget(self.workspace_splitter, 1)
         self.setMinimumHeight(240)
-
-        self.spectrum_info = CaptionLabel(
-            "Spectra are read from HDF5 without contacting instruments."
-        )
-        self.spectrum_info.setObjectName("muted")
-        self.spectrum_info.setWordWrap(True)
-        # Long provenance must not resize the full page on every checkpoint.
-        self.spectrum_info.setFixedHeight(40)
-        layout.addWidget(self.spectrum_info)
 
         self.points.selectionModel().currentRowChanged.connect(self._on_point_selected)
         self.prev_button.clicked.connect(self._go_previous)
+        self.play_button.clicked.connect(self._toggle_playback)
         self.next_button.clicked.connect(self._go_next)
+        self.checkpoint_slider.valueChanged.connect(self._on_slider_moved)
         self.filter_parameter_combo.currentIndexChanged.connect(
             self._parameter_key_changed
         )
@@ -543,15 +649,186 @@ class SpectrumResultsTab(QWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        width = event.size().width()
-        filter_columns = 5 if width >= 1000 else (2 if width >= 520 else 1)
-        public_columns = 4 if width >= 900 else (2 if width >= 520 else 1)
+        ctrl_width = max(240, self.controls_card.width())
+        filter_columns = 2 if ctrl_width >= 440 else 1
+        public_columns = 2 if ctrl_width >= 440 else 1
         if filter_columns != self._filter_columns:
             self._filter_columns = filter_columns
             self._place_fields(self.filter_selector, self._filter_fields, filter_columns)
         if public_columns != self._public_columns:
             self._public_columns = public_columns
             self._place_fields(self.public_selector, self._public_fields, public_columns)
+
+    def set_inspector_visible(self, visible: bool) -> None:
+        self._inspector_visible = bool(visible)
+        self.inspector_drawer.setVisible(self._inspector_visible)
+        if self.inspector_toggle_button.isChecked() != self._inspector_visible:
+            blocked = self.inspector_toggle_button.blockSignals(True)
+            self.inspector_toggle_button.setChecked(self._inspector_visible)
+            self.inspector_toggle_button.blockSignals(blocked)
+
+    def toggle_inspector(self) -> None:
+        self.set_inspector_visible(not self._inspector_visible)
+
+    def toggle_resonance_fit(self) -> None:
+        self.fit_button.setChecked(not self.fit_button.isChecked())
+
+    def toggle_ab_wipe(self) -> None:
+        self.ab_wipe_button.setChecked(not self.ab_wipe_button.isChecked())
+
+    def _on_fit_toggled(self, checked: bool) -> None:
+        self.fit_model_combo.setVisible(checked)
+        self._update_analysis_overlays()
+
+    def _toggle_playback(self) -> None:
+        if self._play_timer.isActive():
+            self._stop_playback()
+            return
+        rows, _has_spectra = self._navigation_rows()
+        if len(rows) < 2:
+            return
+        self._play_timer.start()
+        self.play_button.setText("Pause")
+        self.play_button.setIcon(FluentIcon.PAUSE)
+
+    def _stop_playback(self) -> None:
+        if self._play_timer.isActive():
+            self._play_timer.stop()
+        self.play_button.setText("Play")
+        self.play_button.setIcon(FluentIcon.PLAY)
+
+    def _advance_playback(self) -> None:
+        if self._read_tasks:
+            return
+        rows, _has_spectra = self._navigation_rows()
+        if not rows:
+            self._stop_playback()
+            return
+        current = self.points.currentIndex()
+        cur_row = current.row() if current.isValid() else -1
+        if isinstance(rows, range):
+            next_row = (cur_row + 1) % len(rows)
+        else:
+            pos = bisect_right(rows, cur_row)
+            next_row = rows[pos % len(rows)]
+        self.points.setCurrentIndex(self.points_model.index(next_row, 0))
+
+    def _on_slider_moved(self, value: int) -> None:
+        rows, _has_spectra = self._navigation_rows()
+        if not rows or not (0 <= value < len(rows)):
+            return
+        target_row = rows[value]
+        current = self.points.currentIndex()
+        if not current.isValid() or current.row() != target_row:
+            self.points.setCurrentIndex(self.points_model.index(target_row, 0))
+
+    def _primary_trace_data(self) -> tuple[object, object, str] | None:
+        traces = getattr(self.spectrum_plot, "_traces", {})
+        if not traces:
+            return None
+        preferred = getattr(self.spectrum_plot, "_hold_source", None)
+        name = preferred if preferred in traces else next(
+            (k for k in traces if k not in {"Max hold", "Min hold"}), None
+        )
+        if name is None:
+            return None
+        x, y = traces[name]
+        unit = getattr(self.spectrum_plot, "amplitude_unit", "") or getattr(self.spectrum_plot, "_y_unit", "")
+        return x, y, str(unit)
+
+    def _raw_trace_data(self) -> tuple[object, object] | None:
+        if self._selected_private_spectrum is not None:
+            return (
+                self._selected_private_spectrum.frequencies_hz,
+                self._selected_private_spectrum.powers_dbm,
+            )
+        if self._public_spectrum is not None and self._public_spectrum.traces:
+            idx = max(0, self.thatec_trace_combo.currentIndex())
+            idx = min(idx, len(self._public_spectrum.traces) - 1)
+            return (
+                self._public_spectrum.x_values,
+                self._public_spectrum.traces[idx].values,
+            )
+        return None
+
+    def _update_analysis_overlays(self) -> None:
+        """Update non-destructive Resonance Fit overlay & A/B Split Wipe curtain."""
+        self._last_fit_summary = None
+        if self.spectrum_view.currentWidget() is not self.spectrum_plot:
+            self.spectrum_plot.clear_fit_overlay()
+            self.spectrum_plot.clear_ab_wipe()
+            self.fit_readout_label.setText("")
+            return
+
+        primary = self._primary_trace_data()
+        # 1. A/B Split Wipe Curtain (Raw HDF5 left vs Processed right)
+        if self.ab_wipe_button.isChecked():
+            raw = self._raw_trace_data()
+            if primary is None or raw is None:
+                self.spectrum_plot.clear_ab_wipe()
+                self.fit_readout_label.setText("A/B Wipe: load a spectrum to compare")
+                return
+            proc_x, proc_y, unit = primary
+            if unit != "dBm":
+                self.spectrum_plot.clear_ab_wipe()
+                self.fit_readout_label.setText(
+                    f"A/B Wipe requires matching dBm units (current: {unit})"
+                )
+            else:
+                self.spectrum_plot.set_ab_wipe(
+                    True,
+                    raw_x=raw[0],
+                    raw_y=raw[1],
+                    proc_x=proc_x,
+                    proc_y=proc_y,
+                )
+                self.fit_readout_label.setText(
+                    "A/B Wipe active: drag divider · Raw HDF5 (left) vs Processed (right)"
+                )
+                self.spectrum_plot.clear_fit_overlay()
+                return
+        else:
+            self.spectrum_plot.clear_ab_wipe()
+
+        # 2. Offline Resonance Curve Fit (linear-power fit with SI W*Hz area)
+        if not self.fit_button.isChecked() or primary is None:
+            self.spectrum_plot.clear_fit_overlay()
+            if not self.ab_wipe_button.isChecked():
+                self.fit_readout_label.setText("")
+            return
+
+        x_hz, y_vals, unit = primary
+        shape = str(self.fit_model_combo.currentData() or "lorentzian")
+        window = None
+        if getattr(self.spectrum_plot, "band_enabled", None) is not None and self.spectrum_plot.band_enabled.isChecked():
+            lo, hi = self.spectrum_plot.band.getRegion()
+            window = (float(lo), float(hi))
+        try:
+            summary = fit_spectrum_resonance(
+                x_hz, y_vals, unit=unit, shape=shape, window_hz=window
+            )
+        except (ValueError, RuntimeError) as exc:
+            self.spectrum_plot.clear_fit_overlay()
+            self.fit_readout_label.setText(f"Fit unavailable: {exc}")
+            return
+
+        self._last_fit_summary = summary
+        self.spectrum_plot.set_fit_overlay(
+            summary.frequencies_hz, summary.fitted_display_values
+        )
+        f0_hz = summary.fit.center_hz
+        fw_hz = summary.fit.fwhm_hz
+        f0_txt = f"{f0_hz / 1e9:.4g} GHz" if abs(f0_hz) >= 1e9 else f"{f0_hz / 1e6:.4g} MHz" if abs(f0_hz) >= 1e6 else f"{f0_hz:.4g} Hz"
+        fw_txt = f"{fw_hz / 1e9:.3g} GHz" if abs(fw_hz) >= 1e9 else f"{fw_hz / 1e6:.4g} MHz" if abs(fw_hz) >= 1e6 else f"{fw_hz:.4g} Hz"
+        self.fit_readout_label.setText(
+            f"f₀ = {f0_txt} · FWHM = {fw_txt} · Q = {summary.q_factor:.3g} · R² = {summary.r_squared:.3f}"
+        )
+        self.fit_readout_label.setToolTip(
+            f"{shape.capitalize()} resonance fit · f₀ = {format_quantity_auto(f0_hz, DIMENSION_FREQUENCY)} · "
+            f"FWHM = {format_quantity_auto(fw_hz, DIMENSION_FREQUENCY)} · "
+            f"Q = {summary.q_factor:.3g} · ∫P df = {summary.fit.finite_window_area_w_hz:.3g} W·Hz · "
+            f"R² = {summary.r_squared:.4f}"
+        )
 
     def load(
         self,
@@ -703,6 +980,14 @@ class SpectrumResultsTab(QWidget):
     def clear(self) -> None:
         """Reset the tab to its empty state."""
 
+        self._stop_playback()
+        self._last_fit_summary = None
+        self.fit_readout_label.setText("")
+        self.checkpoint_slider.blockSignals(True)
+        self.checkpoint_slider.setRange(0, 0)
+        self.checkpoint_slider.setEnabled(False)
+        self.checkpoint_slider.blockSignals(False)
+        self.play_button.setEnabled(False)
         self._invalidate_pending_reads()
         self._cancel_filter_read()
         self.peak_tools.close()
@@ -1399,7 +1684,7 @@ class SpectrumResultsTab(QWidget):
             else ""
         )
         self.spectrum_info.setText(
-            f"{trace.source_point_count} recorded points · {raw_label} · "
+            f"{trace.source_point_count} points · {raw_label} · "
             f"{trace.acquired_at_utc or 'missing time'} · "
             f"peak {max(trace.powers_dbm):.4g} dBm{processed_note}"
         )
@@ -1544,6 +1829,7 @@ class SpectrumResultsTab(QWidget):
         self.spectrum_plot.sync_floating()
         if hasattr(self, "peak_tools"):
             self.peak_tools.spectrum_changed()
+        self._update_analysis_overlays()
 
     def _go_previous(self) -> None:
         self._go_spectrum(-1)
@@ -1580,22 +1866,35 @@ class SpectrumResultsTab(QWidget):
 
     def _update_nav_buttons(self) -> None:
         if self.baseline_controls.viewing:
+            self._stop_playback()
             self.prev_button.setEnabled(False)
             self.next_button.setEnabled(False)
+            self.play_button.setEnabled(False)
+            self.checkpoint_slider.setEnabled(False)
             if self._selected_reference is not None:
                 reference = self._selected_reference
                 self.position_label.setText(f"{reference.purpose.title()} {reference.index} · {baseline_sample_label(reference)}")
             return
         current = self.points.currentIndex()
         if not current.isValid():
+            self._stop_playback()
             self.prev_button.setEnabled(False)
             self.next_button.setEnabled(False)
+            self.play_button.setEnabled(False)
+            self.checkpoint_slider.setEnabled(False)
             self.position_label.setText("No spectrum selected")
             return
         index = current.row()
         rows, has_spectra = self._navigation_rows()
         self.prev_button.setEnabled(bool(rows) and rows[0] < index)
         self.next_button.setEnabled(bool(rows) and rows[-1] > index)
+        self.play_button.setEnabled(len(rows) > 1)
+        slider_pos = index if isinstance(rows, range) else bisect_left(rows, index)
+        blocked = self.checkpoint_slider.blockSignals(True)
+        self.checkpoint_slider.setRange(0, max(0, len(rows) - 1))
+        self.checkpoint_slider.setValue(max(0, min(slider_pos, max(0, len(rows) - 1))))
+        self.checkpoint_slider.setEnabled(len(rows) > 1)
+        self.checkpoint_slider.blockSignals(blocked)
         record = current.siblingAtColumn(0).data(Qt.ItemDataRole.UserRole)
         if isinstance(record, (StoredPoint, PublicCheckpoint)):
             if has_spectra:

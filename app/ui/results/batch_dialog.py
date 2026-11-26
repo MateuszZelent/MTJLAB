@@ -44,7 +44,13 @@ class BatchPostprocessDialog(StationDialog):
         surface = self.modal_shell.surface
         kind = "heatmaps" if isinstance(state, HeatmapBatch) else "spectra"
         layout.addWidget(SubtitleLabel("Postprocess all measurements", surface))
-        subtitle = BodyLabel(f"Export {len(items):,} {kind} with the current processing settings.", surface)
+        saved = sum(item.series_view is not None for item in items)
+        summary = f"Export {len(items):,} {kind} with the current processing settings."
+        if saved:
+            summary = f"Export {len(items):,} heatmaps · {saved:,} with saved series views."
+            if saved < len(items):
+                summary += " Other heatmaps use shared processing and automatic colour limits."
+        subtitle = BodyLabel(summary, surface)
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 

@@ -297,7 +297,17 @@ def test_current_sweep_compliance_skips_outward_points_and_takes_bounded_return(
         assert "sweep_compliance_limited" in events
         assert "run_fault" not in events
         assert file["scan_definition"].attrs["allow_skipped_checkpoints"]
-    assert ThatecCompatibilityValidator().validate(path).valid
+        current_row = next(
+            name for name, row in file["scan_definition"].items()
+            if name.startswith("row_")
+            and dict(row.asstr()[()]).get("lab control key") == "keithley.A.current"
+        )
+        assert file[f"measurement/{current_row}/data"][:] == pytest.approx(
+            [0, polarity * 0.0001, polarity * 0.0001],
+        )
+        assert list(file["measurement/row_00/data"][:]) == [0, 1, 2]
+    report = ThatecCompatibilityValidator().validate(path, require_pythat=True)
+    assert report.valid, report.errors
 
 
 @pytest.mark.parametrize("hit_mid_scan", [False, True])
@@ -334,7 +344,7 @@ def test_unreachable_b_bias_skips_dependent_scan_and_allows_next_bias(tmp_path, 
         target: keithley.A.current
         segments: [{{start: '0 uA', stop: '100 uA', points: 2, spacing: linear}}]
         children:
-        - {{id: {group}-trace, type: acquire_spectrum, store_source_spectra: false}}
+        - {{id: {group}-trace, type: acquire_spectrum, instrument_average_count: 50, store_source_spectra: false}}
       - {{id: {group}-return, type: ramp_keithley_current, channel: A, level: '0 uA', step: '100 uA', settle_time: '2 ms'}}
 """
     plan = compile_source(settings, initial)
@@ -349,6 +359,44 @@ def test_unreachable_b_bias_skips_dependent_scan_and_allows_next_bias(tmp_path, 
     expected_a = [0, 0, 0.0001] if hit_mid_scan else [0, 0.0001]
     assert [point.setpoints["keithley.B.current"] for point in stored] == pytest.approx(expected_b)
     assert [point.setpoints["keithley.A.current"] for point in stored] == pytest.approx(expected_a)
+
+
+def test_a_retracts_from_compliance_and_next_current_scan_can_start(tmp_path, monkeypatch):
+    settings = audit_settings(tmp_path)
+    original_write = KeithleySimulator._write
+
+    def set_resistive_load(simulator, command):
+        simulator.resistance_ohm["smua"] = 100.0
+        return original_write(simulator, command)
+
+    monkeypatch.setattr(KeithleySimulator, "_write", set_resistive_load)
+    plan = compile_source(settings, """    - {id: cfg, type: configure_keithley, channel: A, mode: current, level: '0 uA', compliance: '20 mV', source_range: '10 mA'}
+    - {id: on, type: set_keithley_output, channel: A, enabled: true}
+    - id: first
+      type: sweep
+      target: keithley.A.current
+      respect_ramp_step: true
+      segments: [{start: '0 uA', stop: '300 uA', points: 4, spacing: linear}]
+      children:
+      - {id: first-trace, type: acquire_spectrum, store_source_spectra: false}
+    - {id: retract, type: ramp_keithley_current, channel: A, level: '0 uA', step: '100 uA', settle_time: '2 ms'}
+    - {id: settle-after-retract, type: wait, duration: '2 ms'}
+    - {id: next-approach, type: ramp_keithley_current, channel: A, level: '-300 uA', step: '100 uA', settle_time: '2 ms'}
+    - id: next-scan
+      type: sweep
+      target: keithley.A.current
+      respect_ramp_step: true
+      segments: [{start: '-300 uA', stop: '0 uA', points: 4, spacing: linear}]
+      children:
+      - {id: next-trace, type: acquire_spectrum, store_source_spectra: false}
+""")
+    path = tmp_path / "approach-after-retract.h5"
+    result, _ = execute(settings, plan, path, monkeypatch)
+    assert result.error is None
+    assert result.compliance_points_skipped == 4
+    assert [point.setpoints["keithley.A.current"] for point in Hdf5RunReader.points(path)] == pytest.approx(
+        [0, 0.0001, -0.0001, 0],
+    )
 
 
 def test_requested_three_axis_topology_and_durable_simulated_archive(tmp_path, monkeypatch):

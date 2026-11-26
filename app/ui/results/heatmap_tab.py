@@ -13,13 +13,16 @@ from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QEvent, QRectF, QSize, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLayout,
     QSizePolicy,
+    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -33,11 +36,24 @@ from qfluentwidgets import (
     FlowLayout,
     FluentIcon,
     PushButton,
+    ScrollArea,
+    TogglePushButton,
 )
 
-from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto
+from app.domain.quantities import (
+    DIMENSION_FREQUENCY,
+    DIMENSION_MAGNETIC_FIELD,
+    format_quantity_auto,
+)
 from app.recipes.parameter_registry import parameter_descriptor
+from app.spectrum.spintronic_fits import (
+    extract_heatmap_ridge,
+    fit_kittel_dispersion,
+    kittel_frequency_hz,
+    magnetic_field_scale_to_tesla,
+)
 from app.storage import StoredPoint, ThatecRow, ThatecRun, ThatecRunReader
+from app.storage.filesystem_paths import native_path
 from app.storage.heatmap_analysis_store import validate_cell_edges, write_heatmap_analysis
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.design_system.paper_plot_style import PAPER_STYLE
@@ -45,21 +61,29 @@ from app.ui.dialogs import StationFileDialog as QFileDialog
 from app.ui.results.analysis_export import (
     ensure_derived_destination,
     heatmap_export_path,
+    measurement_parameter_metadata,
     processing_manifest,
     write_analysis_manifest,
 )
-from app.ui.results.batch_processing import HeatmapBatch, heatmap_title, measurement_parameters, plan_heatmaps
+from app.ui.results.batch_processing import (
+    HeatmapBatch,
+    heatmap_title,
+    measurement_parameters,
+    plan_heatmaps,
+)
 from app.ui.results.data_classifier import find_heatmap_rows
 from app.ui.results.filter_choices import FilterComboBox
 from app.ui.results.heatmap_cache import HeatmapSourceCache
 from app.ui.results.heatmap_coordinates import (
+    SERIES_DIMENSION_ID,
     VISIT_DIMENSION_ID,
     HeatmapCoordinates,
     HeatmapDimension,
     HeatmapRange,
     HeatmapRequest,
+    _selection_range,
     build_heatmap_coordinates,
-    default_heatmap_ranges,
+    linked_heatmap_ranges,
     read_heatmap_matrix,
 )
 from app.ui.results.heatmap_ranges import HeatmapRangeDialog
@@ -68,6 +92,11 @@ from app.ui.results.map_processing import MapProcessing, analyse_map
 from app.ui.results.processing import ResultSpectrumProcessor, recorded_instrument_average
 from app.ui.results.processing_controls import ResultProcessingControls
 from app.ui.results.processing_overlay import ResultProcessingOverlay
+from app.ui.results.series_heatmap_views import (
+    SeriesHeatmapView,
+    read_series_heatmap_views,
+    save_series_heatmap_view,
+)
 from app.ui.results.state_card import ResultsStateCard
 from app.ui.results.workers import ResultReadTask
 from app.ui.widgets.plot_ownership import (
@@ -98,7 +127,7 @@ def _read_coordinate_payload(path, run, row, points, *, cancelled=None, spectrum
 
 
 def _archive_identity(path):
-    stat = path.stat()
+    stat = native_path(path).stat()
     return path, stat.st_mtime_ns, stat.st_size
 
 
@@ -275,6 +304,7 @@ class HeatmapPlotWidget(QWidget):
     """
 
     checkpoint_clicked = Signal(int)  # emitted for the source checkpoint of a cell
+    hovered_cell = Signal(int, int)  # emitted as (row_index, col_index) on hover
     status_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -292,12 +322,15 @@ class HeatmapPlotWidget(QWidget):
         self._last_readout_cell: tuple[int, int] | None = None
         self._theme_name = "dark"
         self.export_metadata = {}
+        self._export_context: tuple[HeatmapCoordinates, dict[int, StoredPoint]] | None = None
         self._axis_metadata = {"x": {"label": "X", "unit": ""}, "y": {"label": "Y", "unit": ""}}
         self._export_pool = QThreadPool(self)
         self._export_pool.setMaxThreadCount(1)
         self._export_task = None
 
         layout = QVBoxLayout(self)
+        self._main_layout = layout
+        self._compact_stretch = True
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
@@ -372,6 +405,14 @@ class HeatmapPlotWidget(QWidget):
         self.image_item = self.pcolor_item
         self.plot.addItem(self.pcolor_item)
         self.plot.addItem(self.raster_item)
+        self._dispersion_casing = pg.PlotDataItem(pen=pg.mkPen("#202020", width=4))
+        self._dispersion_curve = pg.PlotDataItem(
+            pen=pg.mkPen("#ffffff", width=2, style=Qt.PenStyle.DashLine)
+        )
+        for item, z_order in ((self._dispersion_casing, 5), (self._dispersion_curve, 6)):
+            item.setZValue(z_order)
+            item.hide()
+            self.plot.addItem(item, ignoreBounds=True)
         self._cached_mesh_fingerprint: tuple[bytes, bytes] | None = None
         self._cached_mesh_vertices: tuple[np.ndarray, np.ndarray] | None = None
 
@@ -575,8 +616,10 @@ class HeatmapPlotWidget(QWidget):
 
     def clear(self) -> None:
         self._hide_crosshair()
+        self.clear_dispersion_overlay()
         self.show_absolute.setEnabled(False)
         self.export_metadata = {}
+        self._export_context = None
         self.pcolor_item.setData()
         self.raster_item.clear()
         self._cached_mesh_fingerprint = None
@@ -591,6 +634,35 @@ class HeatmapPlotWidget(QWidget):
         self._x_export_label = "X"
         self._y_export_label = "Y"
         self.readout.setText("X: —   Y: —   Z: —")
+
+    def set_compact_stretch(self, enabled: bool) -> None:
+        """Toggle the 30% bottom spacer (kept on standalone widget; off when 1D slice is docked)."""
+        enabled = bool(enabled)
+        if enabled == self._compact_stretch:
+            return
+        self._compact_stretch = enabled
+        plot_index = self._main_layout.indexOf(self.plot)
+        self._main_layout.setStretch(plot_index, 7 if enabled else 1)
+        self._main_layout.setStretch(plot_index + 1, 3 if enabled else 0)
+
+    def set_dispersion_overlay(self, x_values, y_values) -> None:
+        """Overlay a clipped high-contrast dashed Kittel/ridge curve inside the 2D ViewBox."""
+        x = np.asarray(x_values, dtype=float)
+        y = np.asarray(y_values, dtype=float)
+        mask = np.isfinite(x) & np.isfinite(y)
+        x, y = x[mask], y[mask]
+        if x.size < 2:
+            self.clear_dispersion_overlay()
+            return
+        self._dispersion_casing.setData(x, y)
+        self._dispersion_curve.setData(x, y)
+        self._dispersion_casing.setVisible(True)
+        self._dispersion_curve.setVisible(True)
+
+    def clear_dispersion_overlay(self) -> None:
+        for item in (self._dispersion_casing, self._dispersion_curve):
+            item.setData([], [])
+            item.hide()
 
     def auto_range(self) -> None:
         if self._x_edges is not None and self._y_edges is not None:
@@ -614,18 +686,33 @@ class HeatmapPlotWidget(QWidget):
         if self._export_task is not None:
             return
         metadata = json.loads(json.dumps(self.export_metadata))
+        title = self.plot.plotItem.titleLabel.item.toPlainText()
+        z_label, z_unit = self._z_label, self._z_unit
         view_state = self.plot.getViewBox().state
         inverted = [bool(view_state["xInverted"]), bool(view_state["yInverted"])]
         metadata.update(axes=self._axis_metadata, view_ranges=self.plot.viewRange(),
                         palette=self.colormap_combo.currentText(), colour_levels=list(self.color_bar.levels()),
                         inverted_axes=inverted)
         try:
-            source = Path(metadata["source_file"])
+            x_bounds, y_bounds = metadata["view_ranges"]
+            # Include partially visible cells and preserve their original edges.
+            x_mask = (self._x_edges[:-1] < x_bounds[1]) & (self._x_edges[1:] > x_bounds[0])
+            y_mask = (self._y_edges[:-1] < y_bounds[1]) & (self._y_edges[1:] > y_bounds[0])
+            if not x_mask.any() or not y_mask.any():
+                raise ValueError("The displayed range contains no recorded heatmap cells.")
+            x_values, y_values = self._x_values[x_mask], self._y_values[y_mask]
+            values = self._data[np.ix_(y_mask, x_mask)]
+            checkpoints = self._cell_checkpoint_indices[np.ix_(y_mask, x_mask)]
+            x_indices, y_indices = np.flatnonzero(x_mask), np.flatnonzero(y_mask)
+            x_edges = self._x_edges[x_indices[0]:x_indices[-1] + 2].copy()
+            y_edges = self._y_edges[y_indices[0]:y_indices[-1] + 2].copy()
+            self._set_export_parameters(metadata, checkpoints, x_values, y_values)
+            source = native_path(metadata["source_file"])
             if source.is_file():
                 identity = source.stat()
                 metadata["source_identity"] = {"size_bytes": identity.st_size, "mtime_ns": identity.st_mtime_ns}
             default = heatmap_export_path(metadata)
-            default.parent.mkdir(parents=True, exist_ok=True)
+            native_path(default.parent).mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             self.status_changed.emit(f"Cannot prepare heatmap export directory: {exc}")
             return
@@ -641,48 +728,61 @@ class HeatmapPlotWidget(QWidget):
             path += ".png" if "PNG" in selected else ".svg" if "SVG" in selected else ".csv"
         suffix = Path(path).suffix.lower()
         try:
-            ensure_derived_destination(path, self.export_metadata.get("source_file"))
+            ensure_derived_destination(path, metadata["source_file"])
             if suffix not in {".png", ".svg", ".csv"}:
                 raise ValueError("Choose a PNG, SVG or CSV filename.")
-            if Path(path).with_suffix(".h5").exists():
+            if native_path(Path(path).with_suffix(".h5")).exists():
                 raise ValueError("The companion HDF5 already exists. Choose a new export name.")
-            x_bounds, y_bounds = metadata["view_ranges"]
-            # Include partially visible cells and preserve their original edges.
-            # Cropping to one nonuniform bin must not invent a new cell width.
-            x_mask = (self._x_edges[:-1] < x_bounds[1]) & (self._x_edges[1:] > x_bounds[0])
-            y_mask = (self._y_edges[:-1] < y_bounds[1]) & (self._y_edges[1:] > y_bounds[0])
-            if not x_mask.any() or not y_mask.any():
-                raise ValueError("The displayed range contains no recorded heatmap cells.")
-            values = self._data[np.ix_(y_mask, x_mask)].copy()
-            checkpoints = self._cell_checkpoint_indices[np.ix_(y_mask, x_mask)].copy()
-            x_indices, y_indices = np.flatnonzero(x_mask), np.flatnonzero(y_mask)
-            x_edges = self._x_edges[x_indices[0]:x_indices[-1] + 2].copy()
-            y_edges = self._y_edges[y_indices[0]:y_indices[-1] + 2].copy()
             if suffix in {".png", ".svg"}:
                 from app.ui.widgets.figure_export import export_heatmap_figure
 
-                metadata["figure_presentation"] = export_heatmap_figure(path,
+                axes = metadata["axes"]
+                metadata["figure_presentation"] = export_heatmap_figure(Path(path),
                     values=values, x_edges=x_edges, y_edges=y_edges,
                     view_ranges=metadata["view_ranges"],
-                    x_label=self._axis_metadata["x"]["label"], x_unit=self._axis_metadata["x"]["unit"],
-                    y_label=self._axis_metadata["y"]["label"], y_unit=self._axis_metadata["y"]["unit"],
-                    z_label=self._z_label, z_unit=self._z_unit,
+                    x_label=axes["x"]["label"], x_unit=axes["x"]["unit"],
+                    y_label=axes["y"]["label"], y_unit=axes["y"]["unit"],
+                    z_label=z_label, z_unit=z_unit,
                     levels=metadata["colour_levels"], colormap=metadata["palette"],
-                    title=self.plot.plotItem.titleLabel.item.toPlainText(), inverted_axes=inverted)
+                    title=title, inverted_axes=inverted)
             else:
-                self._export_csv(Path(path), values, self._x_values[x_mask], self._y_values[y_mask])
+                self._export_csv(Path(path), values, x_values, y_values)
         except Exception as exc:
             self.status_changed.emit(f"Heatmap export failed: {exc}")
             return
         self.export_button.setEnabled(False)
         task = ResultReadTask(1, _write_heatmap_companions, path, values,
-                              self._x_values[x_mask].copy(), self._y_values[y_mask].copy(), checkpoints, metadata, x_edges, y_edges)
+                              x_values, y_values, checkpoints, metadata, x_edges, y_edges)
         self._export_task = task
         task.signals.loaded.connect(self._export_loaded)
         task.signals.failed.connect(self._export_failed)
         task.signals.finished.connect(self._export_finished)
         self.status_changed.emit("Saving selected heatmap data and metadata…")
         self._export_pool.start(task)
+
+    def _set_export_parameters(self, metadata, checkpoints, x_values, y_values) -> None:
+        if self._export_context is not None:
+            coordinates, points = self._export_context
+            indices = np.unique(checkpoints[checkpoints >= 0]).tolist()
+            metadata["parameters"] = measurement_parameter_metadata(
+                measurement_parameters(coordinates, indices, points)
+            )
+        records = metadata.get("parameters")
+        parameters = {
+            record["id"]: record for record in records
+            if isinstance(record, dict) and isinstance(record.get("id"), str)
+        } if isinstance(records, list) else {}
+        selection = metadata.get("coordinate_selection") or {}
+        for axis, values in (("x", x_values), ("y", y_values)):
+            label, unit = metadata["axes"][axis]["label"], metadata["axes"][axis]["unit"]
+            key = selection.get(f"{axis}_id")
+            if key is None and label.casefold() == "frequency":
+                key = "frequency"
+            if key == "frequency" or (self._export_context is None and key in parameters):
+                record = parameters.setdefault(key, {"id": key, "label": label, "unit": unit})
+                record.update(minimum=float(values.min()), maximum=float(values.max()))
+        if parameters:
+            metadata["parameters"] = list(parameters.values())
 
     def _export_finished(self, _request_id):
         self._export_task = None
@@ -776,6 +876,7 @@ class HeatmapPlotWidget(QWidget):
         self.readout.setText(
             f"X: {display_x:.6g}   Y: {display_y:.4g}   Z: {z_text}"
         )
+        self.hovered_cell.emit(cell[0], cell[1])
 
     def _hide_crosshair(self):
         self.crosshair_x.hide()
@@ -840,7 +941,7 @@ class HeatmapPlotWidget(QWidget):
         x_values = self._x_values if x_values is None else x_values
         y_values = self._y_values if y_values is None else y_values
         # QFileDialog already captured the user's explicit overwrite decision.
-        with path.open("w", newline="", encoding="utf-8") as handle:
+        with native_path(path).open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             header = [self._y_export_label] + [
                 f"{float(x):.9g}" for x in x_values
@@ -892,17 +993,172 @@ class HeatmapResultsTab(QWidget):
         self._archive_cache = None
         self._archive_cache_key = None
         self._selected_archive_identity = None
+        self._reset_series_views()
         self._refresh_plane = QTimer(self)
         self._refresh_plane.setSingleShot(True)
         self._refresh_plane.setInterval(120)
         self._refresh_plane.timeout.connect(self._load_selected_row)
         self._automatic_palette_key = None
+        self._explicit_axis_ranges: set[str] = set()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        # --- Row selector & filters in a CardWidget ---
-        self.controls_card = CardWidget(self)
+        self._inspector_visible = True
+        self._slice_visible = True
+        self._vcut_visible = False
+        self._kittel_enabled = False
+        self._last_slice_cell: tuple[int, int] | None = None
+        self._theme_name = "dark"
+
+        # --- Data-First Horizontal Split (Left: 2D Heatmap + Live 1D Cuts | Right: Scrollable Inspector) ---
+        self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.workspace_splitter.setObjectName("resultsTabSplitter")
+        self.workspace_splitter.setChildrenCollapsible(False)
+
+        # ==================== LEFT STAGE: TELEMETRY + 2D MAP + LINKED 1D SLICES ====================
+        main_stage = QWidget(self.workspace_splitter)
+        stage_layout = QVBoxLayout(main_stage)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
+        stage_layout.setSpacing(4)
+
+        # Dedicated single-line Telemetry & Tools Strip ABOVE plot (zero floating bubbles!)
+        telemetry_bar = QFrame(main_stage)
+        telemetry_bar.setObjectName("resultsTelemetryBar")
+        telemetry_layout = QHBoxLayout(telemetry_bar)
+        telemetry_layout.setContentsMargins(8, 4, 8, 4)
+        telemetry_layout.setSpacing(6)
+
+        self.slice_toggle_button = TogglePushButton("1D Slice", telemetry_bar)
+        self.slice_toggle_button.setChecked(True)
+        self.slice_toggle_button.setToolTip("Show live horizontal 1D spectrum slice P(f) below the heatmap")
+        self.slice_toggle_button.toggled.connect(self.set_slice_visible)
+        telemetry_layout.addWidget(self.slice_toggle_button)
+
+        self.vcut_toggle_button = TogglePushButton("P(H) Cut", telemetry_bar)
+        self.vcut_toggle_button.setChecked(False)
+        self.vcut_toggle_button.setToolTip("Show optional vertical cut P(sweep) beside the heatmap")
+        self.vcut_toggle_button.toggled.connect(self.set_vcut_visible)
+        telemetry_layout.addWidget(self.vcut_toggle_button)
+
+        self.kittel_button = TogglePushButton("Kittel / Ridge", telemetry_bar)
+        self.kittel_button.setChecked(False)
+        self.kittel_button.setToolTip("Track the dominant FMR peak ridge and fit Kittel dispersion f₀(H) when a field axis is active")
+        self.kittel_button.toggled.connect(self._on_kittel_toggled)
+        telemetry_layout.addWidget(self.kittel_button)
+
+        self.kittel_readout_label = CaptionLabel("", telemetry_bar)
+        self.kittel_readout_label.setObjectName("resultsTelemetryMuted")
+        telemetry_layout.addWidget(self.kittel_readout_label, 1)
+
+        self.inspector_toggle_button = TogglePushButton("Inspector", telemetry_bar)
+        self.inspector_toggle_button.setChecked(True)
+        self.inspector_toggle_button.setToolTip("Show or hide the right heatmap controls & processing inspector")
+        self.inspector_toggle_button.toggled.connect(self.set_inspector_visible)
+        telemetry_layout.addWidget(self.inspector_toggle_button)
+        stage_layout.addWidget(telemetry_bar)
+
+        # Vertical splitter: Top = 2D Map (+ optional vertical cut) | Bottom = Live 1D Slice P(f)
+        self.plot_splitter = QSplitter(Qt.Orientation.Vertical, main_stage)
+        self.plot_splitter.setObjectName("resultsTabSplitter")
+        self.plot_splitter.setChildrenCollapsible(False)
+
+        top_plot_row = QWidget(self.plot_splitter)
+        top_plot_layout = QHBoxLayout(top_plot_row)
+        top_plot_layout.setContentsMargins(0, 0, 0, 0)
+        top_plot_layout.setSpacing(4)
+
+        # --- Heatmap ---
+        self.heatmap = HeatmapPlotWidget(top_plot_row)
+        self.heatmap.set_compact_stretch(False)
+        self.heatmap.batch_button.clicked.connect(self._open_batch)
+        self.heatmap.show_absolute.toggled.connect(self._absolute_view_changed)
+        self.heatmap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.heatmap_state = ResultsStateCard(top_plot_row)
+        self.heatmap_view = QStackedWidget(top_plot_row)
+        self.heatmap_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.heatmap_view.addWidget(self.heatmap_state)
+        self.heatmap_view.addWidget(self.heatmap)
+        top_plot_layout.addWidget(self.heatmap_view, 4)
+
+        # Optional Vertical Cut P(H) dock (off by default so 2D map gets full width!)
+        self.vcut_panel = QFrame(top_plot_row)
+        self.vcut_panel.setObjectName("resultsInspectorDrawer")
+        self.vcut_panel.setMinimumWidth(145)
+        self.vcut_panel.setMaximumWidth(220)
+        vcut_layout = QVBoxLayout(self.vcut_panel)
+        vcut_layout.setContentsMargins(4, 2, 4, 2)
+        vcut_layout.setSpacing(2)
+        self.vcut_header = CaptionLabel("Cut P(Y)", self.vcut_panel)
+        self.vcut_header.setObjectName("resultsTelemetryMuted")
+        vcut_layout.addWidget(self.vcut_header)
+        self.vcut_plot = create_plot_widget(self.vcut_panel)
+        self.vcut_plot.showGrid(x=True, y=True, alpha=0.18)
+        self.vcut_plot.setMouseEnabled(x=False, y=False)
+        self.vcut_curve = self.vcut_plot.plot([], [])
+        self.vcut_marker = pg.InfiniteLine(angle=0, movable=False)
+        self.vcut_plot.addItem(self.vcut_marker, ignoreBounds=True)
+        self.vcut_marker.hide()
+        vcut_layout.addWidget(self.vcut_plot, 1)
+        self.vcut_panel.hide()
+        top_plot_layout.addWidget(self.vcut_panel, 1)
+        self.plot_splitter.addWidget(top_plot_row)
+
+        # Bottom Dock: Live Linked 1D Horizontal Slice P(f)
+        self.slice_panel = QFrame(self.plot_splitter)
+        self.slice_panel.setObjectName("resultsScrubberBar")
+        slice_layout = QVBoxLayout(self.slice_panel)
+        slice_layout.setContentsMargins(6, 3, 6, 3)
+        slice_layout.setSpacing(2)
+        slice_hdr = QHBoxLayout()
+        slice_hdr.setContentsMargins(0, 0, 0, 0)
+        slice_title = CaptionLabel("1D Spectrum Slice", self.slice_panel)
+        slice_title.setObjectName("resultsTelemetryPrimary")
+        self.slice_meta_label = CaptionLabel("Hover 2D map to inspect slice · click to open in Spectrum", self.slice_panel)
+        self.slice_meta_label.setObjectName("resultsTelemetryMuted")
+        slice_hdr.addWidget(slice_title)
+        slice_hdr.addStretch(1)
+        slice_hdr.addWidget(self.slice_meta_label)
+        slice_layout.addLayout(slice_hdr)
+        self.slice_plot = create_plot_widget(self.slice_panel)
+        self.slice_plot.setMinimumHeight(96)
+        self.slice_plot.showGrid(x=True, y=True, alpha=0.18)
+        self.slice_plot.setMouseEnabled(x=True, y=False)
+        self.slice_curve = self.slice_plot.plot([], [])
+        self.slice_marker = pg.InfiniteLine(angle=90, movable=False)
+        self.slice_plot.addItem(self.slice_marker, ignoreBounds=True)
+        self.slice_marker.hide()
+        slice_layout.addWidget(self.slice_plot, 1)
+        self.plot_splitter.addWidget(self.slice_panel)
+        self.plot_splitter.setStretchFactor(0, 3)
+        self.plot_splitter.setStretchFactor(1, 1)
+        self.plot_splitter.setSizes([380, 140])
+        stage_layout.addWidget(self.plot_splitter, 1)
+
+        self.info_label = BodyLabel("Select a spectrum row and click 'Load heatmap'.", main_stage)
+        self.info_label.setObjectName("muted")
+        self.info_label.setWordWrap(True)
+        stage_layout.addWidget(self.info_label)
+        self.workspace_splitter.addWidget(main_stage)
+
+        # ==================== RIGHT DRAWER: SCROLLABLE HEATMAP CONTROLS & DSP INSPECTOR ====================
+        self.inspector_drawer = ScrollArea(self.workspace_splitter)
+        self.inspector_drawer.setObjectName("resultsInspectorScroll")
+        self.inspector_drawer.setWidgetResizable(True)
+        self.inspector_drawer.setFrameShape(ScrollArea.Shape.NoFrame)
+        self.inspector_drawer.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.inspector_drawer.setMinimumWidth(295)
+
+        inspector_host = QWidget(self.inspector_drawer)
+        inspector_host.setObjectName("resultsInspectorDrawer")
+        inspector_host.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        inspector_layout = QVBoxLayout(inspector_host)
+        inspector_layout.setContentsMargins(8, 6, 8, 8)
+        inspector_layout.setSpacing(6)
+
+        # --- Row selector & filters in a CardWidget (all controls directly parented to controls_card) ---
+        self.controls_card = CardWidget(inspector_host)
         controls_layout = QVBoxLayout(self.controls_card)
         controls_layout.setContentsMargins(10, 8, 10, 8)
         controls_layout.setSpacing(6)
@@ -911,61 +1167,101 @@ class HeatmapResultsTab(QWidget):
         selector = self.selector_layout
         selector.setSpacing(6)
 
-        row1 = QHBoxLayout()
-        row1.setSpacing(6)
+        form_grid = QGridLayout()
+        form_grid.setContentsMargins(0, 0, 0, 0)
+        form_grid.setHorizontalSpacing(6)
+        form_grid.setVerticalSpacing(5)
+        form_grid.setColumnStretch(1, 1)
+
         lbl_data = CaptionLabel("Data:", self.controls_card)
         lbl_data.setObjectName("muted")
-        row1.addWidget(lbl_data)
         self.variant_combo = ComboBox(self.controls_card)
         self.variant_combo.setToolTip(
             "Choose raw power or the stored processed spectrum (raw minus reference)."
         )
-        row1.addWidget(self.variant_combo)
+        form_grid.addWidget(lbl_data, 0, 0)
+        form_grid.addWidget(self.variant_combo, 0, 1)
 
         lbl_x = CaptionLabel("X axis:", self.controls_card)
         lbl_x.setObjectName("muted")
-        row1.addWidget(lbl_x)
         self.x_axis_combo = ComboBox(self.controls_card)
-        self.x_axis_combo.setMinimumWidth(130)
-        row1.addWidget(self.x_axis_combo)
+        self.x_axis_combo.setMinimumWidth(115)
+        form_grid.addWidget(lbl_x, 1, 0)
+        form_grid.addWidget(self.x_axis_combo, 1, 1)
 
         lbl_y = CaptionLabel("Y axis:", self.controls_card)
         lbl_y.setObjectName("muted")
-        row1.addWidget(lbl_y)
         self.y_axis_combo = ComboBox(self.controls_card)
-        self.y_axis_combo.setMinimumWidth(130)
-        row1.addWidget(self.y_axis_combo)
+        self.y_axis_combo.setMinimumWidth(115)
+        form_grid.addWidget(lbl_y, 2, 0)
+        form_grid.addWidget(self.y_axis_combo, 2, 1)
 
+        lbl_row = CaptionLabel("Spectrum row:", self.controls_card)
+        lbl_row.setObjectName("muted")
+        self.row_combo = ComboBox(self.controls_card)
+        self.row_combo.setMinimumWidth(130)
+        self.row_combo.setToolTip("Select a THATEC row with 2-D spectral data")
+        form_grid.addWidget(lbl_row, 3, 0)
+        form_grid.addWidget(self.row_combo, 3, 1)
+
+        actions_col = QVBoxLayout()
+        actions_col.setContentsMargins(0, 0, 0, 0)
+        actions_col.setSpacing(5)
+
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(6)
         self.load_button = PushButton(parent=self.controls_card)
         self.load_button.setText("Load heatmap")
         self.load_button.setIcon(FluentIcon.TILES)
         self.load_button.setToolTip("Build the heatmap for the selected axes and filters")
         self.load_button.setObjectName("plotToolButton")
         self.load_button.setEnabled(False)
-        row1.addWidget(self.load_button)
-        row1.addStretch(1)
+        action_row.addWidget(self.load_button, 1)
 
-        row2 = QHBoxLayout()
-        row2.setSpacing(6)
-        lbl_row = CaptionLabel("Spectrum row:", self.controls_card)
-        lbl_row.setObjectName("muted")
-        row2.addWidget(lbl_row)
-        self.row_combo = ComboBox(self.controls_card)
-        self.row_combo.setMinimumWidth(240)
-        self.row_combo.setToolTip("Select a THATEC row with 2-D spectral data")
-        row2.addWidget(self.row_combo, 1)
         self.read_file_button = PushButton("Read file", self.controls_card)
-        self.read_file_button.setToolTip("Read all heatmap spectra into memory so axes and filters can change without reading the spectra again.")
+        self.read_file_button.setToolTip(
+            "Read all heatmap spectra into memory so axes and filters can change without reading the spectra again."
+        )
         self.read_file_button.setEnabled(False)
-        row2.addWidget(self.read_file_button)
-        self.powerpoint_button = PushButton("Export sweep to PowerPoint…", self.controls_card)
-        self.powerpoint_button.setToolTip("Create one PowerPoint slide per recorded heatmap group using the selected axes and processing.")
-        self.powerpoint_button.setEnabled(False)
-        row2.addWidget(self.powerpoint_button)
+        action_row.addWidget(self.read_file_button)
+        actions_col.addLayout(action_row)
 
-        selector.addLayout(row1)
-        selector.addLayout(row2)
+        self.powerpoint_button = PushButton("Export sweep to PowerPoint…", self.controls_card)
+        self.powerpoint_button.setToolTip(
+            "Create one PowerPoint slide per recorded heatmap group using the selected axes and processing."
+        )
+        self.powerpoint_button.setEnabled(False)
+        actions_col.addWidget(self.powerpoint_button)
+
+        selector.addLayout(form_grid)
+        selector.addLayout(actions_col)
         controls_layout.addLayout(selector)
+
+        self.series_host = QWidget(self.controls_card)
+        series_layout = QVBoxLayout(self.series_host)
+        series_layout.setContentsMargins(0, 0, 0, 0)
+        series_selector = QHBoxLayout()
+        series_selector.addWidget(CaptionLabel("Measurement series", self.series_host))
+        self.series_combo = ComboBox(self.series_host)
+        self.series_combo.setAccessibleName("Measurement series")
+        self.series_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.series_combo.setMinimumWidth(160)
+        self.series_combo.currentIndexChanged.connect(self._series_changed)
+        series_selector.addWidget(self.series_combo, 1)
+        series_layout.addLayout(series_selector)
+        series_actions = QHBoxLayout()
+        self.save_series_view_button = PushButton("Save series view", self.series_host)
+        self.save_series_view_button.setToolTip("Save this series' heatmap for later review and PowerPoint export.")
+        self.save_series_view_button.setEnabled(False)
+        self.save_series_view_button.clicked.connect(self._save_series_view)
+        series_actions.addWidget(self.save_series_view_button)
+        self.series_view_status = CaptionLabel("", self.series_host)
+        self.series_view_status.setWordWrap(True)
+        series_actions.addWidget(self.series_view_status, 1)
+        series_layout.addLayout(series_actions)
+        controls_layout.addWidget(self.series_host)
+        self.series_host.hide()
 
         self.filter_host = QWidget(self.controls_card)
         self.filter_layout = QVBoxLayout(self.filter_host)
@@ -974,31 +1270,23 @@ class HeatmapResultsTab(QWidget):
         self._range_combos: dict[str, tuple[ComboBox, ComboBox]] = {}
         self._filter_combos: dict[str, ComboBox] = {}
         controls_layout.addWidget(self.filter_host)
-        layout.addWidget(self.controls_card)
-        self.processing_controls = ResultProcessingControls(self)
-        layout.addWidget(self.processing_controls)
+        inspector_layout.addWidget(self.controls_card)
+
+        self.processing_controls = ResultProcessingControls(inspector_host)
+        inspector_layout.addWidget(self.processing_controls)
         self.processing_controls.changed.connect(self._processing_changed)
-        self.map_controls = MapProcessingControls(self)
-        layout.addWidget(self.map_controls)
+        self.map_controls = MapProcessingControls(inspector_host)
+        inspector_layout.addWidget(self.map_controls)
         self.map_controls.changed.connect(self._map_changed)
+        inspector_layout.addStretch(1)
+
+        self.inspector_drawer.setWidget(inspector_host)
+        self.workspace_splitter.addWidget(self.inspector_drawer)
+        self.workspace_splitter.setStretchFactor(0, 3)
+        self.workspace_splitter.setStretchFactor(1, 1)
+        self.workspace_splitter.setSizes([640, 320])
+        layout.addWidget(self.workspace_splitter, 1)
         self.setMinimumHeight(220)
-
-        # --- Heatmap ---
-        self.heatmap = HeatmapPlotWidget()
-        self.heatmap.batch_button.clicked.connect(self._open_batch)
-        self.heatmap.show_absolute.toggled.connect(self._absolute_view_changed)
-        self.heatmap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.heatmap_state = ResultsStateCard(self)
-        self.heatmap_view = QStackedWidget(self)
-        self.heatmap_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.heatmap_view.addWidget(self.heatmap_state)
-        self.heatmap_view.addWidget(self.heatmap)
-        layout.addWidget(self.heatmap_view, 1)
-
-        self.info_label = BodyLabel("Select a spectrum row and click 'Load heatmap'.")
-        self.info_label.setObjectName("muted")
-        self.info_label.setWordWrap(True)
-        layout.addWidget(self.info_label)
 
         # --- Connections ---
         self.load_button.clicked.connect(self._load_selected_row)
@@ -1009,6 +1297,7 @@ class HeatmapResultsTab(QWidget):
         self.y_axis_combo.currentIndexChanged.connect(self._axis_changed)
         self.row_combo.currentIndexChanged.connect(self._row_changed)
         self.heatmap.checkpoint_clicked.connect(self._on_checkpoint_clicked)
+        self.heatmap.hovered_cell.connect(self._update_cross_sections)
         self.heatmap.status_changed.connect(self._show_plot_status)
         self.heatmap_state.action_requested.connect(self._load_selected_row)
         self._show_heatmap_state(
@@ -1016,6 +1305,7 @@ class HeatmapResultsTab(QWidget):
             "Choose a two-dimensional public spectrum row to compare checkpoints.",
         )
         self._selector_compact: bool | None = True
+        self.apply_theme(self._theme_name)
 
     def sizeHint(self) -> QSize:
         return QSize(600, 300)
@@ -1027,29 +1317,199 @@ class HeatmapResultsTab(QWidget):
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self._sync_selector_layout(self.width())
+        QTimer.singleShot(0, self, lambda: self._sync_selector_layout(self.width()))
         if self._processing_dirty and self._coordinates is not None:
             self._processing_dirty = False
             self._load_selected_row()
 
     def _sync_selector_layout(self, width: int) -> None:
-        left, right = (self.selector_layout.itemAt(index).layout() for index in range(2))
-        margins = self.controls_card.layout().contentsMargins()
-        combined_width = (left.minimumSize().width() + right.minimumSize().width()
-                          + self.selector_layout.spacing() + margins.left() + margins.right())
-        compact = width < max(1100, combined_width)
-        if compact == self._selector_compact:
+        card_w = max(220, self.controls_card.width() - 20)
+        compact = card_w < 820
+        if compact != self._selector_compact:
+            self._selector_compact = compact
+            self.selector_layout.setDirection(
+                QBoxLayout.Direction.TopToBottom
+                if compact
+                else QBoxLayout.Direction.LeftToRight
+            )
+
+    def set_inspector_visible(self, visible: bool) -> None:
+        self._inspector_visible = bool(visible)
+        self.inspector_drawer.setVisible(self._inspector_visible)
+        if self.inspector_toggle_button.isChecked() != self._inspector_visible:
+            blocked = self.inspector_toggle_button.blockSignals(True)
+            self.inspector_toggle_button.setChecked(self._inspector_visible)
+            self.inspector_toggle_button.blockSignals(blocked)
+
+    def toggle_inspector(self) -> None:
+        self.set_inspector_visible(not self._inspector_visible)
+
+    def set_slice_visible(self, visible: bool) -> None:
+        self._slice_visible = bool(visible)
+        self.slice_panel.setVisible(self._slice_visible)
+        if self._slice_visible and self._last_slice_cell is not None:
+            self._update_cross_sections(*self._last_slice_cell)
+
+    def set_vcut_visible(self, visible: bool) -> None:
+        self._vcut_visible = bool(visible)
+        self.vcut_panel.setVisible(self._vcut_visible)
+        if self._vcut_visible and self._last_slice_cell is not None:
+            self._update_cross_sections(*self._last_slice_cell)
+
+    def toggle_kittel_overlay(self) -> None:
+        self.kittel_button.setChecked(not self.kittel_button.isChecked())
+
+    def _on_kittel_toggled(self, checked: bool) -> None:
+        self._kittel_enabled = bool(checked)
+        self._update_dispersion_overlay()
+
+    def _update_cross_sections(self, row_idx: int, col_idx: int) -> None:
+        """Render auto-scaled live 1D horizontal slice and optional vertical cut."""
+        data = self.heatmap._data
+        x_vals = self.heatmap._x_values
+        y_vals = self.heatmap._y_values
+        if data is None or x_vals is None or y_vals is None:
             return
-        self._selector_compact = compact
-        self.selector_layout.setDirection(
-            QBoxLayout.Direction.TopToBottom
-            if compact
-            else QBoxLayout.Direction.LeftToRight
+        row_idx = max(0, min(row_idx, data.shape[0] - 1))
+        col_idx = max(0, min(col_idx, data.shape[1] - 1))
+        self._last_slice_cell = (row_idx, col_idx)
+
+        x_meta = self.heatmap._axis_metadata["x"]
+        y_meta = self.heatmap._axis_metadata["y"]
+        z_unit = self.heatmap._z_unit or ""
+        x_cur = float(x_vals[col_idx])
+        y_cur = float(y_vals[row_idx])
+        z_cur = float(data[row_idx, col_idx])
+        x_str = (
+            format_quantity_auto(x_cur, DIMENSION_FREQUENCY)
+            if x_meta.get("unit") == "Hz"
+            else f"{x_cur:.5g} {x_meta.get('unit', '')}".strip()
+        )
+        y_str = f"{y_cur:.5g} {y_meta.get('unit', '')}".strip()
+        z_str = f"{z_cur:.4g} {z_unit}".strip() if np.isfinite(z_cur) else "—"
+
+        if self._slice_visible:
+            row_slice = data[row_idx, :]
+            finite = np.isfinite(x_vals) & np.isfinite(row_slice)
+            self.slice_curve.setData(x_vals[finite], row_slice[finite])
+            slice_axis_key = (x_meta["label"], x_meta.get("unit") or "", z_unit or "Z", self._theme_name)
+            if getattr(self, "_slice_axis_key", None) != slice_axis_key:
+                self._slice_axis_key = slice_axis_key
+                self.slice_plot.setLabel("bottom", x_meta["label"], units=x_meta.get("unit") or None)
+                self.slice_plot.setLabel("left", z_unit or "Z")
+                apply_scientific_style(self.slice_plot.plotItem, self._theme_name)
+            self.slice_marker.setPos(x_cur)
+            self.slice_marker.show()
+            if np.any(finite):
+                lo, hi = float(np.min(row_slice[finite])), float(np.max(row_slice[finite]))
+                pad = max(abs(hi - lo) * 0.12, 1e-6)
+                self.slice_plot.setYRange(lo - pad, hi + pad, padding=0)
+                self.slice_plot.setXRange(float(x_vals[0]), float(x_vals[-1]), padding=0)
+            self.slice_meta_label.setText(f"{y_meta['label']} = {y_str} · {x_str} ({z_str})")
+
+        if self._vcut_visible:
+            col_slice = data[:, col_idx]
+            finite = np.isfinite(y_vals) & np.isfinite(col_slice)
+            self.vcut_curve.setData(col_slice[finite], y_vals[finite])
+            self.vcut_plot.setLabel("bottom", z_unit or "Z")
+            self.vcut_marker.setPos(y_cur)
+            self.vcut_marker.show()
+            if np.any(finite):
+                lo, hi = float(np.min(col_slice[finite])), float(np.max(col_slice[finite]))
+                pad = max(abs(hi - lo) * 0.12, 1e-6)
+                self.vcut_plot.setXRange(lo - pad, hi + pad, padding=0)
+                self.vcut_plot.setYRange(float(y_vals[0]), float(y_vals[-1]), padding=0)
+            self.vcut_header.setText(f"Cut @ {x_str}")
+
+    def _update_dispersion_overlay(self) -> None:
+        """Track resonance ridge on 2D map and fit Kittel dispersion when field units exist."""
+        if not self._kittel_enabled or self.heatmap._data is None:
+            self.heatmap.clear_dispersion_overlay()
+            self.kittel_readout_label.setText("")
+            return
+        data = self.heatmap._data
+        x_vals = self.heatmap._x_values
+        y_vals = self.heatmap._y_values
+        x_meta = self.heatmap._axis_metadata["x"]
+        y_meta = self.heatmap._axis_metadata["y"]
+        if x_meta.get("unit") == "Hz":
+            freq_axis = 1
+            sweep_unit = y_meta.get("unit", "")
+        elif y_meta.get("unit") == "Hz":
+            freq_axis = 0
+            sweep_unit = x_meta.get("unit", "")
+        else:
+            self.heatmap.clear_dispersion_overlay()
+            self.kittel_readout_label.setText("Kittel / Ridge requires a Frequency (Hz) axis")
+            return
+
+        sweeps, freqs_hz = extract_heatmap_ridge(
+            data,
+            x_vals,
+            y_vals,
+            frequency_axis=freq_axis,
+            exclude_bands_hz=self.map_controls.state.stripe_bands_hz,
+        )
+        if sweeps.size < 2:
+            self.heatmap.clear_dispersion_overlay()
+            self.kittel_readout_label.setText("No prominent resonance ridge detected")
+            return
+
+        scale_t = magnetic_field_scale_to_tesla(sweep_unit)
+        if scale_t is not None and sweeps.size >= 4:
+            try:
+                fit = fit_kittel_dispersion(sweeps * scale_t, freqs_hz)
+                dense_sweep = np.linspace(float(np.min(sweeps)), float(np.max(sweeps)), 120)
+                dense_f = kittel_frequency_hz(
+                    dense_sweep * scale_t,
+                    m_eff_t=fit.m_eff_t,
+                    h_k_t=fit.h_k_t,
+                    gamma_ghz_per_t=fit.gamma_ghz_per_t,
+                )
+                if freq_axis == 1:
+                    self.heatmap.set_dispersion_overlay(dense_f, dense_sweep)
+                else:
+                    self.heatmap.set_dispersion_overlay(dense_sweep, dense_f)
+                hk_txt = format_quantity_auto(fit.h_k_t, DIMENSION_MAGNETIC_FIELD)
+                self.kittel_readout_label.setText(
+                    f"Kittel: μ₀M_eff = {fit.m_eff_t:.3g} T · H_k = {hk_txt} · R² = {fit.r_squared:.3f}"
+                )
+                return
+            except (ValueError, RuntimeError):
+                # Fall through to tracked ridge display when field axis does not follow Kittel dispersion.
+                self.kittel_readout_label.setText("")
+
+        if freq_axis == 1:
+            self.heatmap.set_dispersion_overlay(freqs_hz, sweeps)
+        else:
+            self.heatmap.set_dispersion_overlay(sweeps, freqs_hz)
+        f_lo = format_quantity_auto(float(np.min(freqs_hz)), DIMENSION_FREQUENCY)
+        f_hi = format_quantity_auto(float(np.max(freqs_hz)), DIMENSION_FREQUENCY)
+        self.kittel_readout_label.setText(
+            f"Tracked ridge: {sweeps.size} pts · {f_lo} – {f_hi}"
         )
 
     def apply_theme(self, theme: str) -> None:
-        """Retheme the visible pyqtgraph scene with the application tokens."""
-
+        """Retheme the visible pyqtgraph scenes (2D map + 1D slices) with application tokens."""
+        self._theme_name = theme
+        tokens = tokens_for(theme)
+        palette = plot_theme(tokens)
+        teal = "#94e2d5" if theme == "dark" else "#0e858c"
         self.heatmap.apply_theme(theme)
+        for plot_widget, curve, marker, color in (
+            (self.slice_plot, self.slice_curve, self.slice_marker, tokens.accent),
+            (self.vcut_plot, self.vcut_curve, self.vcut_marker, teal),
+        ):
+            plot_widget.setBackground(palette.background)
+            apply_scientific_style(plot_widget.plotItem, theme)
+            curve.setPen(pg.mkPen(color, width=1.6))
+            marker.setPen(
+                pg.mkPen(
+                    teal if color == tokens.accent else tokens.accent,
+                    width=1.1,
+                    style=Qt.PenStyle.DashLine,
+                )
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -1075,6 +1535,7 @@ class HeatmapResultsTab(QWidget):
         self._coordinates = None
         self._coordinate_row_id = None
         self._processing_dirty = False
+        self._reset_series_filter()
         self._source_payload = None
         self._source_row = None
         self._displayed_payload = None
@@ -1086,6 +1547,12 @@ class HeatmapResultsTab(QWidget):
             self._selected_archive_identity = _archive_identity(path)
         except OSError:
             self._selected_archive_identity = None
+        self._reset_series_views()
+        if self._selected_archive_identity is not None:
+            try:
+                self._series_views = read_series_heatmap_views(self._selected_archive_identity)
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                self._series_view_error = str(exc)
         self._run = run
         self._points = points
         self._spectrum_rows = find_heatmap_rows(run)
@@ -1176,6 +1643,12 @@ class HeatmapResultsTab(QWidget):
         if absolute:
             self.heatmap.export_metadata["display_transform"] = "absolute_difference"
         self.heatmap.plot.setTitle(escape(metadata.get("title") or "Exported heatmap"))
+        if self.heatmap._data is not None and self.heatmap._data.size:
+            self._update_cross_sections(
+                self.heatmap._data.shape[0] // 2,
+                self.heatmap._data.shape[1] // 2,
+            )
+            self._update_dispersion_overlay()
 
     def load_heatmap_for_row(self, row_id: str) -> None:
         """Read all checkpoints for a given 2-D row and render the heatmap."""
@@ -1205,26 +1678,127 @@ class HeatmapResultsTab(QWidget):
         if self._coordinates is None or row_id != self._coordinate_row_id or self._selected_archive_identity is None:
             return
         row = self._run.rows[row_id]
-        items = plan_heatmaps(self._coordinates, self._request(), self._points)
+        request = self._request()
+        # The visible plane may have a narrower, automatic range because
+        # one series has fewer points. Whole-sweep export applies only
+        # ranges the operator explicitly set on the plotted axes.
+        filters = {key: value for key, value in request.filters.items()
+                   if key == "frequency" or key in self._explicit_axis_ranges}
+        series_views = {series: view for (saved_row, x_id, y_id, series), view in self._series_views.items()
+                        if (saved_row, x_id, y_id) == (row.id, request.x_id, request.y_id)}
+        items = plan_heatmaps(self._coordinates, replace(request, filters=filters), self._points,
+                             series_views=series_views)
         if not items:
             self._show_plot_status("No recorded measurement matches the selected axes and ranges.")
             return
-        palette_name = self.heatmap.colormap_combo.currentText()
-        palette = pg.colormap.get(palette_name)
-        colours = tuple(tuple(colour) for colour in palette.getLookupTable(nPts=256, mode="float"))
-        processing, map_state = self.processing_controls.state, self.map_controls.state
-        absolute = self.heatmap.show_absolute.isChecked()
+        processing, map_state, palette_name, absolute = (
+            self._shared_series_settings if series_views and self._shared_series_settings is not None
+            else self._current_series_settings()
+        )
+        def palette_colours(name):
+            return tuple(map(tuple, pg.colormap.get(name).getLookupTable(nPts=256, mode="float")))
+
+        try:
+            colours = palette_colours(palette_name)
+            series_palettes = {name: palette_colours(name) for name in {view.palette for view in series_views.values()}}
+        except (OSError, ValueError, KeyError) as exc:
+            self._show_plot_status(f"Cannot export a saved heatmap palette: {exc}")
+            return
         preview = manual_levels = None
         if self.heatmap.batch_button.isEnabled():
             preview = self.heatmap.plot.grab()
             shown_levels = tuple(map(float, self.heatmap.color_bar.levels()))
-            if shown_levels != self._auto_colour_levels:
+            if not series_views and shown_levels != self._auto_colour_levels:
                 manual_levels = shown_levels
         cached_row = self._archive_cache.preloaded_row(row.id) if self._archive_cache is not None else None
         state = HeatmapBatch(row, self._coordinates, self._points, processing, map_state, absolute,
-                             palette_name, colours, manual_levels, cached_row)
+                             palette_name, colours, manual_levels, cached_row, series_palettes)
         signal = self.powerpoint_requested if power_point else self.batch_requested
         signal.emit(self._selected_archive_identity, items, state, preview)
+
+    def _series_view_key(self):
+        return (self.row_combo.currentData(), self.x_axis_combo.currentData(),
+                self.y_axis_combo.currentData(), self.series_combo.currentData())
+
+    def _reset_series_views(self):
+        self._series_views = {}
+        self._series_view_error = ""
+        self._pending_series_view = None
+        self._shared_series_settings = None
+        self._series_entry_settings = None
+
+    def _update_series_view_status(self):
+        key = self._series_view_key()
+        if self._series_view_error:
+            self.series_view_status.setText("Saved views unavailable")
+            self.series_view_status.setToolTip(self._series_view_error)
+        else:
+            self.series_view_status.setText(
+                "Saved view" if key in self._series_views else "No saved view" if key[-1] else "Select one series"
+            )
+            self.series_view_status.setToolTip("Views are saved per series, data row and axes.")
+        self.save_series_view_button.setEnabled(
+            bool(key[-1] and self._selected_archive_identity and self.heatmap.batch_button.isEnabled())
+        )
+
+    def _save_series_view(self):
+        if not self.save_series_view_button.isEnabled() or self._displayed_payload is None:
+            return
+        row, payload = self._displayed_payload
+        request = self._request()
+        if row.id != self.row_combo.currentData() or payload.request != request:
+            self._show_plot_status("Load the selected series before saving its view.")
+            return
+        try:
+            plot = self.heatmap.plot
+            axes = plot.getViewBox().state
+            view = SeriesHeatmapView(
+                row.id, request, self.heatmap.colormap_combo.currentText(),
+                tuple(map(float, self.heatmap.color_bar.levels())),
+                tuple(tuple(map(float, limits)) for limits in plot.viewRange()),
+                (bool(axes["xInverted"]), bool(axes["yInverted"])),
+                self.heatmap.show_absolute.isEnabled() and self.heatmap.show_absolute.isChecked(),
+                self.processing_controls.state, self.map_controls.state,
+            )
+            self._series_views = save_series_heatmap_view(self._selected_archive_identity, view)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            self._show_plot_status(f"Cannot save series view: {exc}")
+            return
+        if self._shared_series_settings is None:
+            self._shared_series_settings = self._series_entry_settings
+        self._series_view_error = ""
+        self._update_series_view_status()
+        self._show_plot_status(f"Saved heatmap view for Series {view.key[-1]}.")
+
+    def _prepare_series_view(self):
+        view = self._series_views.get(self._series_view_key())
+        self._pending_series_view = view
+        self._update_series_view_status()
+        if view is None:
+            if self._shared_series_settings is None:
+                self._series_entry_settings = self._current_series_settings()
+                return False
+            settings, self._shared_series_settings = self._shared_series_settings, None
+            self._series_entry_settings = settings
+        else:
+            if self._shared_series_settings is None:
+                self._shared_series_settings = self._current_series_settings()
+            settings = view.processing, view.map_state, view.palette, view.absolute
+            self._rebuild_filters({key: _selection_range(value) for key, value in view.request.filters.items()})
+        processing, map_state, palette, absolute = settings
+        self.processing_controls.set_state(processing)
+        self.variant_combo.setEnabled(not processing.active)
+        self.map_controls.set_state(map_state)
+        self.heatmap.colormap_combo.setCurrentText(palette)
+        checkbox = self.heatmap.show_absolute
+        blocked = checkbox.blockSignals(True)
+        checkbox.setChecked(absolute)
+        checkbox.blockSignals(blocked)
+        return view is not None
+
+    def _current_series_settings(self):
+        return (self.processing_controls.state, self.map_controls.state,
+                self.heatmap.colormap_combo.currentText(), self.heatmap.show_absolute.isChecked())
 
     def _render_payload(self, row: ThatecRow, payload: _HeatmapPayload) -> None:
         self._displayed_payload = (row, payload)
@@ -1263,7 +1837,9 @@ class HeatmapResultsTab(QWidget):
         checkpoints = np.unique(payload.cell_checkpoints[payload.cell_checkpoints >= 0]).tolist()
         request = payload.request or self._request()
         coordinates = self._active_coordinates()
-        parameters = measurement_parameters(coordinates, checkpoints, {p.index: p for p in self._points})
+        points_by_index = {p.index: p for p in self._points}
+        parameters = measurement_parameters(coordinates, checkpoints, points_by_index)
+        self.heatmap._export_context = (coordinates, points_by_index)
         title = heatmap_title(coordinates, request, parameters)
         self.heatmap.plot.setTitle(escape(title))
         self.heatmap.export_metadata = {
@@ -1283,6 +1859,14 @@ class HeatmapResultsTab(QWidget):
         }
         if payload.instrument_averages:
             self.heatmap.export_metadata["instrument_averages_by_checkpoint"] = payload.instrument_averages
+        view = self._pending_series_view
+        self._pending_series_view = None
+        if view is not None and view.key == self._series_view_key() and view.request == request:
+            self.heatmap.colormap_combo.setCurrentText(view.palette)
+            self.heatmap.color_bar.setLevels(view.colour_levels)
+            self.heatmap.plot.getViewBox().invertX(view.inverted_axes[0])
+            self.heatmap.plot.getViewBox().invertY(view.inverted_axes[1])
+            self.heatmap.plot.setRange(xRange=view.view_ranges[0], yRange=view.view_ranges[1], padding=0)
         unit = f" {payload.z_unit}" if payload.z_unit else ""
         missing = (
             f" {payload.missing_checkpoints} unreadable checkpoint(s) are shown as gaps."
@@ -1306,8 +1890,15 @@ class HeatmapResultsTab(QWidget):
             message += " " + "; ".join(payload.processing_notes)
         self.info_label.setText(message)
         self.heatmap_view.setCurrentWidget(self.heatmap)
+        if self.heatmap._data is not None and self.heatmap._data.size:
+            self._update_cross_sections(
+                self.heatmap._data.shape[0] // 2,
+                self.heatmap._data.shape[1] // 2,
+            )
+            self._update_dispersion_overlay()
         self.load_button.setEnabled(True)
         self.heatmap.batch_button.setEnabled(self._coordinates is not None and self._selected_archive_identity is not None)
+        self._update_series_view_status()
         self.status_changed.emit(f"Heatmap for {label} loaded")
 
     def _absolute_view_changed(self) -> None:
@@ -1325,10 +1916,21 @@ class HeatmapResultsTab(QWidget):
             combo.clear()
             combo.blockSignals(blocked)
         self.heatmap.clear()
+        self.heatmap.clear_dispersion_overlay()
+        self.slice_curve.setData([], [])
+        self.slice_marker.hide()
+        self.vcut_curve.setData([], [])
+        self.vcut_marker.hide()
+        self._last_slice_cell = None
+        self.slice_meta_label.setText(
+            "Hover 2D map to inspect slice · click to open in Spectrum"
+        )
+        self.kittel_readout_label.setText("")
         self._spectrum_rows = []
         self._spectrum_rows_by_variant = {}
         self._selected_path = None
         self._selected_archive_identity = None
+        self._reset_series_views()
         self._source_cache = None
         self._source_cache_key = None
         self._source_caches.clear()
@@ -1348,6 +1950,8 @@ class HeatmapResultsTab(QWidget):
         self._displayed_analysis = None
         self._range_combos = {}
         self._filter_combos = {}
+        self._reset_series_filter()
+        self.filter_host.hide()
         self.load_button.setEnabled(False)
         self._show_heatmap_state(
             "Select a result",
@@ -1449,6 +2053,8 @@ class HeatmapResultsTab(QWidget):
     def _configure_coordinates(self) -> None:
         self._coordinates = None
         self.powerpoint_button.setEnabled(False)
+        self.series_host.hide()
+        self.filter_host.hide()
         if self._selected_path is None or self._run is None:
             return
         row_id = self.row_combo.currentData()
@@ -1478,6 +2084,7 @@ class HeatmapResultsTab(QWidget):
         self._coordinates = coordinates
         self._frequency_values = frequencies
         self._coordinate_row_id = row.id
+        self._populate_series_filter(coordinates)
         axis_dimensions = coordinates.axis_dimensions
         for combo in (self.x_axis_combo, self.y_axis_combo):
             combo.blockSignals(True)
@@ -1488,7 +2095,9 @@ class HeatmapResultsTab(QWidget):
         self.x_axis_combo.setCurrentIndex(0)
         # Prefer the innermost authored sweep. For sequential or partial runs
         # without a Cartesian recipe mapping, favor the most sampled axis.
-        if coordinates.sweep_dimension_ids:
+        if self.series_combo.count() and any(axis.id == "keithley.A.current" for axis in axis_dimensions):
+            y_id = "keithley.A.current"
+        elif coordinates.sweep_dimension_ids:
             y_id = coordinates.sweep_dimension_ids[-1]
         else:
             y_id = max(reversed(axis_dimensions[1:]), key=lambda axis: len(set(axis.values))).id
@@ -1498,6 +2107,8 @@ class HeatmapResultsTab(QWidget):
         self._rebuild_filters()
         self.load_button.setEnabled(True)
         self.powerpoint_button.setEnabled(self._selected_archive_identity is not None)
+        if self._prepare_series_view():
+            self._processing_dirty = True
         if self._processing_dirty and self.isVisible():
             self._processing_dirty = False
             self._load_selected_row()
@@ -1511,7 +2122,7 @@ class HeatmapResultsTab(QWidget):
         filters: dict[str, object] = {
             dimension.id: dimension.values[0]
             for dimension in self._active_coordinates().dimensions
-            if dimension.is_constant
+            if dimension.is_constant and dimension.id != SERIES_DIMENSION_ID
         }
         filters.update({
             dimension_id: (
@@ -1528,6 +2139,8 @@ class HeatmapResultsTab(QWidget):
                 if combo.currentData() is not None
             }
         )
+        if (series := self.series_combo.currentData()) is not None:
+            filters[SERIES_DIMENSION_ID] = series
         return HeatmapRequest(
             str(self.x_axis_combo.currentData()),
             str(self.y_axis_combo.currentData()),
@@ -1540,10 +2153,72 @@ class HeatmapResultsTab(QWidget):
             self.y_axis_combo.blockSignals(True)
             self.y_axis_combo.setCurrentIndex(alternate)
             self.y_axis_combo.blockSignals(False)
+        self._explicit_axis_ranges.clear()
         self._rebuild_filters()
         self._row_changed()
+        if self._prepare_series_view():
+            self._refresh_plane.start()
 
-    def _rebuild_filters(self) -> None:
+    def _reset_series_filter(self) -> None:
+        blocked = self.series_combo.blockSignals(True)
+        self.series_combo.clear()
+        self.series_combo.blockSignals(blocked)
+        self.series_host.hide()
+        self._explicit_axis_ranges.clear()
+
+    def _populate_series_filter(self, coordinates: HeatmapCoordinates) -> None:
+        previous = self.series_combo.currentData()
+        had_choices = self.series_combo.count() > 0
+        self._reset_series_filter()
+        series = next((d for d in coordinates.dimensions if d.id == SERIES_DIMENSION_ID), None)
+        if series is None:
+            return
+        blocked = self.series_combo.blockSignals(True)
+        self.series_combo.addItem("All recorded series", userData=None)
+        fixed = [d for d in coordinates.dimensions if d.id == "keithley.B.current"
+                 or (d.id.startswith("moke_box.vout") and d.id.endswith(".voltage"))]
+        numbers = tuple(map(int, series.values))
+        records = {number: [set() for _ in fixed] for number in sorted(set(numbers))}
+        for index, number in enumerate(numbers):
+            values = records[number]
+            for dimension, observed in zip(fixed, values, strict=True):
+                observed.add(dimension.values[index])
+        for number in records:
+            text = f"Series {number}" if number else "Without a recorded series"
+            if number:
+                for dimension, values in zip(fixed, records[number], strict=True):
+                    if len(values) == 1:
+                        value = self._format_coordinate_value(dimension, next(iter(values)))
+                        label = "Keithley B" if dimension.id == "keithley.B.current" else dimension.label.split(" programming")[0]
+                        text += f" · {label} {value}"
+            self.series_combo.addItem(text, userData=number)
+        first = min(number for number in records if number)
+        wanted = previous if had_choices else first
+        index = self.series_combo.findData(wanted)
+        self.series_combo.setCurrentIndex(index if index >= 0 else self.series_combo.findData(first))
+        self.series_combo.blockSignals(blocked)
+        self.series_host.show()
+
+    def _series_changed(self, *_args: object) -> None:
+        if self._coordinates is None:
+            return
+        was_displayed = self.heatmap_view.currentWidget() is self.heatmap and self.heatmap._data is not None
+        self._explicit_axis_ranges.clear()
+        self._rebuild_filters()
+        self._row_changed()
+        self.heatmap.plot.getViewBox().invertX(False)
+        self.heatmap.plot.getViewBox().invertY(False)
+        if self._prepare_series_view() or was_displayed:
+            self._refresh_plane.start()
+
+    def _linked_ranges(self, preferred=None):
+        return linked_heatmap_ranges(
+            self._active_coordinates(), str(self.x_axis_combo.currentData()),
+            str(self.y_axis_combo.currentData()), series=self.series_combo.currentData(),
+            preferred=preferred,
+        )
+
+    def _rebuild_filters(self, preferred=None) -> None:
         while self.filter_layout.count():
             item = self.filter_layout.takeAt(0)
             if item.widget() is not None:
@@ -1557,16 +2232,15 @@ class HeatmapResultsTab(QWidget):
             self.filter_host.hide()
             return
         axes = {self.x_axis_combo.currentData(), self.y_axis_combo.currentData()}
-        defaults = default_heatmap_ranges(
-            self._coordinates, str(self.x_axis_combo.currentData()), str(self.y_axis_combo.currentData())
-        )
+        ranges = self._linked_ranges(preferred)
         physical_dimensions = [
-            dimension
-            for dimension in self._coordinates.dimensions
-            if not dimension.is_frequency and dimension.values
+            self._coordinates.dimension(dimension_id) for dimension_id in ranges
         ]
         section = None
-        physical_dimensions.sort(key=lambda dimension: dimension.id not in axes)
+        # In a spectral map the fixed operating point comes before its
+        # dependent plotted current range.
+        if "frequency" not in axes:
+            physical_dimensions.sort(key=lambda dimension: dimension.id not in axes)
         for dimension in physical_dimensions:
             heading = "Axis ranges" if dimension.id in axes else "Slice filters"
             if section != heading:
@@ -1574,17 +2248,17 @@ class HeatmapResultsTab(QWidget):
                 title = CaptionLabel(heading, self.filter_host)
                 title.setObjectName("muted")
                 self.filter_layout.addWidget(title)
-            values = sorted({float(value) for value in dimension.values})
-            if len(values) == 1:
+            values, selected = ranges[dimension.id]
+            if dimension.is_constant:
                 value = self._format_coordinate_value(dimension, values[0])
                 label = CaptionLabel(f"{dimension.label}: {value}", self.filter_host)
                 label.setObjectName("heatmapFixedCoordinate")
                 label.setWordWrap(True)
                 self.filter_layout.addWidget(label)
             elif dimension.id == VISIT_DIMENSION_ID and dimension.id not in axes:
-                self._add_visit_filter(values, defaults[dimension.id].minimum)
+                self._add_visit_filter(values, selected.minimum)
             else:
-                self._add_range_row(dimension, values, selected_range=defaults[dimension.id])
+                self._add_range_row(dimension, values, selected_range=selected)
         if "frequency" not in axes:
             if section != "Slice filters":
                 title = CaptionLabel("Slice filters", self.filter_host)
@@ -1604,7 +2278,8 @@ class HeatmapResultsTab(QWidget):
             combo.set_options(("Choose a recorded frequency", None), self._frequency_values,
                               lambda value: self._format_coordinate_value(frequency, float(value)))
             if self._frequency_values:
-                combo.setCurrentIndex(1)
+                bounds = preferred.get("frequency") if preferred else None
+                combo.setCurrentIndex(max(1, combo.findData(bounds.minimum)) if bounds else 1)
             combo.currentIndexChanged.connect(self._frequency_changed)
             row_layout.addWidget(combo)
             row_layout.addStretch(1)
@@ -1615,8 +2290,9 @@ class HeatmapResultsTab(QWidget):
 
     def _add_visit_filter(self, values: list[float], selected: float) -> None:
         row = QHBoxLayout()
+        row.setSpacing(6)
         label = CaptionLabel("Visit:", self.filter_host)
-        label.setMinimumWidth(180)
+        label.setObjectName("muted")
         row.addWidget(label)
         combo = ComboBox(self.filter_host)
         combo.setAccessibleName("Visit at the same physical settings")
@@ -1624,9 +2300,9 @@ class HeatmapResultsTab(QWidget):
         for value in values:
             combo.addItem(f"{value:g}", userData=value)
         combo.setCurrentIndex(combo.findData(selected))
-        combo.currentIndexChanged.connect(self._row_changed)
-        row.addWidget(combo)
-        row.addStretch(1)
+        combo.setEnabled(len(values) > 1)
+        combo.currentIndexChanged.connect(self._refresh_linked_ranges)
+        row.addWidget(combo, 1)
         self.filter_layout.addLayout(row)
         self._filter_combos[VISIT_DIMENSION_ID] = combo
 
@@ -1637,40 +2313,45 @@ class HeatmapResultsTab(QWidget):
         *,
         selected_range: HeatmapRange,
     ) -> None:
-        """Add two recorded-value selectors for one physical coordinate."""
+        """Add two compact recorded-value selectors for one physical coordinate."""
 
         if not values:
             return
         row = QWidget(self.filter_host)
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(6)
+        outer = QVBoxLayout(row)
+        outer.setContentsMargins(0, 0, 0, 2)
+        outer.setSpacing(2)
         label = CaptionLabel(f"{dimension.label}:", row)
-        label.setMinimumWidth(180)
-        row_layout.addWidget(label)
+        label.setWordWrap(True)
+        outer.addWidget(label)
+        row_layout = QHBoxLayout()
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
         from_lbl = CaptionLabel("from", row)
         from_lbl.setObjectName("muted")
         row_layout.addWidget(from_lbl)
         minimum = ComboBox(row)
-        minimum.setMinimumWidth(120)
+        minimum.setMinimumWidth(84)
         minimum.setAccessibleName(f"{dimension.label} minimum")
         minimum.setObjectName("heatmapRangeMinimum")
-        row_layout.addWidget(minimum)
+        row_layout.addWidget(minimum, 1)
         to_lbl = CaptionLabel("to", row)
         to_lbl.setObjectName("muted")
         row_layout.addWidget(to_lbl)
         maximum = ComboBox(row)
-        maximum.setMinimumWidth(120)
+        maximum.setMinimumWidth(84)
         maximum.setAccessibleName(f"{dimension.label} maximum")
         maximum.setObjectName("heatmapRangeMaximum")
-        row_layout.addWidget(maximum)
-        row_layout.addStretch(1)
+        row_layout.addWidget(maximum, 1)
+        outer.addLayout(row_layout)
         for value in values:
             text = self._format_coordinate_value(dimension, value)
             minimum.addItem(text, userData=value)
             maximum.addItem(text, userData=value)
         minimum.setCurrentIndex(minimum.findData(selected_range.minimum))
         maximum.setCurrentIndex(maximum.findData(selected_range.maximum))
+        minimum.setEnabled(len(values) > 1)
+        maximum.setEnabled(len(values) > 1)
         dimension_id = str(dimension.id)
         minimum.currentIndexChanged.connect(
             lambda _index, dimension_id=dimension_id: self._range_changed(
@@ -1690,15 +2371,52 @@ class HeatmapResultsTab(QWidget):
         if controls is None:
             return
         minimum, maximum = controls
-        lower = float(minimum.currentData())
-        upper = float(maximum.currentData())
+        lower, upper = minimum.currentData(), maximum.currentData()
+        if lower is None or upper is None:
+            return
         if lower > upper:
             target = maximum if edge == "minimum" else minimum
             replacement = minimum.currentIndex() if edge == "minimum" else maximum.currentIndex()
             target.blockSignals(True)
             target.setCurrentIndex(replacement)
             target.blockSignals(False)
+        if dimension_id in {self.x_axis_combo.currentData(), self.y_axis_combo.currentData()}:
+            if minimum.currentIndex() == 0 and maximum.currentIndex() == maximum.count() - 1:
+                self._explicit_axis_ranges.discard(dimension_id)
+            else:
+                self._explicit_axis_ranges.add(dimension_id)
+        self._refresh_linked_ranges()
+
+    def _refresh_linked_ranges(self, *_args: object) -> None:
+        axes = {self.x_axis_combo.currentData(), self.y_axis_combo.currentData()}
+        preferred = {}
+        for key, (lower, upper) in self._range_combos.items():
+            if key not in axes or key in self._explicit_axis_ranges:
+                preferred[key] = HeatmapRange(lower.currentData(), upper.currentData())
+        visit = self._filter_combos.get(VISIT_DIMENSION_ID)
+        if visit is not None and visit.currentData() is not None:
+            preferred[VISIT_DIMENSION_ID] = HeatmapRange(visit.currentData(), visit.currentData())
+        for key, (values, bounds) in self._linked_ranges(preferred).items():
+            dimension = self._active_coordinates().dimension(key)
+            pair = self._range_combos.get(key)
+            if pair is not None:
+                for combo, selected in zip(pair, (bounds.minimum, bounds.maximum), strict=True):
+                    self._update_range_options(combo, dimension, values, selected)
+            elif key == VISIT_DIMENSION_ID and visit is not None:
+                self._update_range_options(visit, dimension, values, bounds.minimum)
         self._row_changed()
+
+    def _update_range_options(self, combo, dimension, values, selected) -> None:
+        blocked = combo.blockSignals(True)
+        try:
+            if tuple(combo.itemData(index) for index in range(combo.count())) != tuple(values):
+                combo.clear()
+                for value in values:
+                    combo.addItem(self._format_coordinate_value(dimension, value), userData=value)
+            combo.setCurrentIndex(combo.findData(selected))
+            combo.setEnabled(len(values) > 1)
+        finally:
+            combo.blockSignals(blocked)
 
     def _frequency_changed(self, *_args: object) -> None:
         self._row_changed()
@@ -1901,6 +2619,7 @@ class HeatmapResultsTab(QWidget):
 
     def _invalidate_pending_read(self) -> None:
         self._refresh_plane.stop()
+        self.save_series_view_button.setEnabled(False)
         if "archive" in self._read_kinds.values() and self._archive_cache is None:
             self.read_file_button.setEnabled(bool(self._spectrum_rows))
         self.processing_overlay.clear()
@@ -1922,6 +2641,7 @@ class HeatmapResultsTab(QWidget):
         progress_total: int | None = None,
     ) -> None:
         self.heatmap.batch_button.setEnabled(False)
+        self.save_series_view_button.setEnabled(False)
         self.heatmap_state.show_state(
             title=title,
             description=description,

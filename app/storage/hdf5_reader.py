@@ -491,11 +491,12 @@ class Hdf5RunReader:
                 and name in spectra):
             recorded_trace_name = Hdf5RunReader._attribute_text(spectra[name].attrs.get("trace_name"))
         if not include_details:
-            # Keep the recorded evidence required by spectral post-processing.
+            # Keep the recorded evidence needed for browsing and spectral post-processing.
             # Arbitrary additional provenance is loaded on checkpoint selection.
             keys = ("raw_recipe_sweep_indices", "spectrum_processing_v1", "saved_display_v1",
                     "spectrum_average_count", "instrument_average", "average_count", "averaging_source",
-                    "background_averaging_source", "background_sweep_count", "nominal_sweep_time_s")
+                    "background_averaging_source", "background_sweep_count", "nominal_sweep_time_s",
+                    "series_number", "series_id")
             compact = {key: metadata[key] for key in keys if key in metadata}
             if metadata.get("artifact_schema") == "lab-control-sweep-baseline-v1":
                 acquisition = metadata.get("acquisition_metadata")

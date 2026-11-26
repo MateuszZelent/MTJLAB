@@ -16,12 +16,96 @@ from app.ui.results.heatmap_coordinates import (
     HeatmapCoordinates,
     HeatmapDimension,
     HeatmapRequest,
+    SERIES_DIMENSION_ID,
     build_heatmap_coordinates,
     read_heatmap_matrix,
 )
 from app.ui.results.heatmap_tab import HeatmapResultsTab
 from tests.shell_test_isolation import shell_qt_application as shell_qt_application  # noqa: PLC0414
 from tests.test_spectrum_correction_controller import wait_until
+
+
+@pytest.mark.parametrize("has_series", [True, False])
+def test_heatmap_links_recorded_moke_b_and_a_only(tmp_path, shell_qt_application, has_series):
+    app = shell_qt_application
+    path = tmp_path / "selected-pairs.h5"
+    a, b, moke = "keithley.A.current", "keithley.B.current", "moke_box.vout0.voltage"
+    writer = Hdf5RunWriter(path, recipe_source="name: selected pairs\n", settings_source="",
+                          plan_hash="series", device_idn={}, expected_points=9)
+    for series, voltage, bias, currents in (
+        (4, -.075, -.019, (-.0051, 0, .0051)),
+        (5, -.075, -.071, (-.003, .003)),
+        (6, -.054, -.064, (-.002, .002)),
+        (7, -.054, -.051, (-.001, .001)),
+    ):
+        for current in currents:
+            index = writer.point_count
+            writer.append(MeasurementPoint(
+                index=index, setpoints={moke: voltage, b: bias, a: current}, measurements={},
+                metadata={"series_number": series, "series_id": f"series-{series}"} if has_series else {},
+            ), SpectrumTrace((1e6, 2e6), (-80. + index, -70.), datetime.now(UTC), "TRAC1"))
+    writer.close("completed")
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    tab = HeatmapResultsTab()
+    tab.resize(1280, 900)
+    tab.show()
+    try:
+        tab.load(path, ThatecRunReader.describe(path), Hdf5RunReader.points(path, include_details=False))
+        wait_until(app, lambda: not tab._read_tasks)
+        assert tab.y_axis_combo.currentData() == a
+        assert tab.series_combo.isVisibleTo(tab) == has_series
+        if has_series:
+            assert tab.series_combo.currentData() == 4
+            tab.series_combo.setCurrentIndex(tab.series_combo.findData(6))
+            request = tab._request()
+            assert request.filters[SERIES_DIMENSION_ID] == 6
+            assert request.filters[b] == (-.064, -.064)
+            assert request.filters[a] == (-.002, .002)
+            tab.load_button.click()
+            wait_until(app, lambda: not tab._read_tasks)
+            assert tab.heatmap._cell_checkpoint_indices[:, 0].tolist() == [5, 6]
+            assert "Series 6" in tab.heatmap.export_metadata["title"]
+            tab.series_combo.setCurrentIndex(tab.series_combo.findData(None))
+        for combo in tab._range_combos[moke]:
+            combo.setCurrentIndex(combo.findData(-.054))
+        assert [tab._range_combos[b][0].itemData(i) for i in range(tab._range_combos[b][0].count())] == [-.064, -.051]
+        for combo in tab._range_combos[b]:
+            combo.setCurrentIndex(combo.findData(-.051))
+        request = tab._request()
+        assert request.filters[b] == (-.051, -.051)
+        assert request.filters[a] == (-.001, .001)
+        tab.load_button.click()
+        wait_until(app, lambda: not tab._read_tasks)
+        assert tab.heatmap._cell_checkpoint_indices[:, 0].tolist() == [7, 8]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+    finally:
+        tab.close()
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_same_physical_settings_in_two_recorded_series_do_not_share_visits(tmp_path):
+    from app.ui.results.batch_processing import plan_heatmaps
+    from app.ui.results.heatmap_coordinates import VISIT_DIMENSION_ID
+
+    path = tmp_path / "repeated-series.h5"
+    current = "keithley.A.current"
+    writer = Hdf5RunWriter(path, recipe_source="name: repeated series\n", settings_source="",
+                          plan_hash="repeated-series", device_idn={}, expected_points=4)
+    for index, (number, value) in enumerate(((4, 0.0), (4, .001), (7, .001), (7, .002))):
+        writer.append(MeasurementPoint(
+            index=index, setpoints={current: value}, measurements={}, metadata={"series_number": number},
+        ), SpectrumTrace((1e6, 2e6), (-80. + index, -70.), datetime.now(UTC), "TRAC1"))
+    writer.close("completed")
+    run = ThatecRunReader.describe(path)
+    row = next(row for row in run.rows.values() if len(row.shape) == 2)
+    points = Hdf5RunReader.points(path, include_details=False)
+    coordinates = build_heatmap_coordinates(path, run, row, points)
+    assert all(dimension.id != VISIT_DIMENSION_ID for dimension in coordinates.dimensions)
+    request = HeatmapRequest("frequency", current, {SERIES_DIMENSION_ID: 7})
+    assert read_heatmap_matrix(path, row, coordinates, request).cell_checkpoints[:, 0].tolist() == [2, 3]
+    items = plan_heatmaps(coordinates, request, points)
+    assert [item.checkpoints for item in items] == [(0, 1), (2, 3)]
 
 
 @pytest.fixture

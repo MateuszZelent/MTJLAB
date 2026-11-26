@@ -129,8 +129,9 @@ class MainWindowFluentShellTests(unittest.TestCase):
             QTest.qWait(350)
             self.assertIsInstance(window, FluentWindow)
             self.assertEqual(tuple(window.navigation_routes), (
-                "overview", "discovery", "rigol", "keithley", "keithley_characterization",
-                "anritsu", "moke_box", "lakeshore_gaussmeter", "sweeps", "execution",
+                "overview", "discovery", "rigol", "rigol_calculator", "keithley",
+                "keithley_characterization", "anritsu", "moke_box",
+                "lakeshore_gaussmeter", "sweeps", "execution",
                 "results", "inventory", "elab", "settings",
             ))
             self.assertIsNotNone(window.safety_strip)
@@ -339,9 +340,17 @@ class MainWindowFluentShellTests(unittest.TestCase):
                 all(
                     second.navigationInterface.widget(host.objectName()).isVisible()
                     for route, host in second.navigation_routes.items()
-                    if route != "keithley_characterization"
+                    if route not in {"keithley_characterization", "rigol_calculator"}
                 )
             )
+            rigol_item = second.navigationInterface.widget("rigolPageHost")
+            calc_item = second.navigationInterface.widget("rigol_calculatorPageHost")
+            self.assertFalse(calc_item.isVisible())
+            rigol_item.setExpanded(True, ani=False)
+            self.application.processEvents()
+            self.assertTrue(calc_item.isVisible())
+            rigol_item.setExpanded(False, ani=False)
+            self.application.processEvents()
             keithley_item = second.navigationInterface.widget("keithleyPageHost")
             char_item = second.navigationInterface.widget("keithley_characterizationPageHost")
             self.assertFalse(char_item.isVisible())

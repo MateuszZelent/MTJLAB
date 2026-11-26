@@ -44,11 +44,13 @@ from app.ui.dialogs import StationCardWidget, StationDialog
 from app.ui.design_system import SPACING, tokens_for
 from app.ui.widgets import FluentTabView, SpectrumPlotWidget
 from app.recipes.parameter_registry import PARAMETERS_BY_TARGET
+from app.recipes.measurement_series import MeasurementSeries
 from app.recipes.semantic_tree import AxisPointContext, SemanticMeasurementTree, SemanticNodeKind
-from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_TIME, format_quantity_auto
+from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_TIME, DIMENSION_VOLTAGE, format_quantity_auto
 from app.domain.execution_state import SemanticOperationState
 from app.engine.compiler import ExecutionPlan
 from app.engine.estimation import PlanEstimate
+from app.ui.series_dialog import MeasurementSeriesDialog
 from app.spectrum.processing import peak_preserving_indices
 from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeView, TreeInteractionMode
 from app.ui.execution.plan_timeline import ExecutionPlanTimeline
@@ -261,6 +263,10 @@ class RunMonitorPage(QWidget):
         title = StrongBodyLabel("Recipe execution", self.hero_card)
         title.setObjectName("pageTitle")
         hero_layout.addWidget(title, 1)
+        self.series_status = CaptionLabel(self.hero_card)
+        self.series_status.setWordWrap(True)
+        self.series_status.hide()
+        hero_layout.addWidget(self.series_status, 1)
         self.state = StrongBodyLabel("IDLE", self.hero_card)
         self.state.setObjectName("readout")
         self.state.setProperty("deviceState", "compliance")
@@ -286,11 +292,16 @@ class RunMonitorPage(QWidget):
         self.first_spectrum_button = PushButton("Show first spectrum", self.launch_card)
         self.first_spectrum_button.hide()
         self.first_spectrum_button.clicked.connect(self._show_first_spectrum)
+        self.series_button = PushButton("Series…", self.launch_card)
+        self.series_button.hide()
+        self.series_button.clicked.connect(self._show_measurement_series)
+        self._preview_series = ()
         launch_layout.addWidget(self.plan_preview_name, 0, 0)
         launch_layout.addWidget(self.plan_preview_summary, 1, 0)
-        launch_layout.addWidget(self.plan_preview_output, 2, 0, 1, 3)
         launch_layout.addWidget(self.first_spectrum_button, 0, 1, 2, 1)
         launch_layout.addWidget(self.launch_button, 0, 2, 2, 1)
+        launch_layout.addWidget(self.series_button, 2, 2)
+        launch_layout.addWidget(self.plan_preview_output, 2, 0, 1, 2)
         self.launch_card.hide()
         self.heartbeat = BodyLabel("Heartbeat: —")
         self.heartbeat.setObjectName("muted")
@@ -1038,6 +1049,11 @@ class RunMonitorPage(QWidget):
         self.measurement_tree.follow_semantic_id(semantic_id, force=True)
         self.plan_timeline.inspect_step(step)
 
+    def _show_measurement_series(self) -> None:
+        dialog = MeasurementSeriesDialog(self._preview_series, self, read_only=True)
+        dialog.exec()
+        dialog.deleteLater()
+
     def preview_plan(
         self,
         plan: ExecutionPlan,
@@ -1058,6 +1074,14 @@ class RunMonitorPage(QWidget):
         self.completion_card.hide()
         self.warnings.hide()
         self.plan_preview_name.setText(plan.recipe_name)
+        self.series_status.hide()
+        self._preview_series = plan.series
+        self.series_button.setVisible(bool(plan.series))
+        remaining = [item for item in plan.series if not item.already_measured]
+        series_text = (
+            f" · {len(remaining)} of {len(plan.series)} series · Start at series {remaining[0].number}"
+            if remaining else ""
+        )
         self._first_spectrum = next((
             (step, action.semantic_id) for step, action in enumerate(plan.actions, 1)
             if action.kind == "acquire_spectrum" and action.semantic_id in semantic_tree.by_id
@@ -1066,7 +1090,7 @@ class RunMonitorPage(QWidget):
         first_spectrum_text = f" • First spectrum at action {self._first_spectrum[0]:,}" if self._first_spectrum else ""
         self.plan_preview_summary.setText(
             f"{mode_label} • {plan.total_points:,} checkpoints • {plan.total_spectra:,} spectra "
-            f"• Estimated {_human_duration(estimate.nominal_duration_s)}{first_spectrum_text}"
+            f"• Estimated {_human_duration(estimate.nominal_duration_s)}{first_spectrum_text}{series_text}"
         )
         self.plan_preview_output.setText(output_preview)
         self.launch_button.setText(action_label)
@@ -1074,6 +1098,7 @@ class RunMonitorPage(QWidget):
         self.state.setText("PLAN READY")
         self.state.setToolTip("Plan compiled. Device readiness is checked before starting.")
         self.tree_model.replace_tree(semantic_tree)
+        self.tree_model.set_series(plan.series)
         self.tree_model.set_outputs_forced_off(execution_mode == "dry_run")
         self.plan_timeline.set_plan(
             plan.actions, shutdown_actions=plan.safe_shutdown_actions,
@@ -1085,11 +1110,14 @@ class RunMonitorPage(QWidget):
         self.launch_button.setEnabled(False)
         self._first_spectrum = None
         self.first_spectrum_button.hide()
+        self.series_button.hide()
+        self._preview_series = ()
         self.state.setText("PLAN NEEDS REVIEW")
         self.state.setToolTip("")
         self.plan_preview_summary.setText("Return to Sweeps and open the updated plan with Go to Execute.")
         self.plan_preview_output.clear()
         self.tree_model.replace_tree(SemanticMeasurementTree((), {}))
+        self.tree_model.set_series(())
         self.plan_timeline.set_plan(())
 
     def run_started(
@@ -1104,9 +1132,11 @@ class RunMonitorPage(QWidget):
         safe_shutdown_actions: tuple[str, ...] = (),
         timeline_action_offset: int = 0,
         rigol_level_modes: dict[int, str] | None = None,
+        series: tuple[MeasurementSeries, ...] = (),
     ) -> None:
         if not self.launch_card.isHidden():
             self._show_plan_review(False)
+        self.series_status.hide()
         self.launch_button.setEnabled(False)
         self.plan_timeline.set_plan(plan_actions, shutdown_actions=safe_shutdown_actions,
                                     execution_mode=execution_mode, rigol_level_modes=rigol_level_modes)
@@ -1135,6 +1165,7 @@ class RunMonitorPage(QWidget):
             finally_node.data.get("generated_actions", ()) if finally_node is not None else ()
         ))
         self.tree_model.replace_tree(self._semantic_tree)
+        self.tree_model.set_series(series)
         self.tree_model.set_read_only(True)
         self._run_active = True
         self.completion_card.hide()
@@ -1533,7 +1564,7 @@ class RunMonitorPage(QWidget):
             else "verified"
             if any(word in normalized for word in ("complete", "confirmed", "saved"))
             else "caution"
-            if any(word in normalized for word in ("waiting", "stopping", "pause"))
+            if any(word in normalized for word in ("waiting", "stopping", "pause", "compliance"))
             else "active"
         )
         now = time.monotonic()
@@ -1836,6 +1867,13 @@ class RunMonitorPage(QWidget):
     def _event_summary(name: str, data: dict[str, object]) -> str:
         """Render a bounded diagnostic line without dumping state arrays."""
 
+        if name == "series_started":
+            voltage = format_quantity_auto(float(data["moke_voltage_v"]), DIMENSION_VOLTAGE)
+            bias = format_quantity_auto(float(data["keithley_b_a"]), DIMENSION_CURRENT)
+            return (f"Series {data['series_number']} of {data['series_total']} · "
+                    f"MOKE VOUT {data['moke_channel']} {voltage} · Keithley B {bias}")
+        if name == "series_finished":
+            return f"Series {data['series_number']} finished · {data['stored_points']} points saved"
         if name == "sweep_compliance_limited":
             currents = data.get("source_current_a") or {}
             channels = ", ".join(
@@ -1892,6 +1930,9 @@ class RunMonitorPage(QWidget):
         return True
 
     def append_event(self, name: str, data: dict[str, object]) -> None:
+        if name in {"series_started", "series_finished"}:
+            self.series_status.setText(self._event_summary(name, data))
+            self.series_status.show()
         if name == "semantic_operation_failed":
             self.discard_pending_semantic()
         if name in {

@@ -142,7 +142,8 @@ class MapProcessingControls(CardWidget):
         self.flow.setVerticalSpacing(6)
         self.flow.addWidget(CaptionLabel("Map analysis", self.strip))
         self.operation = ComboBox(self.strip)
-        self.operation.setFixedWidth(260)
+        self.operation.setMinimumWidth(180)
+        self.operation.setMaximumWidth(240)
         for label, key in (("Off — preserve input", "none"), ("Subtract median component — W", "median_power"),
                            ("Subtract lower-quantile component — W", "quantile_power"),
                            ("Subtract selected coordinate — W", "reference_power"),
@@ -154,8 +155,8 @@ class MapProcessingControls(CardWidget):
         self.operation.setToolTip("Use only this selected map slice. Median/quantile removal can suppress a physical signal that occupies most parameter values.")
         self.flow.addWidget(self.operation)
         self.reference = FilterComboBox(self.strip)
-        self.reference.setMinimumWidth(150)
-        self.reference.setMaximumWidth(230)
+        self.reference.setMinimumWidth(130)
+        self.reference.setMaximumWidth(210)
         self.reference.setAccessibleName("Reference sweep coordinate for differential map")
         self.reference.set_options(("Lowest selected coordinate", None))
         self.flow.addWidget(self.reference)

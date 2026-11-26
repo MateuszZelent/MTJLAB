@@ -121,7 +121,7 @@ def test_application_navigation_during_interrupted_expansion(tmp_path):
     app.processEvents()
     navigation = window.navigationInterface
     items = {key: navigation.widget(key) for key in (
-        "apparatusMenu", "rigolPageHost", "keithleyPageHost",
+        "apparatusMenu", "rigolPageHost", "rigol_calculatorPageHost", "keithleyPageHost",
         "keithley_characterizationPageHost", "anritsuPageHost", "moke_boxPageHost",
         "lakeshore_gaussmeterPageHost", "overviewPageHost",
     )}

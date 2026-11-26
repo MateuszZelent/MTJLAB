@@ -125,6 +125,7 @@ class RigolPage(QWidget):
     quick_controls_requested = Signal()
     quick_setpoint_requested = Signal(str, str)
     quick_control_draft_changed = Signal(str, str)
+    calculator_requested = Signal()
 
     LEVEL_MODE_AMPLITUDE_OFFSET = "Amplitude + Offset"
     LEVEL_MODE_HIGH_LOW = "High Level + Low Level (asymmetric)"
@@ -198,6 +199,11 @@ class RigolPage(QWidget):
         self.execution_badge.hide()
         header_layout.addWidget(self.execution_badge)
 
+        hero_actions = QGridLayout()
+        hero_actions.setContentsMargins(0, 0, 0, 0)
+        hero_actions.setHorizontalSpacing(8)
+        hero_actions.setVerticalSpacing(6)
+
         self.live_control_switch = SwitchButton(self.hero_card)
         self.live_control_switch.setObjectName("rigolLiveControlSwitch")
         self.live_control_switch.setOnText("Live control")
@@ -207,17 +213,25 @@ class RigolPage(QWidget):
             "Enable Apply and Enter for individual changes to a verified carrier."
         )
         self.live_control_switch.checkedChanged.connect(self._live_control_toggled)
-        header_layout.addWidget(self.live_control_switch)
+        hero_actions.addWidget(self.live_control_switch, 0, 0)
 
         self.quick_controls_button = PushButton("Quick controls...", self.hero_card)
         self.quick_controls_button.clicked.connect(self.quick_controls_requested)
-        header_layout.addWidget(self.quick_controls_button)
+        hero_actions.addWidget(self.quick_controls_button, 0, 1)
+
+        self.load_calculator_button = PushButton("Load calculator", self.hero_card)
+        self.load_calculator_button.setToolTip(
+            "Open the read-only Rigol -> MTJ voltage and current calculator."
+        )
+        self.load_calculator_button.clicked.connect(self.calculator_requested)
+        hero_actions.addWidget(self.load_calculator_button, 1, 0)
 
         self.open_floating_button = PushButton("Floating window", self.hero_card)
         self.open_floating_button.setAccessibleName("Open Rigol controls in a floating window")
         self.open_floating_button.setToolTip("Move Rigol controls to a separate window")
         self.open_floating_button.clicked.connect(self._toggle_floating_controls)
-        header_layout.addWidget(self.open_floating_button)
+        hero_actions.addWidget(self.open_floating_button, 1, 1)
+        header_layout.addLayout(hero_actions)
 
         self.device_led = BodyLabel("●")
         self.device_led.setObjectName("rigolLed")
@@ -2497,12 +2511,26 @@ class RigolPage(QWidget):
             return offset + vpp / 2, offset - vpp / 2
         return self.high_level.value_si(), self.low_level.value_si()
 
+    def active_advanced_modes_for(self, channel: int) -> tuple[str, ...]:
+        """Return any enabled or confirmed advanced output modes for read-only estimators."""
+        active: list[str] = []
+        confirmed = self._confirmed_advanced_states.get(channel, {})
+        visible_channel = int(self.channel.currentText())
+        checkbox_map = {
+            "modulation": self.mod_enabled,
+            "sweep": self.sweep_enabled,
+            "burst": self.burst_enabled,
+        }
+        for name, checkbox in checkbox_map.items():
+            if confirmed.get(name) is True or (channel == visible_channel and checkbox.isChecked()):
+                active.append(name)
+        return tuple(active)
+
     def _update_sample_load_estimate(self, *_args: object) -> None:
         # Advisory form preview only: never submits a command or widens a limit.
-        states = self._confirmed_advanced_states[int(self.channel.currentText())]
-        if self.output_mode.currentText() != "NORM" or any(
-            checkbox.isChecked() for checkbox in (self.mod_enabled, self.sweep_enabled, self.burst_enabled)
-        ) or any(value is True for value in states.values()):
+        if self.output_mode.currentText() != "NORM" or self.active_advanced_modes_for(
+            int(self.channel.currentText())
+        ):
             self.sample_load_estimate.clear(
                 "Estimate unavailable with modulation, sweep, burst or gated output enabled."
             )

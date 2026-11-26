@@ -119,6 +119,7 @@ class Recipe:
     finally_nodes: tuple[RecipeNode, ...]
     source_text: str
     dut_limits: dict[str, Any] = field(default_factory=dict)
+    completed_series: tuple[str, ...] = ()
 
 
 def legacy_dut_limits_policy() -> dict[str, object]:
@@ -326,7 +327,7 @@ def parse_recipe_text(source: str, *, origin: str = "<memory>") -> Recipe:
     root_raw = _require_mapping(raw, "recipe")
     # Accept the removed safety field so saved recipes from older releases still
     # open. Its raw value is retained for provenance but never limits execution.
-    allowed_top = {"schema_version", "name", "root", "finally", "dut_limits"}
+    allowed_top = {"schema_version", "name", "root", "finally", "dut_limits", "completed_series"}
     unknown = set(root_raw) - allowed_top
     if unknown:
         raise ConfigurationError(f"Unknown recipe fields: {', '.join(sorted(unknown))}.")
@@ -345,7 +346,13 @@ def parse_recipe_text(source: str, *, origin: str = "<memory>") -> Recipe:
         dut_limits = {}
     if not isinstance(dut_limits, dict):
         raise ConfigurationError("recipe.dut_limits must be a YAML mapping.")
-    return Recipe(1, name, root, finally_nodes, source, dict(dut_limits))
+    completed_series = root_raw.get("completed_series", [])
+    if not isinstance(completed_series, list):
+        raise ConfigurationError("recipe.completed_series must be a list of series IDs.")
+    series_ids = tuple(_require_string(value, "recipe.completed_series") for value in completed_series)
+    if len(set(series_ids)) != len(series_ids):
+        raise ConfigurationError("recipe.completed_series contains a duplicate series ID.")
+    return Recipe(1, name, root, finally_nodes, source, dict(dut_limits), series_ids)
 
 
 def _assert_unique_node_ids(nodes: tuple[RecipeNode, ...]) -> None:

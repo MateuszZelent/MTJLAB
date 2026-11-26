@@ -6,6 +6,7 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
+import math
 from pathlib import Path
 from typing import Any
 
@@ -379,6 +380,7 @@ class MainWindow(FluentWindow):
         )
         self._realized_device_pages: dict[str, QWidget] = {}
         self._device_pages = _LazyDevicePages(self)
+        self._rigol_calculator_page: Any = None
         self._keithley_characterization_page: Any = None
         self._recipe_page: Any = None
         self._run_monitor: Any = None
@@ -464,6 +466,7 @@ class MainWindow(FluentWindow):
             "overview": FluentIcon.HOME,
             "discovery": FluentIcon.SEARCH,
             "rigol": FluentIcon.MEDIA,
+            "rigol_calculator": FluentIcon.UNIT,
             "keithley": FluentIcon.POWER_BUTTON,
             "keithley_characterization": FluentIcon.SPEED_HIGH,
             "anritsu": FluentIcon.PROJECTOR,
@@ -480,6 +483,7 @@ class MainWindow(FluentWindow):
             ("overview", "Overview", self.dashboard.navigation_pages["overview"]),
             ("discovery", "Discovery", self.dashboard.navigation_pages["discovery"]),
             ("rigol", registry.get("rigol").display_name, None),
+            ("rigol_calculator", "Load Calculator", None),
             ("keithley", registry.get("keithley").display_name, None),
             ("keithley_characterization", "Characterization", None),
             ("anritsu", registry.get("anritsu").display_name, None),
@@ -553,7 +557,9 @@ class MainWindow(FluentWindow):
             position = (
                 NavigationItemPosition.BOTTOM if route == "settings" else NavigationItemPosition.TOP
             )
-            if route == "keithley_characterization":
+            if route == "rigol_calculator":
+                parent_key = "rigolPageHost"
+            elif route == "keithley_characterization":
                 parent_key = "keithleyPageHost"
             elif route in apparatus_routes:
                 parent_key = "apparatusMenu"
@@ -582,16 +588,17 @@ class MainWindow(FluentWindow):
         # Keep the equipment group open on launch: device controls remain a
         # single click away while the navigation still communicates hierarchy.
         self.apparatus_navigation_item.setExpanded(True, ani=False)
-        keithley_nav_item = self.navigationInterface.widget("keithleyPageHost")
-        if keithley_nav_item is not None:
-            if hasattr(keithley_nav_item, "expanded"):
-                keithley_nav_item.expanded.connect(
-                    lambda: QTimer.singleShot(0, self._sync_apparatus_navigation_height)
-                )
-            if hasattr(keithley_nav_item, "clicked"):
-                keithley_nav_item.clicked.connect(
-                    lambda: QTimer.singleShot(0, self._sync_apparatus_navigation_height)
-                )
+        for branch_key in ("rigolPageHost", "keithleyPageHost"):
+            branch_nav_item = self.navigationInterface.widget(branch_key)
+            if branch_nav_item is not None:
+                if hasattr(branch_nav_item, "expanded"):
+                    branch_nav_item.expanded.connect(
+                        lambda: QTimer.singleShot(0, self._sync_apparatus_navigation_height)
+                    )
+                if hasattr(branch_nav_item, "clicked"):
+                    branch_nav_item.clicked.connect(
+                        lambda: QTimer.singleShot(0, self._sync_apparatus_navigation_height)
+                    )
         self._apparatus_auto_collapsed = False
         self._apparatus_required_height = (
             self.navigationInterface.panel.vBoxLayout.minimumSize().height() + 1
@@ -745,6 +752,18 @@ class MainWindow(FluentWindow):
     @rigol_page.setter
     def rigol_page(self, value: Any) -> None:
         self._realized_device_pages["rigol"] = value
+
+    @property
+    def rigol_calculator_page(self) -> Any:
+        if self._rigol_calculator_page is None:
+            if getattr(self, "_closed", False):
+                return _ClosedPageStub()
+            self._ensure_route("rigol_calculator")
+        return self._rigol_calculator_page
+
+    @rigol_calculator_page.setter
+    def rigol_calculator_page(self, value: Any) -> None:
+        self._rigol_calculator_page = value
 
     @property
     def keithley_page(self) -> Any:
@@ -916,16 +935,23 @@ class MainWindow(FluentWindow):
             plot.apply_theme(theme)
         for heatmap in root.findChildren(HeatmapResultsTab):
             heatmap.apply_theme(theme)
+        from app.devices.rigol_dg1000z.ui.calculator_page import RigolLoadCalculatorPage
         from app.ui.results.scalar_tab import ScalarResultsTab
 
         for scalars in root.findChildren(ScalarResultsTab):
             scalars.apply_theme(theme)
+        for calc in root.findChildren(RigolLoadCalculatorPage):
+            calc.apply_theme(theme)
+        if isinstance(root, RigolLoadCalculatorPage):
+            root.apply_theme(theme)
 
     def _build_route_content(self, route: str) -> QWidget:
         self._building_routes.add(route)
         try:
             if route in {"rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter"}:
                 widget = self._build_device_page(route)
+            elif route == "rigol_calculator":
+                widget = self._build_rigol_calculator_page()
             elif route == "keithley_characterization":
                 if self._keithley_characterization_page is None:
                     self._ensure_device_page("keithley")
@@ -1014,6 +1040,9 @@ class MainWindow(FluentWindow):
             )
             self.quick_control_coordinator.value_read.connect(page.quick_setpoint_value_read)
             page.quick_controls_requested.connect(self._show_quick_controls)
+            page.calculator_requested.connect(
+                lambda: self._navigate_to("rigol_calculator")
+            )
             self._configure_limit_buttons_for("rigol", page)
             if "rigol" in self._last_device_capabilities:
                 page.set_capabilities(self._last_device_capabilities["rigol"])
@@ -1205,6 +1234,232 @@ class MainWindow(FluentWindow):
         page.resume_requested.connect(self._run_controller.request_resume)
         page.manual_next_requested.connect(self._run_controller.advance_manual_step)
         return page
+
+    def _build_rigol_calculator_page(self) -> QWidget:
+        if self._rigol_calculator_page is not None:
+            return self._rigol_calculator_page
+        from app.devices.rigol_dg1000z.ui.calculator_page import RigolLoadCalculatorPage
+
+        target = self.inventory_store.get_active_target()
+        active_directory = self._results_directory_for_target(target)
+        catalogue_root = self.inventory_store.catalogue_root
+        page = RigolLoadCalculatorPage(
+            settings=self._settings,
+            inventory_store=self.inventory_store,
+            initial_directory=active_directory or catalogue_root,
+            catalogue_root=catalogue_root,
+            rigol_snapshot_provider=lambda channel: self.rigol_page.configuration_snapshot_for(
+                channel
+            ),
+            rigol_advanced_modes_provider=lambda channel: self.rigol_page.active_advanced_modes_for(
+                channel
+            ),
+            parent=self,
+        )
+        page.set_sample_context(active_directory, catalogue_root, target=target)
+        page.status.connect(self._log)
+        page.rigol_voltage_limit_requested.connect(self._stage_rigol_voltage_limit_from_calculator)
+        self._configure_rigol_calculator_limit_button(page)
+        page.set_limit_staging_locked(self._execution_read_only_locked)
+        self._rigol_calculator_page = page
+        return page
+
+    def _configure_rigol_calculator_limit_button(self, page: Any | None = None) -> None:
+        calc_page = page if page is not None else self._rigol_calculator_page
+        if calc_page is None:
+            return
+        roles = ", ".join(sorted(role.value for role in self._access.identity.roles)) or "none"
+        if self._simulation:
+            enabled = False
+            reason = (
+                "Safety-limit editing is disabled in simulation mode. "
+                "Open the hardware station settings to edit configured limits."
+            )
+        elif not self._access.allows(Permission.EDIT_SETTINGS):
+            enabled = False
+            reason = (
+                f"Access denied: current role(s) {roles} do not include "
+                "EDIT_SETTINGS. Use an engineer or service account."
+            )
+        else:
+            enabled = True
+            reason = (
+                "Review and stage this calculated Rigol combined_voltage_limit in Settings. "
+                "Values are validated before saving."
+            )
+        calc_page.configure_limit_editing(enabled=enabled, reason=reason)
+
+    def _stage_rigol_voltage_limit_from_calculator(
+        self,
+        channel: int,
+        limit_v: float,
+        estimate: object,
+    ) -> None:
+        if self._execution_read_only_locked:
+            QMessageBox.warning(
+                self,
+                "Measurement active",
+                "Safety-limit staging is disabled while a measurement run is active.",
+            )
+            return
+        if self._simulation:
+            QMessageBox.warning(
+                self,
+                "Safety-limit editing disabled",
+                "Safety-limit editing is disabled in simulation mode. "
+                "Open the hardware station settings to edit configured limits.",
+            )
+            return
+        try:
+            self._require_permission(
+                Permission.EDIT_SETTINGS,
+                "editing rigol safety limits",
+                audit=True,
+            )
+        except AuthorizationError as exc:
+            QMessageBox.warning(self, "Access denied", str(exc))
+            return
+
+        from app.devices.rigol_dg1000z.mtj_calculator import (
+            DG1032Z_MAX_OPEN_CIRCUIT_PEAK_V,
+            RigolVoltageLimitEstimate,
+        )
+
+        if channel not in (1, 2) or not math.isfinite(limit_v) or limit_v <= 0.0:
+            QMessageBox.critical(
+                self,
+                "Invalid safety limit",
+                "Calculated Rigol voltage limit must be finite and positive for CH1 or CH2.",
+            )
+            return
+
+        load_label = "HighZ"
+        open_circuit_scale = 1.0
+        mtj_bounds_line = ""
+        model_line = ""
+        if isinstance(estimate, RigolVoltageLimitEstimate):
+            load_label = estimate.load.raw_label
+            open_circuit_scale = estimate.load.open_circuit_scale
+            mtj_bounds_line = (
+                f"MTJ voltage window: "
+                f"{format_quantity_auto(estimate.effective_mtj_min_v, DIMENSION_VOLTAGE)} … "
+                f"{format_quantity_auto(estimate.effective_mtj_max_v, DIMENSION_VOLTAGE)}\n"
+            )
+            if estimate.governing_resistance_ohm is not None:
+                model_line = (
+                    f"Conservative model: R_max = {estimate.governing_resistance_ohm:.4g} Ω "
+                    f"(worst-case I_MTJ ≤ {format_quantity_auto(estimate.estimated_current_max_a, DIMENSION_CURRENT)})\n"
+                )
+            elif estimate.clamped_to_measured_range:
+                model_line = "Model: measured Keithley sweep (clamped without extrapolation)\n"
+
+        if limit_v * open_circuit_scale > DG1032Z_MAX_OPEN_CIRCUIT_PEAK_V + 1e-9:
+            QMessageBox.critical(
+                self,
+                "Invalid safety limit",
+                f"Proposed limit exceeds the immutable DG1032Z ±{DG1032Z_MAX_OPEN_CIRCUIT_PEAK_V:g} V "
+                "open-circuit hardware ceiling.",
+            )
+            return
+
+        replacement = format_quantity_auto(limit_v, DIMENSION_VOLTAGE, precision=4)
+        if parse_quantity(replacement, DIMENSION_VOLTAGE).si_value > limit_v + 1e-12:
+            replacement = format_quantity_auto(limit_v, DIMENSION_VOLTAGE, precision=6)
+
+        try:
+            loaded = self._repository.load()
+            base_raw = (
+                self._settings_page._raw
+                if self._settings_page is not None and self._settings_page._dirty
+                else loaded.raw
+            )
+            raw = deepcopy(base_raw)
+            ch_key = str(channel)
+            path = (
+                "devices",
+                "rigol",
+                "safety",
+                "channels",
+                ch_key,
+                "lab_limits",
+                "combined_voltage_limit",
+            )
+            current_raw = str(self._nested_value(raw, path))
+            current_v = parse_quantity(current_raw, DIMENSION_VOLTAGE).si_value
+        except (ConfigurationError, KeyError, TypeError, QuantityError, ValueError) as exc:
+            QMessageBox.critical(self, "Cannot stage Rigol limit", str(exc))
+            return
+
+        widening_note = ""
+        if limit_v > abs(current_v) + 1e-12:
+            widening_note = (
+                "\nWARNING: This INCREASES the configured Rigol voltage limit above the current profile.\n"
+            )
+        confirm_body = (
+            f"Stage Rigol CH{channel} combined voltage limit (Vpp + |offset|) in Settings?\n\n"
+            f"Current CH{channel} limit: ±{format_quantity_auto(abs(current_v), DIMENSION_VOLTAGE)}\n"
+            f"Proposed CH{channel} limit: ±{replacement}\n"
+            f"Rigol LOAD convention: {load_label}\n"
+            f"{mtj_bounds_line}"
+            f"{model_line}"
+            f"{widening_note}\n"
+            "Safety notes:\n"
+            "• combined_voltage_limit bounds Vpp + |offset|, so both DC |V_set| and AC peaks stay within ±limit.\n"
+            "• Changing Rigol LOAD (HighZ vs 50 Ω) rescales physical open-circuit voltage — recalculate if LOAD changes.\n"
+            "• Existing estimated_load_current, estimated_load_power, and hardware ±10 V limits remain active.\n"
+            "• This stages the change only; press SAVE SETTINGS in Settings to persist."
+        )
+        answer = QMessageBox.question(
+            self,
+            f"Stage Rigol CH{channel} voltage limit",
+            confirm_body,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self._log(f"Rigol CH{channel} voltage limit staging cancelled by operator")
+            return
+
+        try:
+            container: Any = raw
+            for part in path[:-1]:
+                container = container[part]
+            container[path[-1]] = replacement
+            settings = StationSettings.model_validate(raw)
+        except (ConfigurationError, ValueError, KeyError, TypeError) as exc:
+            QMessageBox.critical(
+                self,
+                "Invalid safety limits",
+                format_settings_validation_error(exc),
+            )
+            return
+
+        changed_paths = SettingsPage._changed_leaf_paths(base_raw, raw)
+        if self.settings_page._can_stage_limit_snapshot(changed_paths):
+            self.settings_page.stage_limit_snapshot(settings, raw, changed_paths)
+        else:
+            self.settings_page.stage_external_snapshot(settings, raw)
+
+        self.rigol_page.set_settings(settings)
+        if self._rigol_calculator_page is not None:
+            self._rigol_calculator_page.set_settings(settings)
+            self._rigol_calculator_page.banner.show_message(
+                f"Rigol CH{channel} voltage limit staged (±{replacement} for LOAD {load_label}). "
+                "Open Settings and press SAVE SETTINGS to persist.",
+                severity="warning",
+                timeout_ms=0,
+            )
+        self._audit_record(
+            f"Staged Rigol CH{channel} combined_voltage_limit={replacement} from Load Calculator "
+            f"(LOAD {load_label}, previous {current_raw})",
+            category="safety",
+            event_type="rigol_limit_staged",
+            critical=True,
+        )
+        self._log(
+            f"Safety limits staged: Rigol CH{channel} — combined voltage limit = {replacement}; "
+            "press SAVE SETTINGS"
+        )
 
     def _build_results_page(self) -> ResultsPage:
         if self._results_page is not None:
@@ -1783,6 +2038,8 @@ class MainWindow(FluentWindow):
                 candidate.set_limits(replacement["min"], replacement.get("max", "N/A"))
         if device == "rigol":
             self.rigol_page.set_settings(settings)
+            if self._rigol_calculator_page is not None:
+                self._rigol_calculator_page.set_settings(settings)
         if device == "keithley":
             self.keithley_page.set_settings(settings)
             if hasattr(self, "keithley_characterization_page") and self.keithley_characterization_page is not None:
@@ -1814,9 +2071,12 @@ class MainWindow(FluentWindow):
                 plot.apply_theme(theme)
             for heatmap in top_level.findChildren(HeatmapResultsTab):
                 heatmap.apply_theme(theme)
+            from app.devices.rigol_dg1000z.ui.calculator_page import RigolLoadCalculatorPage
             from app.ui.results.scalar_tab import ScalarResultsTab
             for scalars in top_level.findChildren(ScalarResultsTab):
                 scalars.apply_theme(theme)
+            for calc in top_level.findChildren(RigolLoadCalculatorPage):
+                calc.apply_theme(theme)
         if changed:
             self.theme_changed.emit(theme)
         self._configured_theme_mode = mode
@@ -2513,6 +2773,7 @@ class MainWindow(FluentWindow):
             semantic_tree = self.recipe_page.semantic_tree_snapshot(
                 plan.recipe_source,
                 plan,  # type: ignore[union-attr]
+                update_editor=False,
             )
             active_controllers = self._active_device_controllers()
             sample_target = self.inventory_store.get_active_target()
@@ -2555,6 +2816,7 @@ class MainWindow(FluentWindow):
             recipe_source=plan.recipe_source,  # type: ignore[union-attr]
             semantic_tree=semantic_tree,
             execution_mode=selected_execution_mode.value,
+            series=plan.series,
         )
         self._set_run_ui_locked(True)
         self._navigate_to("execution")
@@ -2680,7 +2942,7 @@ class MainWindow(FluentWindow):
                     f"• {item.label}: {item.detail}" for item in readiness.blocking_items
                 )
                 raise ConfigurationError("Station preflight is blocked:\n" + details)
-            semantic_tree = self.recipe_page.semantic_tree_snapshot(plan.recipe_source, plan)
+            semantic_tree = self.recipe_page.semantic_tree_snapshot(plan.recipe_source, plan, update_editor=False)
             active_controllers = self._active_device_controllers()
             self._run_controller.start(
                 self._settings,
@@ -2713,6 +2975,7 @@ class MainWindow(FluentWindow):
             recipe_source=plan.recipe_source,
             semantic_tree=semantic_tree,
             execution_mode=(estimate_execution_mode.value),
+            series=plan.series,
         )
         self._set_run_ui_locked(True)
         self._navigate_to("execution")
@@ -3174,6 +3437,13 @@ class MainWindow(FluentWindow):
         char_page = MainWindow._peek_page(self, "keithley_characterization_page")
         if char_page is not None:
             char_page.set_active_sample_target(target)
+        calc_page = MainWindow._peek_page(self, "rigol_calculator_page")
+        if calc_page is not None:
+            calc_page.set_sample_context(
+                self._results_directory_for_target(target),
+                self.inventory_store.catalogue_root,
+                target=target,
+            )
         self._refresh_safety_strip()
 
     def _bind_sweep_sample_target(self, target: ActiveSampleTarget) -> None:
@@ -3402,6 +3672,11 @@ class MainWindow(FluentWindow):
         for name, page in self._realized_device_pages.items():
             if changed_devices is None or name in changed_devices:
                 page.set_settings(self._settings)
+        if (
+            self._rigol_calculator_page is not None
+            and (changed_devices is None or "rigol" in changed_devices)
+        ):
+            self._rigol_calculator_page.set_settings(self._settings)
         if (
             self._keithley_characterization_page is not None
             and (changed_devices is None or "keithley" in changed_devices)
@@ -4330,6 +4605,8 @@ class MainWindow(FluentWindow):
                     "Live field readout paused while a recipe run owns the Lake Shore 475."
                 )
         self._set_device_pages_execution_read_only(locked)
+        if self._rigol_calculator_page is not None:
+            self._rigol_calculator_page.set_limit_staging_locked(locked)
         if self._recipe_page is not None:
             self._recipe_page.set_execution_controlled(locked)
         # Device routes remain available during a run so the operator can
@@ -4795,6 +5072,11 @@ class MainWindow(FluentWindow):
         results_page = MainWindow._peek_page(self, "results_page")
         if results_page is not None and not results_page.shutdown():
             self._log("Application close is waiting for result readers to finish.")
+            event.ignore()
+            return
+        rigol_calc_page = MainWindow._peek_page(self, "rigol_calculator_page")
+        if rigol_calc_page is not None and not rigol_calc_page.shutdown():
+            self._log("Application close is waiting for Rigol Load Calculator readers to finish.")
             event.ignore()
             return
         elab_page = MainWindow._peek_page(self, "elab_page")

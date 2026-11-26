@@ -51,7 +51,7 @@ class ThatecSchemaMapper:
     ) -> ThatecSchema:
         count = max(1, int(expected_points or 1))
         if allow_skipped_checkpoints:
-            return cls._checkpoint_schema(count, "Compliance can omit planned sweep points.")
+            return cls._checkpoint_schema(1, "Compliance can omit planned sweep points.")
         try:
             recipe = parse_recipe_text(recipe_source, origin="HDF5 recipe snapshot")
             paths: list[tuple[ThatecSweepAxis, ...]] = []

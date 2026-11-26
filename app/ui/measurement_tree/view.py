@@ -179,7 +179,8 @@ class MeasurementTreeView(TreeView):
             available = 720
 
         progress_w = 92
-        state_w = 96
+        model = self.tree_model
+        state_w = 132 if model is not None and model.has_series else 96
         remaining = max(200, available - progress_w - state_w)
         op_w = max(140, int(remaining * 0.55))
         val_w = max(100, remaining - op_w)
@@ -262,6 +263,7 @@ class MeasurementTreeView(TreeView):
         if previous is not None:
             previous.modelAboutToBeReset.disconnect(self._remember_expansion)
             previous.modelReset.disconnect(self._restore_expansion)
+            previous.series_presence_changed.disconnect(self._apply_column_widths)
         self._follow_timer.stop()
         self._pending_follow_semantic_id = None
         self._collapsed_before_reset.clear()
@@ -276,6 +278,7 @@ class MeasurementTreeView(TreeView):
             model.set_read_only(self._interaction_mode is TreeInteractionMode.READ_ONLY)
             model.modelAboutToBeReset.connect(self._remember_expansion)
             model.modelReset.connect(self._restore_expansion)
+            model.series_presence_changed.connect(self._apply_column_widths)
         self._selection_model = self.selectionModel()
         if self._selection_model is not None:
             self._selection_model.currentChanged.connect(self._emit_semantic_selection)

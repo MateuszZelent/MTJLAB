@@ -11,6 +11,7 @@ from PySide6.QtCore import QThread
 from PySide6.QtGui import QImage
 
 from app.storage import Hdf5RunReader
+from app.storage.filesystem_paths import native_path
 from app.storage.heatmap_analysis_store import SCHEMA, read_heatmap_analysis, write_heatmap_analysis
 from app.ui.results.analysis_export import heatmap_export_path
 from app.ui.results.heatmap_ranges import HeatmapRangeDialog, parse_axis_value
@@ -42,6 +43,32 @@ def test_default_export_mirrors_source_dut_and_sweep_name(tmp_path, bundle):
     changed = metadata(source)
     changed["spectrum_processing"]["reference_sweep"] = 2
     assert heatmap_export_path(changed) != target
+
+
+def test_long_export_path_keeps_series_and_device_settings_in_the_filename(tmp_path):
+    root = tmp_path / ("wafer_" + "a" * 75) / "devices" / "R19C7"
+    source = root / "measurements" / "sweeps" / ("3_20261125_measurement_" + "b" * 35) / "data.h5"
+    info = metadata(source)
+    info["title"] = "Series 9 | Keithley B -18 mA | MOKE Box VOUT 0 -10.0708008 mV"
+    info["parameters"] = [
+        {"id": "measurement.series", "label": "Series", "unit": "", "minimum": 9, "maximum": 9},
+        {"id": "moke_box.vout0.voltage", "label": "MOKE Box VOUT 0", "unit": "V",
+         "minimum": -.0100708008, "maximum": -.0100708008},
+        {"id": "keithley.B.current", "label": "Keithley B", "unit": "A", "minimum": -.018, "maximum": -.018},
+        {"id": "keithley.A.current", "label": "Keithley A", "unit": "A", "minimum": -.004692, "maximum": .004386},
+    ]
+    path = heatmap_export_path(info)
+    assert path.name.startswith("Series 09")
+    assert "MOKE" in path.name and "-10.0708 mV" in path.name
+    assert "Keithley B -18 mA" in path.name
+    assert "Keithley A -4.692 to +4.386 mA" in path.name
+    native_path(path.parent).mkdir(parents=True)
+    collision = native_path(path.with_suffix(".svg"))
+    collision.touch()
+    try:
+        assert heatmap_export_path(info).stem == f"{path.stem} (2)"
+    finally:
+        collision.unlink()
 
 
 def test_derived_snapshot_roundtrip_units_gaps_identity_and_no_overwrite(tmp_path):
@@ -147,14 +174,18 @@ def test_manual_ranges_reject_wrong_dimensions_and_nonfinite(text, unit):
         parse_axis_value(text, unit)
 
 
-@pytest.mark.parametrize("width", [1200, 650])
-def test_png_hdf5_export_and_results_reload_are_rendered_off_worker_boundary(tmp_path, shell_qt_application, monkeypatch, width):
+@pytest.mark.parametrize(("width", "long_path"), [(1200, False), (650, False), (1200, True)])
+def test_png_hdf5_export_and_results_reload_are_rendered_off_worker_boundary(
+    tmp_path, shell_qt_application, monkeypatch, width, long_path,
+):
     app = shell_qt_application
     root = tmp_path / "sample" / "devices" / "R20C4"
+    if long_path:
+        root = root / ("wafer_" + "w" * max(72, 180 - len(str(root))))
     source = root / "measurements" / "sweeps" / "1_20261009T120000Z_current" / "data.h5"
-    source.parent.mkdir(parents=True)
+    native_path(source.parent).mkdir(parents=True)
     _write_current_sweep(source)
-    original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    original_hash = hashlib.sha256(native_path(source).read_bytes()).hexdigest()
     page = ResultsPage(str(root))
     page.resize(width, 950)
     page.show()
@@ -184,6 +215,9 @@ def test_png_hdf5_export_and_results_reload_are_rendered_off_worker_boundary(tmp
         wait_until(app, lambda: plot._export_task is None)
         image = exports[0]
         assert image.parent == root / "postprocessing" / "sweeps" / source.parent.name
+        assert "Keithley B 1 to 2 mA" in image.stem
+        if long_path:
+            assert len(str(image)) > 260
         assert not QImage(str(image)).isNull()
         derived = image.with_suffix(".h5")
         stored = read_heatmap_analysis(derived)
@@ -191,8 +225,11 @@ def test_png_hdf5_export_and_results_reload_are_rendered_off_worker_boundary(tmp
         np.testing.assert_array_equal(stored.x_values, [1e6, 2e6])
         np.testing.assert_array_equal(stored.y_values, [.001, .002])
         np.testing.assert_array_equal(stored.x_edges, [.5e6, 1.5e6, 2.5e6])
-        manifest = json.loads(Path(str(image) + ".analysis.json").read_text(encoding="utf-8"))
+        manifest = json.loads(native_path(str(image) + ".analysis.json").read_text(encoding="utf-8"))
         assert not manifest["source_data_modified"]
+        bounds = {record["id"]: (record["minimum"], record["maximum"]) for record in manifest["parameters"]}
+        assert bounds["keithley.B.current"] == (.001, .002)
+        assert bounds["frequency"] == (1e6, 2e6)
         page._on_file_selected(derived)
         wait_until(app, lambda: page._result_task is None and page.heatmap_tab.heatmap._data is not None)
         np.testing.assert_array_equal(page.heatmap_tab.heatmap._data, stored.values)
@@ -220,9 +257,13 @@ def test_png_hdf5_export_and_results_reload_are_rendered_off_worker_boundary(tmp
         page._on_file_selected(source)
         wait_until(app, lambda: page._result_task is None and page._thatec_run is not None)
         assert tab.processing_controls.isEnabled() and tab.map_controls.isEnabled()
-        assert hashlib.sha256(source.read_bytes()).hexdigest() == original_hash
+        assert hashlib.sha256(native_path(source).read_bytes()).hexdigest() == original_hash
     finally:
         assert page.shutdown()
         page.close()
         page.deleteLater()
         app.processEvents()
+        if long_path and exports:
+            target = exports[0]
+            for artifact in (target, target.with_suffix(".h5"), str(target) + ".analysis.json"):
+                native_path(artifact).unlink(missing_ok=True)

@@ -279,4 +279,101 @@ QComboBox[validationState="error"], ComboBox[validationState="error"],
 QSpinBox[validationState="error"], SpinBox[validationState="error"] {{
     border: 2px solid {tokens.danger};
 }}
+QWidget#resultsPage {{
+    background: {tokens.background};
+}}
+QWidget#resultsHeaderCard {{
+    background: {tokens.surface};
+    border: 1px solid {tokens.border};
+    border-radius: 8px;
+}}
+QFrame#resultsBreadcrumbBar {{
+    background: {tokens.surface};
+    border: 1px solid {tokens.border};
+    border-radius: 7px;
+}}
+QWidget#resultsWorkspaceHost {{
+    background: {tokens.surface};
+    border: 1px solid {tokens.border};
+    border-radius: 8px;
+}}
+QWidget#resultsTelemetryBar {{
+    background: {tokens.plot_background};
+    border-bottom: 1px solid {tokens.border};
+}}
+QWidget#resultsCommandStrip, QWidget#resultsScrubberBar, QWidget#resultsFomBar {{
+    background: {tokens.surface};
+    border-top: 1px solid {tokens.border};
+    border-bottom: 1px solid {tokens.border};
+}}
+QWidget#resultsKpiTile {{
+    background: {tokens.surface_raised};
+    border: 1px solid {tokens.border};
+    border-radius: 7px;
+}}
+QScrollArea#resultsInspectorScroll,
+QScrollArea#resultsInspectorScroll > QWidget,
+QScrollArea#resultsInspectorScroll > QWidget > QWidget {{
+    background: transparent;
+    border: none;
+}}
+QWidget#resultsInspectorDrawer {{
+    background: {tokens.surface};
+    border-left: 1px solid {tokens.border};
+}}
+QSplitter#resultsMainSplitter::handle,
+QSplitter#resultsTabSplitter::handle {{
+    background: transparent;
+}}
+QSplitter#resultsMainSplitter::handle:hover,
+QSplitter#resultsTabSplitter::handle:hover {{
+    background: {tokens.border};
+}}
+QLabel#resultsRunTitle {{
+    color: {tokens.text_primary};
+    font-weight: 600;
+}}
+QLabel#resultsTelemetryPrimary {{
+    color: {tokens.text_primary};
+    font-family: "Cascadia Code", "Consolas", monospace;
+}}
+QLabel#resultsTelemetryMuted {{
+    color: {tokens.text_muted};
+    font-family: "Cascadia Code", "Consolas", monospace;
+}}
+QLabel#resultsRunStatus[runStatus="completed"] {{
+    color: {tokens.success};
+    font-weight: 600;
+}}
+QLabel#resultsRunStatus[runStatus="aborted"] {{
+    color: {tokens.caution};
+    font-weight: 600;
+}}
+QLabel#resultsRunStatus[runStatus="faulted"],
+QLabel#resultsRunStatus[runStatus="incomplete"] {{
+    color: {tokens.danger};
+    font-weight: 600;
+}}
+QLabel#resultsRunStatus[runStatus="neutral"] {{
+    color: {tokens.text_muted};
+    font-weight: 600;
+}}
+QComboBox#resultFilterCombo {{
+    background: {tokens.surface_raised};
+    color: {tokens.text_primary};
+    border: 1px solid {tokens.border};
+    border-radius: 6px;
+    padding: 3px 24px 3px 8px;
+}}
+QComboBox#resultFilterCombo:hover {{
+    border-color: {tokens.focus};
+}}
+QComboBox#resultFilterCombo:disabled {{
+    color: {tokens.text_muted};
+    background: {tokens.surface};
+}}
+QComboBox#resultFilterCombo::drop-down {{
+    border: none;
+    width: 20px;
+}}
 """

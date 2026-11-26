@@ -14,6 +14,15 @@ from app.recipes.models import parse_recipe_text
 from app.recipes.block_registry import annotate_recipe_blocks
 
 
+def set_completed_series(source: str, series_ids: tuple[str, ...]) -> str:
+    raw = _load(source)
+    if series_ids:
+        raw["completed_series"] = list(series_ids)
+    else:
+        raw.pop("completed_series", None)
+    return _dump_validated(raw, "series selection")
+
+
 def add_recipe_node(
     source: str,
     *,

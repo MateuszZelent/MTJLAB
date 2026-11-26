@@ -34,6 +34,7 @@ from app.domain.spectrum_averaging import (
     ANRITSU_INSTRUMENT_AVERAGE_MAX_SWEEPS,
     ANRITSU_INSTRUMENT_AVERAGE_MIN_SWEEPS,
 )
+from app.recipes.measurement_series import MeasurementSeries, apply_series_selection, measurement_series
 from app.recipes.models import Recipe, RecipeNode, validate_action_fields
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.recipes.semantic_tree import (
@@ -100,6 +101,8 @@ class ExecutionPlan:
     recipe_dut_limits: dict[str, Any] = field(default_factory=dict)
     elab_upload_config: dict[str, Any] | None = None
     total_control_points: int = 0
+    series: tuple[MeasurementSeries, ...] = ()
+    series_action_ranges: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     @property
     def may_skip_compliance_points(self) -> bool:
@@ -117,6 +120,8 @@ class ExecutionPlan:
         object.__setattr__(self, "recipe_dut_limits", freeze_configuration(self.recipe_dut_limits))
         object.__setattr__(self, "elab_upload_config", freeze_configuration(self.elab_upload_config))
         object.__setattr__(self, "required_devices", frozenset(self.required_devices))
+        object.__setattr__(self, "series", tuple(self.series))
+        object.__setattr__(self, "series_action_ranges", freeze_configuration(self.series_action_ranges))
         object.__setattr__(self, "safe_shutdown_actions", tuple(self.safe_shutdown_actions))
 
 
@@ -510,6 +515,10 @@ class RecipeCompiler:
 
     def compile(self, recipe: Recipe) -> ExecutionPlan:
         self._check_cancelled()
+        catalog = measurement_series(recipe)
+        recipe = apply_series_selection(recipe, catalog)
+        self._series_ids = {item.id for item in catalog if not item.already_measured}
+        self._series_action_ranges: dict[str, tuple[int, int]] = {}
         actions: list[PlanAction] = []
         self._reference_assets = {}
         self._recipe_nodes = {}
@@ -624,6 +633,8 @@ class RecipeCompiler:
             dict(recipe.dut_limits),
             elab_upload_config,
             semantic_points,
+            catalog,
+            self._series_action_ranges,
         )
 
     @staticmethod
@@ -1348,6 +1359,7 @@ class RecipeCompiler:
                     f"for {node.data.get('device_module', 'unknown')!r}."
                 )
             child_spans = []
+            sequence_start = len(actions)
             for child in node.children:
                 start = len(actions)
                 self._visit(child, context, actions, is_finally=is_finally)
@@ -1355,6 +1367,8 @@ class RecipeCompiler:
                     child_spans.append((child, start, len(actions)))
             if not is_finally:
                 self._mark_current_scan_approach(actions, child_spans)
+                if node.id in self._series_ids:
+                    self._series_action_ranges[node.id] = (sequence_start, len(actions))
             return
         if node.type in {"enable_rigol_output", "enable_anritsu_sg_output"}:
             if is_finally:

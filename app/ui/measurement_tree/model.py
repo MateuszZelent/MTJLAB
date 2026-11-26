@@ -8,6 +8,7 @@ single operation state while a run is active.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from enum import IntEnum
 from typing import Any, Mapping
 
@@ -15,7 +16,8 @@ from PySide6.QtCore import QAbstractItemModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from qfluentwidgets import FluentIcon, isDarkTheme
 
-from app.domain.quantities import format_quantity_auto
+from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_VOLTAGE, format_quantity_auto
+from app.recipes.measurement_series import MeasurementSeries
 from app.recipes.semantic_tree import SemanticMeasurementTree, SemanticNodeKind, SemanticTreeNode
 from app.ui.design_system.tokens import tokens_for
 
@@ -52,8 +54,11 @@ def _state_value(state: object, name: str, default: object = None) -> object:
 
 class MeasurementTreeModel(QAbstractItemModel):
     unknown_semantic_state = Signal(str)
+    series_selection_requested = Signal(str, bool)
+    series_presence_changed = Signal()
 
     COLUMN_COUNT = 4
+    STATE_COLUMN = 3
     HEADERS = ("Operation", "Configured / active value", "Progress", "State")
 
     def __init__(
@@ -68,6 +73,7 @@ class MeasurementTreeModel(QAbstractItemModel):
         self._roots: tuple[_NodeRef, ...] = ()
         self._by_id: dict[str, _NodeRef] = {}
         self._states: dict[str, object] = dict(states or {})
+        self._series: dict[str, MeasurementSeries] = {}
         self._reported_unknown_ids: set[str] = set()
         self._read_only = False
         self._outputs_forced_off = False
@@ -125,7 +131,41 @@ class MeasurementTreeModel(QAbstractItemModel):
             return True
         if self._outputs_forced_off and self._is_output_enable_node(ref):
             return True
+        if self._series:
+            ancestor = ref
+            while ancestor is not None:
+                series = self._series.get(ancestor.node.semantic_id)
+                if series is not None and series.already_measured:
+                    return True
+                ancestor = ancestor.parent
         return False
+
+    def set_series(self, catalog: tuple[MeasurementSeries, ...], *, source_text: str | None = None) -> None:
+        if source_text is not None and source_text != self.tree.source_text:
+            self.tree = replace(self.tree, source_text=source_text)
+        series = {item.id: item for item in catalog}
+        changed = {key for key in self._series.keys() | series.keys() if self._series.get(key) != series.get(key)}
+        if not changed:
+            return
+        presence_changed = bool(self._series) != bool(series)
+        self._series = series
+        self._render_cache = {}
+
+        def notify(index: QModelIndex) -> None:
+            if not index.isValid():
+                return
+            self.dataChanged.emit(index, index.siblingAtColumn(self.STATE_COLUMN))
+            for row in range(self.rowCount(index)):
+                notify(self.index(row, 0, index))
+
+        for series_id in changed:
+            notify(self.index_for_semantic_id(series_id))
+        if presence_changed:
+            self.series_presence_changed.emit()
+
+    @property
+    def has_series(self) -> bool:
+        return bool(self._series)
 
     def _reindex(self) -> None:
         self._render_cache = {}
@@ -379,13 +419,24 @@ class MeasurementTreeModel(QAbstractItemModel):
             return None
         node = ref.node
         state = self._descendant_state(ref)
+        series = self._series.get(node.semantic_id)
+        if role == Qt.ItemDataRole.CheckStateRole:
+            if series is not None and index.column() == self.STATE_COLUMN and not self._read_only:
+                return Qt.CheckState.Checked if series.already_measured else Qt.CheckState.Unchecked
+            return None
         if role == int(Qt.ItemDataRole.DisplayRole):
             if index.column() == 0:
+                if series is not None:
+                    bias = format_quantity_auto(series.keithley_b_a, DIMENSION_CURRENT)
+                    return f"Series {series.number} · B {bias}"
                 return node.label
             if index.column() == 1:
                 value = self._value_text(ref)
                 if value != "—":
                     return value
+                if series is not None:
+                    voltage = format_quantity_auto(series.moke_voltage_v, DIMENSION_VOLTAGE)
+                    return f"MOKE {voltage} · {series.points} points"
                 if node.kind is SemanticNodeKind.SWEEP_AXIS and node.axis is not None:
                     return f"{node.axis.target} · {len(node.axis.points)} point(s)"
                 if node.kind is SemanticNodeKind.LOOP_BODY:
@@ -405,6 +456,8 @@ class MeasurementTreeModel(QAbstractItemModel):
             phase = _state_value(state, "phase") if state is not None else None
             if phase:
                 return str(phase).upper()
+            if series is not None:
+                return "Measured" if series.already_measured else "Planned"
             if self._is_node_disabled(ref):
                 return "DISABLED"
             return {
@@ -415,6 +468,14 @@ class MeasurementTreeModel(QAbstractItemModel):
                 SemanticNodeKind.GENERATED_SAFETY: "AUTO",
             }.get(node.kind, "READY")
         if role == int(Qt.ItemDataRole.ToolTipRole):
+            if series is not None:
+                if series.already_measured:
+                    state_text = "Already measured. This series will be skipped."
+                elif self._read_only:
+                    state_text = "Planned for the next run."
+                else:
+                    state_text = "Check the box in State to mark this series as already measured."
+                return f"Series {series.number} · {node.label}\n{state_text}"
             if node.kind is SemanticNodeKind.GENERATED_SAFETY and "safeguards" in node.data:
                 return "\n".join((node.label, str(node.data.get("detail", "")), *node.data["safeguards"]))
             if node.data.get("type") in {"acquire_spectrum", "acquire_reference"}:
@@ -483,6 +544,8 @@ class MeasurementTreeModel(QAbstractItemModel):
         if not isinstance(ref, _NodeRef):
             return Qt.ItemFlag.NoItemFlags
         flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        if not self._read_only and index.column() == self.STATE_COLUMN and ref.node.semantic_id in self._series:
+            flags |= Qt.ItemFlag.ItemIsUserCheckable
         # ``editable`` is a semantic capability used by the recipe page to
         # enable modal editors.  It is deliberately not exposed as
         # ItemIsEditable: labels are derived presentation text and the model
@@ -503,6 +566,18 @@ class MeasurementTreeModel(QAbstractItemModel):
         ):
             flags |= Qt.ItemFlag.ItemIsDropEnabled
         return flags
+
+    def setData(self, index: QModelIndex, value: Any, role: int = int(Qt.ItemDataRole.EditRole)) -> bool:
+        if role != Qt.ItemDataRole.CheckStateRole or not self.flags(index) & Qt.ItemFlag.ItemIsUserCheckable:
+            return False
+        try:
+            checked = Qt.CheckState(value)
+        except (TypeError, ValueError):
+            return False
+        if checked not in {Qt.CheckState.Checked, Qt.CheckState.Unchecked}:
+            return False
+        self.series_selection_requested.emit(index.internalPointer().node.semantic_id, checked == Qt.CheckState.Checked)
+        return True
 
     def supportedDragActions(self) -> Qt.DropAction:
         return Qt.DropAction.MoveAction | Qt.DropAction.CopyAction

@@ -2,6 +2,7 @@
 
 import pytest
 from types import SimpleNamespace
+from PySide6 import QtCore
 from PySide6.QtTest import QTest
 
 from app.inventory import ActiveSampleTarget, Sample
@@ -10,7 +11,35 @@ from app.domain.models import MeasurementPoint
 from app.ui.shell import MainWindow
 from tests.shell_test_isolation import isolated_shell_persistence as isolated_shell_persistence  # noqa: PLC0414
 from tests.shell_test_isolation import shell_qt_application as shell_qt_application  # noqa: PLC0414
+from tests.test_heatmap_coordinates import _write_current_sweep
 from tests.test_spectrum_correction_controller import wait_until
+
+
+def test_startup_restores_results_and_closes_device_threads(tmp_path, shell_qt_application):
+    preferences = QtCore.QSettings(str(tmp_path / "ui-state.ini"), QtCore.QSettings.Format.IniFormat)
+    preferences.setValue("main_window/current_route", "results")
+    preferences.sync()
+    app = shell_qt_application
+    window = MainWindow(".config/settings.yml", simulation=True)
+    try:
+        window.resize(1280, 850)
+        window.show()
+        app.processEvents()
+        assert window._current_route() == "results"
+        source = tmp_path / "heatmap.h5"
+        _write_current_sweep(source)
+        page = window.results_page
+        page._on_file_selected(source)
+        wait_until(app, lambda: page._result_task is None and page._thatec_run is not None)
+        tab = page.heatmap_tab
+        page.result_tabs.setCurrentIndex(page._heatmap_index)
+        wait_until(app, lambda: not tab._read_tasks)
+        app.processEvents()
+        assert tab.heatmap_view.isVisibleTo(window)
+        assert tab.heatmap_view.size().width() > 0 and tab.heatmap_view.size().height() > 0
+    finally:
+        assert window.close()
+    assert not any(controller._thread.isRunning() for controller in window._controllers.values())
 
 
 def test_catalogue_refresh_indexes_once_and_retains_manual_scope(tmp_path, shell_qt_application, monkeypatch):

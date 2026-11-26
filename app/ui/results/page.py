@@ -6,10 +6,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QResizeEvent, QShowEvent
+from PySide6.QtGui import QDesktopServices, QKeySequence, QResizeEvent, QShortcut, QShowEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
     QHBoxLayout,
+    QLabel,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
@@ -17,14 +18,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
-    CaptionLabel,
     CardWidget,
     ComboBox,
     FluentIcon,
     PrimaryPushButton,
     PushButton,
     SegmentedWidget,
-    SubtitleLabel,
+    StrongBodyLabel,
+    TransparentToolButton,
 )
 
 from app.storage import (
@@ -32,8 +33,8 @@ from app.storage import (
     ThatecRunReader,
     read_pythat_run_data,
 )
-from app.storage.heatmap_analysis_store import read_heatmap_analysis
 from app.storage.filesystem_paths import native_path
+from app.storage.heatmap_analysis_store import read_heatmap_analysis
 from app.ui.results.batch_dialog import BatchPostprocessDialog
 from app.ui.results.data_classifier import find_heatmap_rows
 from app.ui.results.file_browser import FileBrowserPanel
@@ -125,17 +126,15 @@ def _make_payload(
 
 
 class _FluentResultSections(QWidget):
-    """Fluent Segmented navigation backed by a real page stack.
+    """Clean Fluent SegmentedWidget navigation backed by a real page stack."""
 
-    It deliberately provides the operator-facing Results navigation. The
-    small semantic page-management API stays local to this Fluent widget.
-    """
+    current_changed = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
         self.navigation = SegmentedWidget(self)
         self.compact_navigation = ComboBox(self)
         self.compact_navigation.setAccessibleName("Results section")
@@ -164,7 +163,7 @@ class _FluentResultSections(QWidget):
         self.compact_navigation.blockSignals(was_blocked)
         self.navigation.addItem(
             route,
-            label,
+            label.replace("&", "&&"),
             onClick=lambda _checked=False, index=index: self.setCurrentIndex(index),
             icon=icon,
         )
@@ -181,6 +180,7 @@ class _FluentResultSections(QWidget):
             self.compact_navigation.blockSignals(True)
             self.compact_navigation.setCurrentIndex(index)
             self.compact_navigation.blockSignals(False)
+        self.current_changed.emit(index)
 
     def minimumSizeHint(self) -> QSize:
         cur = self.stack.currentWidget()
@@ -278,6 +278,8 @@ class ResultsPage(QWidget):
         catalogue_tree: bool = False,
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("resultsPage")
+        self.setProperty("stationSurface", "page")
         self.owns_viewport = True
         self._selected_path: Path | None = None
         self._thatec_run = None
@@ -292,54 +294,60 @@ class ResultsPage(QWidget):
         self._read_pool.setMaxThreadCount(1)
         self._pending_completed_result: Path | None = None
         self._selected_artifact: Path | None = None
+        self._browser_visible = True
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(6)
 
-        # --- Title ---
-        title = SubtitleLabel("Results", self)
-        title.setObjectName("pageTitle")
-        layout.addWidget(title)
-        subtitle = CaptionLabel(
-            "Open HDF5 results, inspect the complete measurement tree, filter checkpoint "
-            "parameter sets, and browse raw or processed spectra.",
-            self,
-        )
-        subtitle.setObjectName("muted")
-        subtitle.setWordWrap(True)
-        layout.addWidget(subtitle)
-
-        # --- Deliberate operational actions ---
+        # --- Unified Single-Row Context Header & Operational Actions ---
         self.action_card = CardWidget(self)
-        self.action_card.setFixedHeight(38)
+        self.action_card.setObjectName("resultsHeaderCard")
+        self.action_card.setFixedHeight(42)
         self.actions_layout = QHBoxLayout(self.action_card)
         actions = self.actions_layout
-        actions.setContentsMargins(12, 4, 12, 4)
+        actions.setContentsMargins(10, 4, 10, 4)
         actions.setSpacing(8)
-        action_note = CaptionLabel(
-            "Actions are enabled only when the selected result proves safe.",
-            self.action_card,
+
+        self.toggle_browser_button = TransparentToolButton(FluentIcon.MENU, self.action_card)
+        self.toggle_browser_button.setAccessibleName("Toggle run browser sidebar")
+        self.toggle_browser_button.setToolTip("Show or hide the result browser sidebar (Ctrl+B)")
+        self.toggle_browser_button.clicked.connect(self.toggle_browser_sidebar)
+        actions.addWidget(self.toggle_browser_button)
+
+        self.run_title_label = StrongBodyLabel("Results", self.action_card)
+        self.run_title_label.setObjectName("resultsRunTitle")
+        actions.addWidget(self.run_title_label)
+
+        self.run_status_label = QLabel("Read-only HDF5", self.action_card)
+        self.run_status_label.setObjectName("resultsRunStatus")
+        self.run_status_label.setProperty("runStatus", "neutral")
+        actions.addWidget(self.run_status_label, 1)
+
+        self.command_palette_button = PushButton(FluentIcon.SEARCH, "Commands", self.action_card)
+        self.command_palette_button.setToolTip("Open Results Command Palette (Ctrl+K)")
+        self.command_palette_button.clicked.connect(self.open_command_palette)
+        actions.addWidget(self.command_palette_button)
+
+        self.resume_button = PushButton(FluentIcon.PLAY, "Resume", self.action_card)
+        self.resume_button.setEnabled(False)
+        self.resume_button.setToolTip(
+            "Resume from a confirmed safe checkpoint (interrupted runs only)."
         )
-        action_note.setObjectName("muted")
-        action_note.setWordWrap(True)
-        actions.addWidget(action_note, 1)
-        self.open_sweep_button = PrimaryPushButton("Open reconstructed Sweep", self.action_card)
+        self.open_sweep_button = PrimaryPushButton(
+            FluentIcon.LINK, "Open in Sweeps", self.action_card
+        )
         self.open_sweep_button.setEnabled(False)
         self.open_sweep_button.setToolTip(
             "Build the executed THATEC measurement tree in the Sweeps workspace."
         )
-        self.resume_button = PushButton("Resume from safe checkpoint", self.action_card)
-        self.resume_button.setEnabled(False)
-        self.resume_button.setToolTip(
-            "Available only for interrupted runs containing a confirmed safe boundary."
-        )
-        actions.addWidget(self.open_sweep_button)
         actions.addWidget(self.resume_button)
+        actions.addWidget(self.open_sweep_button)
         layout.addWidget(self.action_card)
 
         # --- Main splitter ---
         self.results_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.results_splitter.setObjectName("resultsMainSplitter")
         self.results_splitter.setMinimumHeight(240)
         splitter = self.results_splitter
 
@@ -360,7 +368,7 @@ class ResultsPage(QWidget):
             self.metadata_panel, "Overview", icon=FluentIcon.INFO
         )
 
-        # Tab: Sweep Tree
+        # Tab: Sweep Tree (shared MeasurementTreeView linked with Sweeps)
         self.sweep_tree = SweepTreePanel()
         self._tree_index = self.result_tabs.addTab(
             self.sweep_tree, "Sweep tree", icon=FluentIcon.LEAF
@@ -368,7 +376,7 @@ class ResultsPage(QWidget):
 
         self.scalar_tab = ScalarResultsTab()
         self._scalar_index = self.result_tabs.addTab(
-            self.scalar_tab, "I/V/P & scalars", icon=FluentIcon.VIEW
+            self.scalar_tab, "I/V/P & Scalars", icon=FluentIcon.ALIGNMENT
         )
 
         # Tab: Spectrum
@@ -390,22 +398,34 @@ class ResultsPage(QWidget):
             )
         )
         self.spectrum_tab.batch_requested.connect(self._open_batch_postprocessing)
+        self.sweep_tree.open_in_sweeps_requested.connect(
+            lambda _semantic_id: self._request_open_sweep()
+        )
 
         result_card = CardWidget(self)
+        result_card.setObjectName("resultsWorkspaceHost")
         result_card.setMinimumHeight(240)
         result_layout = QVBoxLayout(result_card)
-        result_layout.setContentsMargins(12, 8, 12, 8)
+        result_layout.setContentsMargins(10, 6, 10, 6)
         result_layout.setSpacing(6)
         self.result_state = ResultsStateCard(result_card)
         self.result_state.set_compact(True)
         result_layout.addWidget(self.result_state)
-        result_layout.addWidget(self.result_tabs)
+        result_layout.addWidget(self.result_tabs, 1)
         splitter.addWidget(result_card)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
         layout.addWidget(splitter, 1)
         self._compact_layout: bool | None = None
         self.setMinimumHeight(320)
+
+        # Keyboard shortcuts scoped to ResultsPage
+        self._shortcut_cmd = QShortcut(QKeySequence("Ctrl+K"), self)
+        self._shortcut_cmd.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._shortcut_cmd.activated.connect(self.open_command_palette)
+        self._shortcut_browser = QShortcut(QKeySequence("Ctrl+B"), self)
+        self._shortcut_browser.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._shortcut_browser.activated.connect(self.toggle_browser_sidebar)
 
         # --- Connections ---
         self.file_browser.file_selected.connect(self._on_file_selected)
@@ -477,8 +497,8 @@ class ResultsPage(QWidget):
         # a 1280 px station window.  Switch before action labels and the file
         # browser start imposing a horizontal minimum on the page host.
         compact = event.size().width() < 850
-        actions_compact = event.size().width() < 600
-        self.action_card.setFixedHeight(68 if actions_compact else 38)
+        actions_compact = event.size().width() < 640
+        self.action_card.setFixedHeight(74 if actions_compact else 42)
         self.actions_layout.setDirection(
             QBoxLayout.Direction.TopToBottom
             if actions_compact
@@ -490,11 +510,35 @@ class ResultsPage(QWidget):
         self.results_splitter.setOrientation(
             Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal
         )
-        browser_width = min(380, max(260, int(event.size().width() * 0.32)))
+        browser_width = min(350, max(260, int(event.size().width() * 0.26)))
         results_width = max(500, event.size().width() - browser_width)
         self.results_splitter.setSizes(
             [160, 760] if compact else [browser_width, results_width]
         )
+
+    def toggle_browser_sidebar(self) -> None:
+        """Show or hide the left result browser drawer to maximize plot canvas area."""
+        self._browser_visible = not self._browser_visible
+        self.file_browser.setVisible(self._browser_visible)
+
+    def open_command_palette(self) -> None:
+        """Open the keyboard-driven Results Command Palette (Ctrl+K)."""
+        from app.ui.results.command_palette import ResultsCommandPalette
+
+        dialog = ResultsCommandPalette(self)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def _update_header_context(
+        self, title: str, status_text: str, status_key: str = "neutral"
+    ) -> None:
+        self.run_title_label.setText(title)
+        self.run_status_label.setText(status_text)
+        self.run_status_label.setProperty("runStatus", status_key)
+        style = self.run_status_label.style()
+        if style is not None:
+            style.unpolish(self.run_status_label)
+            style.polish(self.run_status_label)
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
@@ -603,6 +647,7 @@ class ResultsPage(QWidget):
             self._thatec_run = None
             self._selected_artifact = None
             self._thatec_tree_available = False
+            self._update_header_context("Results", "Read-only HDF5", "neutral")
             self.result_selected.emit(None)
             if self.file_browser.has_files():
                 self._show_result_state(
@@ -691,6 +736,7 @@ class ResultsPage(QWidget):
         if payload.derived_heatmap is not None:
             self._thatec_run = None
             self._loaded_signature = self._requested_signature
+            self._update_header_context(payload.path.name, "● Derived Heatmap", "neutral")
             self.metadata_panel.show_heatmap_analysis(payload.path, payload.derived_heatmap.metadata)
             self.metadata_panel.show_pythat(None)
             self.metadata_panel.pythat_button.setEnabled(False)
@@ -705,6 +751,17 @@ class ResultsPage(QWidget):
         self._thatec_tree = payload.tree
         self._thatec_tree_available = payload.tree_available
         self.open_sweep_button.setEnabled(payload.tree_available)
+        display_name = (
+            payload.path.parent.name
+            if payload.path.name == "data.h5"
+            else payload.path.name
+        )
+        if payload.detail is not None:
+            raw_status = payload.detail.summary.status
+            status_key = raw_status if raw_status in {"completed", "aborted", "faulted", "incomplete"} else "neutral"
+            self._update_header_context(display_name, f"● {raw_status.capitalize()}", status_key)
+        else:
+            self._update_header_context(display_name, "● THATEC Public", "neutral")
 
         # The tree is intentionally enriched with private checkpoint and
         # reference layers when present. Public-only THATEC files still get

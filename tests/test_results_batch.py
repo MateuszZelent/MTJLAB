@@ -1,18 +1,28 @@
 import csv
 import json
+from datetime import UTC, datetime
 from threading import Event
 
 import numpy as np
 from pptx import Presentation
 
-from app.storage import Hdf5RunReader
+from app.devices.anritsu_ms2830a import SpectrumTrace
+from app.domain.models import MeasurementPoint
+from app.storage import Hdf5RunReader, Hdf5RunWriter
 from app.storage.filesystem_paths import native_path
 from app.storage.heatmap_analysis_store import read_heatmap_analysis
+from app.ui.results.analysis_export import postprocessing_directory
 from app.ui.results.batch_processing import SpectrumBatch, export_batch, plan_heatmaps, plan_spectra
-from app.ui.results.heatmap_coordinates import HeatmapCoordinates, HeatmapDimension, HeatmapRequest
+from app.ui.results.heatmap_coordinates import SERIES_DIMENSION_ID, HeatmapCoordinates, HeatmapDimension, HeatmapRequest
 from app.ui.results.heatmap_tab import _archive_identity
+from app.ui.results.map_processing import MapProcessing
 from app.ui.results.page import ResultsPage
 from app.ui.results.processing import ResultProcessing
+from app.ui.results.series_heatmap_views import (
+    SeriesHeatmapView,
+    read_series_heatmap_views,
+    save_series_heatmap_view,
+)
 from app.ui.results.spectrum_views import SpectrumView
 from tests.shell_test_isolation import shell_qt_application as shell_qt_application  # noqa: PLC0414
 from tests.test_heatmap_coordinates import _write_current_sweep, _write_two_axis_sweep
@@ -137,6 +147,136 @@ def test_sweep_powerpoint_action_is_visible_before_loading_heatmap(tmp_path, she
         assert not dialog.preview.pixmap().isNull()
     finally:
         page.close()
+
+
+def test_series_views_restore_after_reopen_and_export_individually(tmp_path, shell_qt_application):
+    source = tmp_path / "data.h5"
+    writer = Hdf5RunWriter(source, recipe_source="name: series\n", settings_source="",
+                          plan_hash="series", device_idn={}, expected_points=9)
+    for series in (4, 5, 6):
+        for current in (-.001, 0, .001):
+            index = writer.point_count
+            writer.append(MeasurementPoint(
+                index=index, setpoints={"keithley.A.current": current, "keithley.B.current": .001 * series},
+                measurements={}, metadata={"series_number": series, "series_id": str(series)},
+            ), SpectrumTrace((1e6, 2e6, 3e6), (-80. - index, -70., -78.), datetime.now(UTC), "TRAC1"))
+    writer.close("completed")
+    original = source.read_bytes()
+    app = shell_qt_application
+    ranges = {
+        4: ((1.1e6, 2.4e6), (-.0008, .0008)),
+        5: ((1.6e6, 3.1e6), (-.0012, .0005)),
+    }
+    levels = {4: (-92, -75), 5: (-81, -68)}
+    palettes = {4: "inferno", 5: "viridis"}
+
+    def open_page():
+        page = ResultsPage(str(source.parent))
+        page.resize(1400, 900)
+        page.show()
+        page._on_file_selected(source)
+        wait_until(app, lambda: page._result_task is None and page._thatec_run is not None)
+        page.result_tabs.setCurrentIndex(page._heatmap_index)
+        tab = page.heatmap_tab
+        wait_until(app, lambda: not tab._read_tasks)
+        return page, tab
+
+    page, tab = open_page()
+    try:
+        plot = tab.heatmap
+        for series in (4, 5):
+            tab.series_combo.setCurrentIndex(tab.series_combo.findData(series))
+            if series == 5:
+                _, maximum = tab._range_combos["keithley.A.current"]
+                maximum.setCurrentIndex(maximum.findData(0.0))
+            tab.load_button.click()
+            wait_until(app, tab.save_series_view_button.isEnabled)
+            assert tab.save_series_view_button.isVisibleTo(page)
+            if series == 5:
+                tab.processing_controls.set_state(ResultProcessing(modes=("denoise",)), emit=True)
+                wait_until(app, tab.save_series_view_button.isEnabled)
+            plot.colormap_combo.setCurrentText(palettes[series])
+            plot.color_bar.setLevels(levels[series])
+            plot.plot.setRange(xRange=ranges[series][0], yRange=ranges[series][1], padding=0)
+            plot.plot.getViewBox().invertY(series == 5)
+            if series == 5:
+                tab.map_controls.colour.setCurrentIndex(tab.map_controls.colour.findData("robust"))
+                wait_until(app, tab.save_series_view_button.isEnabled)
+                plot.color_bar.setLevels(levels[series])
+            tab.save_series_view_button.click()
+            assert "Saved" in tab.series_view_status.text()
+    finally:
+        assert page.shutdown()
+        page.close()
+        app.processEvents()
+
+    page, tab = open_page()
+    try:
+        for series in (4, 5):
+            tab.series_combo.setCurrentIndex(tab.series_combo.findData(series))
+            wait_until(app, tab.save_series_view_button.isEnabled)
+            assert tab.heatmap.colormap_combo.currentText() == palettes[series]
+            assert tab.heatmap.color_bar.levels() == levels[series]
+            assert tab.heatmap.plot.getViewBox().state["yInverted"] == (series == 5)
+            np.testing.assert_allclose(tab.heatmap.plot.viewRange(), ranges[series])
+        assert tab.map_controls.state.colour_range == "robust"
+        assert tab.processing_controls.state.modes == ("denoise",)
+        assert tab._range_combos["keithley.A.current"][1].currentData() == 0.0
+        tab.powerpoint_button.click()
+        dialog = page._batch_dialog
+        assert dialog.power_point.isChecked()
+        dialog.start_button.click()
+        wait_until(app, lambda: dialog._task is None)
+        index = json.loads((dialog.folder / "index.json").read_text(encoding="utf-8"))
+        assert index["exported"] == 3
+        deck = Presentation(dialog.folder / index["powerpoint"])
+        assert len(deck.slides) == 3
+        for series, entry, slide in zip((4, 5, 6), index["items"], deck.slides, strict=True):
+            assert f"Series {series}" in entry["title"]
+            assert slide.shapes[0].text == entry["title"]
+            assert slide.shapes[1].image.blob == (dialog.folder / entry["image"]).read_bytes()
+            metadata = read_heatmap_analysis(dialog.folder / entry["data"]).metadata
+            assert metadata["saved_series_view"] == (series in ranges)
+            assert metadata["map_processing"]["colour_range"] == ("robust" if series == 5 else "full")
+            assert metadata["spectrum_processing"]["modes"] == (["denoise"] if series == 5 else [])
+            assert entry["checkpoints"] == {4: [0, 1, 2], 5: [3, 4], 6: [6, 7, 8]}[series]
+            if series in ranges:
+                assert metadata["palette"] == palettes[series]
+                assert metadata["colour_levels"] == list(levels[series])
+                assert metadata["inverted_axes"] == [False, series == 5]
+                np.testing.assert_allclose(metadata["view_ranges"], ranges[series])
+        assert source.read_bytes() == original
+    finally:
+        assert page.shutdown()
+        page.close()
+        app.processEvents()
+
+
+def test_series_views_can_be_updated_on_a_long_path(tmp_path, shell_qt_application):
+    bundle = tmp_path / ("sample-" + "x" * max(65, 162 - len(str(tmp_path))))
+    source = bundle / "measurements" / "sweeps" / ("sweep-" + "z" * 55) / "data.h5"
+    native_path(source.parent).mkdir(parents=True)
+    native_path(source).touch()
+    identity = _archive_identity(source)
+    folder = postprocessing_directory(source)
+    file = native_path(folder / "data.series-heatmap-views.json")
+    lock_file = native_path(folder / "data.series-heatmap-views.lock")
+    assert len(str(file)) > 260
+    try:
+        for number in (4, 5):
+            request = HeatmapRequest("frequency", "current", {SERIES_DIMENSION_ID: number})
+            view = SeriesHeatmapView("row_1", request, "viridis", (-85., -68.), ((1., 2.), (-.001, .001)),
+                                     (False, False), False, ResultProcessing(), MapProcessing())
+            save_series_heatmap_view(identity, view)
+        assert [key[-1] for key in read_series_heatmap_views(identity)] == [4, 5]
+        assert not lock_file.exists()
+    finally:
+        file.unlink(missing_ok=True)
+        lock_file.unlink(missing_ok=True)
+        native_path(source).unlink(missing_ok=True)
+        if native_path(folder).is_dir():
+            native_path(folder).rmdir()
+        native_path(source.parent).rmdir()
 
 
 def test_spectrum_batch_plots_and_csv_stay_valid_when_cancelled(tmp_path):

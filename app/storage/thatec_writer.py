@@ -59,7 +59,8 @@ class ThatecHdf5Writer:
         )
         self._expected_points = self._schema.point_count
         self._dynamic_checkpoint_axis = (
-            expected_points is None and self._schema.mode == "checkpoint_fallback"
+            self._schema.mode == "checkpoint_fallback"
+            and (expected_points is None or allow_skipped_checkpoints)
         )
         self._checkpoint_count = 0
         self._next_row = len(self._schema.axes)
@@ -173,17 +174,15 @@ class ThatecHdf5Writer:
         self._file = file
         self._np = np
         self._text = h5py.string_dtype("utf-8")
+        self._definition = file["scan_definition"]
         self._schema = ThatecSchemaMapper.from_recipe_source(
             recipe_source, expected_points=expected_points,
-            allow_skipped_checkpoints=bool(file["scan_definition"].attrs.get("allow_skipped_checkpoints", False)),
+            allow_skipped_checkpoints=bool(self._definition.attrs.get("allow_skipped_checkpoints", False)),
         )
         self._expected_points = self._schema.point_count
-        self._dynamic_checkpoint_axis = (
-            expected_points is None and self._schema.mode == "checkpoint_fallback"
-        )
+        self._dynamic_checkpoint_axis = bool(file.attrs.get("lab_control_dynamic_checkpoint_axis", False))
         self._checkpoint_count = checkpoint_count
         self._indicator_indent = len(self._schema.axes)
-        self._definition = file["scan_definition"]
         self._tree_view = self._definition["tree_view"]
         self._log = file["measurement/log"]
         row_numbers = [

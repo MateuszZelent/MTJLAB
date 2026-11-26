@@ -3,11 +3,13 @@
 from pathlib import Path
 
 import numpy as np
+import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QSplitter, QWidget
 from qfluentwidgets import CheckBox, FlowLayout, PushButton
 
 from app.devices.anritsu_ms2830a.ui.spectrum_workbench import SpectrumWorkbench
+from app.ui.design_system import tokens_for
 from app.ui.dialogs import StationDialog, StationFileDialog
 
 from .analysis_export import ensure_derived_destination, write_analysis_manifest
@@ -56,6 +58,120 @@ class ResultSpectrumWorkbench(SpectrumWorkbench):
         for axis, controls in self.axis_controls.items():
             controls[0].setToolTip("Keep this range while navigating recorded checkpoints; Reset fits only unlocked axes.")
         self._trace_units = {}
+        self._fit_curve = pg.PlotDataItem()
+        self._fit_curve.setVisible(False)
+        self.plot.addItem(self._fit_curve)
+        self._ab_enabled = False
+        self._ab_raw: tuple[np.ndarray, np.ndarray] | None = None
+        self._ab_proc: tuple[np.ndarray, np.ndarray] | None = None
+        self._ab_raw_curve = pg.PlotDataItem()
+        self._ab_proc_curve = pg.PlotDataItem()
+        self._ab_raw_curve.setVisible(False)
+        self._ab_proc_curve.setVisible(False)
+        self._ab_line = pg.InfiniteLine(angle=90, movable=True)
+        self._ab_line.setVisible(False)
+        self._ab_line.sigPositionChanged.connect(self._update_ab_split)
+        self.plot.addItem(self._ab_raw_curve)
+        self.plot.addItem(self._ab_proc_curve)
+        self.plot.addItem(self._ab_line, ignoreBounds=True)
+        self._style_analysis_overlays()
+
+    def _style_analysis_overlays(self) -> None:
+        theme = getattr(self, "_theme_name", "dark")
+        tokens = tokens_for(theme)
+        teal = "#94e2d5" if theme == "dark" else "#0e858c"
+        self._fit_curve.setPen(
+            pg.mkPen(teal, width=1.8, style=Qt.PenStyle.DashLine)
+        )
+        self._ab_raw_curve.setPen(
+            pg.mkPen(tokens.text_muted, width=1.5, style=Qt.PenStyle.SolidLine)
+        )
+        self._ab_proc_curve.setPen(pg.mkPen(tokens.accent, width=2.0))
+        self._ab_line.setPen(pg.mkPen(tokens.caution, width=2.0))
+
+    def apply_theme(self, theme: str) -> None:
+        super().apply_theme(theme)
+        if hasattr(self, "_fit_curve"):
+            self._style_analysis_overlays()
+
+    def set_fit_overlay(self, frequencies_hz, values) -> None:
+        """Overlay a dashed resonance fit curve without altering recorded trace dicts."""
+        self._fit_curve.setData(
+            np.asarray(frequencies_hz, dtype=float),
+            np.asarray(values, dtype=float),
+        )
+        self._fit_curve.setVisible(True)
+
+    def clear_fit_overlay(self) -> None:
+        self._fit_curve.setData([], [])
+        self._fit_curve.setVisible(False)
+
+    def set_ab_wipe(
+        self,
+        enabled: bool,
+        *,
+        raw_x=None,
+        raw_y=None,
+        proc_x=None,
+        proc_y=None,
+    ) -> None:
+        """Split the canvas at a draggable vertical divider: Raw HDF5 (left) vs Processed (right)."""
+        self._ab_enabled = bool(enabled)
+        if (
+            not self._ab_enabled
+            or raw_x is None
+            or raw_y is None
+            or proc_x is None
+            or proc_y is None
+        ):
+            self.clear_ab_wipe()
+            return
+        rx = np.asarray(raw_x, dtype=float)
+        ry = np.asarray(raw_y, dtype=float)
+        px = np.asarray(proc_x, dtype=float)
+        py = np.asarray(proc_y, dtype=float)
+        if rx.size < 2 or px.size < 2:
+            self.clear_ab_wipe()
+            return
+        self._ab_raw = (rx, ry)
+        self._ab_proc = (px, py)
+        x_lo = float(min(rx[0], px[0]))
+        x_hi = float(max(rx[-1], px[-1]))
+        current_pos = float(self._ab_line.value())
+        if not (x_lo < current_pos < x_hi):
+            self._ab_line.setValue(0.5 * (x_lo + x_hi))
+        self._ab_line.setBounds((x_lo, x_hi))
+        self._ab_line.setVisible(True)
+        self._ab_raw_curve.setVisible(True)
+        self._ab_proc_curve.setVisible(True)
+        for curve in self._curves.values():
+            curve.setVisible(False)
+        self._update_ab_split()
+
+    def _update_ab_split(self) -> None:
+        if not self._ab_enabled or self._ab_raw is None or self._ab_proc is None:
+            return
+        split_x = float(self._ab_line.value())
+        rx, ry = self._ab_raw
+        px, py = self._ab_proc
+        left = rx <= split_x
+        right = px >= split_x
+        self._ab_raw_curve.setData(rx[left], ry[left])
+        self._ab_proc_curve.setData(px[right], py[right])
+
+    def clear_ab_wipe(self) -> None:
+        self._ab_enabled = False
+        self._ab_raw = None
+        self._ab_proc = None
+        if hasattr(self, "_ab_line"):
+            self._ab_line.setVisible(False)
+            self._ab_raw_curve.setData([], [])
+            self._ab_raw_curve.setVisible(False)
+            self._ab_proc_curve.setData([], [])
+            self._ab_proc_curve.setVisible(False)
+        for name, curve in getattr(self, "_curves", {}).items():
+            if name in getattr(self, "_traces", {}):
+                curve.setVisible(True)
 
     def register_frame(self, checkpoint):
         self._frame_identity = checkpoint
@@ -128,6 +244,8 @@ class ResultSpectrumWorkbench(SpectrumWorkbench):
 
     def prepare_traces(self, names):
         """Keep compatible holds and measurement selection across checkpoints."""
+        self.clear_fit_overlay()
+        self.clear_ab_wipe()
         self.set_estimated_bands(())
         for name in tuple(self._traces):
             if name not in names and name not in {"Max hold", "Min hold"}:
@@ -193,6 +311,8 @@ class ResultSpectrumWorkbench(SpectrumWorkbench):
         mirror.auto_range()
 
     def clear(self):
+        self.clear_fit_overlay()
+        self.clear_ab_wipe()
         super().clear()
         self.export_metadata = {}
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QThreadPool, QAbstractTableModel, QModelIndex
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QThreadPool, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QSplitter,
@@ -20,11 +20,10 @@ from qfluentwidgets import (
     PushButton,
     SegmentedWidget,
     SpinBox,
-    TreeWidget,
     TreeView,
+    TreeWidget,
 )
 
-from app.ui.widgets.fluent_code_viewer import FluentCodeViewer
 from app.devices.registry import built_in_device_registry
 from app.recipes.models import parse_recipe_text
 from app.recipes.semantic_tree import (
@@ -33,8 +32,6 @@ from app.recipes.semantic_tree import (
     SemanticTreeNode,
     normalize_recipe_tree,
 )
-from app.storage.hdf5_reader import StoredReferenceSummary, Hdf5RunReader
-from app.ui.results.workers import ResultReadTask
 from app.storage import (
     RunDetail,
     StoredPoint,
@@ -46,12 +43,15 @@ from app.storage import (
     ThatecRunReader,
     ThatecTreeNode,
 )
+from app.storage.hdf5_reader import Hdf5RunReader, StoredReferenceSummary
 from app.ui.dialogs import StationDialog
 from app.ui.measurement_tree import (
     MeasurementTreeModel,
     MeasurementTreeView,
     TreeInteractionMode,
 )
+from app.ui.results.workers import ResultReadTask
+from app.ui.widgets.fluent_code_viewer import FluentCodeViewer
 
 
 class _ScalarValuesModel(QAbstractTableModel):
@@ -99,11 +99,13 @@ class SweepTreePanel(QWidget):
     spectrum_requested = Signal(str, int)  # (row_id, checkpoint)
     stored_spectrum_requested = Signal(int, str)  # (point index, raw|processed)
     reference_spectrum_requested = Signal(int)  # (reference index)
+    open_in_sweeps_requested = Signal(str)  # (selected semantic_id or "")
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._run: ThatecRun | None = None
         self._selected_path: Path | None = None
+        self._selected_semantic_id: str = ""
         self._selected_thatec_row: ThatecRow | None = None
         self._selected_stored_point: StoredPoint | None = None
         self._selected_stored_variant = "raw"
@@ -116,12 +118,31 @@ class SweepTreePanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # --- Mode Switcher ---
+        # --- Mode Switcher + Shared Compatibility Header ---
+        header_bar = QHBoxLayout()
+        header_bar.setContentsMargins(0, 0, 0, 0)
+        header_bar.setSpacing(8)
         self.view_switch = SegmentedWidget(self)
         self.view_switch.addItem("tree", "Sweep structure")
         self.view_switch.addItem("data", "Recorded data & checkpoints")
         self.view_switch.setCurrentItem("tree")
-        layout.addWidget(self.view_switch)
+        header_bar.addWidget(self.view_switch)
+        self.shared_badge = CaptionLabel(
+            "Shared MeasurementTreeView (read-only) · linked with Sweeps",
+            self,
+        )
+        self.shared_badge.setObjectName("muted")
+        header_bar.addWidget(self.shared_badge, 1)
+        self.open_node_button = PushButton(FluentIcon.LINK, "Open in Sweeps", self)
+        self.open_node_button.setEnabled(False)
+        self.open_node_button.setToolTip(
+            "Open this measurement's Sweep hierarchy in the Sweeps workspace."
+        )
+        self.open_node_button.clicked.connect(
+            lambda: self.open_in_sweeps_requested.emit(self._selected_semantic_id)
+        )
+        header_bar.addWidget(self.open_node_button)
+        layout.addLayout(header_bar)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
 
@@ -180,7 +201,7 @@ class SweepTreePanel(QWidget):
         self.values_tree.setModel(self._values_model)
         self.values_tree.setRootIsDecorated(False)
         self.values_tree.setUniformRowHeights(True)
-        self.values_tree.setAlternatingRowColors(True)
+        self.values_tree.setAlternatingRowColors(False)
         self.values_tree.setMaximumHeight(150)
         bottom_layout.addWidget(self.values_tree)
 
@@ -215,6 +236,7 @@ class SweepTreePanel(QWidget):
         self.cancel_detail_read()
         self._run = run
         self._selected_path = path
+        self._selected_semantic_id = ""
         self._selected_thatec_row = None
         self._selected_stored_point = None
         self._selected_stored_variant = "raw"
@@ -227,11 +249,13 @@ class SweepTreePanel(QWidget):
             recipe_source = run.recipe_source.strip()
 
         tree_built = False
+        snapshot: SemanticMeasurementTree | None = None
         if recipe_source:
             try:
                 recipe = parse_recipe_text(recipe_source, origin=str(path))
                 snapshot = normalize_recipe_tree(recipe, built_in_device_registry().sweep_providers())
                 self.tree_model.replace_tree(snapshot)
+                self._apply_historical_states(snapshot, detail=detail, points=points)
                 self.measurement_tree.expandAll()
                 tree_built = True
             except Exception:
@@ -240,10 +264,64 @@ class SweepTreePanel(QWidget):
         if not tree_built:
             snapshot = self._build_historical_semantic_tree(path, run, tree)
             self.tree_model.replace_tree(snapshot)
+            self._apply_historical_states(snapshot, detail=detail, points=points)
             self.measurement_tree.expandAll()
+        self.open_node_button.setEnabled(bool(tree))
 
         # 2. Populate the checkpoints and dataset tree
         self._populate_tree(tree, points=points, references=references)
+
+    def _apply_historical_states(
+        self,
+        snapshot: SemanticMeasurementTree,
+        *,
+        detail: RunDetail | None,
+        points: tuple[StoredPoint, ...],
+    ) -> None:
+        """Project truthful historical states onto the shared MeasurementTreeModel.
+
+        Uses ``MeasurementTreeModel.apply_states()`` directly so Sweeps,
+        Execution, and Results continue sharing one identical model/view/delegate
+        while historical runs report RECORDED/APPLIED instead of READY/WAITING.
+        """
+        status = detail.summary.status if detail is not None else "recorded"
+        final_phase = (
+            "applied"
+            if status == "completed"
+            else "failed"
+            if status == "faulted"
+            else "recorded"
+        )
+        point_count = len(points)
+        states: list[dict[str, object]] = []
+        for semantic_id, node in snapshot.by_id.items():
+            if node.data.get("disabled") is True:
+                continue
+            if node.kind in {SemanticNodeKind.SWEEP_AXIS, SemanticNodeKind.LOOP_BODY}:
+                axis_len = len(node.axis.points) if node.axis is not None else None
+                state: dict[str, object] = {
+                    "semantic_id": semantic_id,
+                    "phase": "recorded",
+                }
+                if axis_len and point_count > 0:
+                    completed = min(point_count, axis_len)
+                    state["axis_context"] = {
+                        "point_index": completed - 1,
+                        "point_count": axis_len,
+                    }
+                states.append(state)
+            elif node.kind in {
+                SemanticNodeKind.DEVICE,
+                SemanticNodeKind.SET_ROI_VALUE,
+                SemanticNodeKind.ACTION,
+                SemanticNodeKind.FINALLY,
+                SemanticNodeKind.GENERATED_SAFETY,
+            }:
+                states.append({"semantic_id": semantic_id, "phase": final_phase})
+            else:
+                states.append({"semantic_id": semantic_id, "phase": "recorded"})
+        if states:
+            self.tree_model.apply_states(states)
 
     def clear(self) -> None:
         """Reset the panel to its empty state."""
@@ -255,9 +333,11 @@ class SweepTreePanel(QWidget):
         self._values_model.set_series()
         self._run = None
         self._selected_path = None
+        self._selected_semantic_id = ""
         self._selected_thatec_row = None
         self._selected_stored_point = None
         self._selected_stored_variant = "raw"
+        self.open_node_button.setEnabled(False)
         self.show_spectrum_button.setEnabled(False)
 
     def _build_historical_semantic_tree(
@@ -320,6 +400,7 @@ class SweepTreePanel(QWidget):
         return SemanticMeasurementTree((root,), by_id, source_text="")
 
     def _on_semantic_selected(self, semantic_id: str) -> None:
+        self._selected_semantic_id = semantic_id
         node = self.tree_model.tree.by_id.get(semantic_id)
         if node is None:
             return

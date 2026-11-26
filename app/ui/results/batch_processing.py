@@ -7,7 +7,7 @@ import json
 import tempfile
 from collections import defaultdict
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from textwrap import wrap
@@ -15,7 +15,6 @@ from textwrap import wrap
 import numpy as np
 
 from app.domain.errors import ExecutionError
-from app.domain.quantities import Quantity, QuantityError, format_quantity_auto, parse_quantity
 from app.recipes.parameter_registry import PARAMETERS_BY_TARGET, persisted_quantity_unit
 from app.spectrum.display_model import SpectrumDisplayTrace
 from app.storage import Hdf5RunReader, StoredPoint, ThatecRow, ThatecRunReader
@@ -24,12 +23,20 @@ from app.storage.thatec_reader import ThatecSpectralRow
 
 from .analysis_export import (
     analysis_file_stem,
+    format_measurement_range,
+    measurement_parameter_metadata,
     postprocessing_directory,
     processing_manifest,
     write_analysis_manifest,
 )
 from .heatmap_cache import HeatmapSourceCache
-from .heatmap_coordinates import HeatmapCoordinates, HeatmapRequest, _selected_checkpoints, _selection_range
+from .heatmap_coordinates import (
+    SERIES_DIMENSION_ID,
+    HeatmapCoordinates,
+    HeatmapRequest,
+    _selected_checkpoints,
+    _selection_range,
+)
 from .map_processing import MapProcessing
 from .processing import (
     ResultProcessing,
@@ -39,6 +46,7 @@ from .processing import (
     recorded_spectrum_provenance,
 )
 from .read_session import ResultReadSession
+from .series_heatmap_views import SeriesHeatmapView
 from .spectrum_views import SpectrumView, read_private_view, read_public_view
 
 _POWERPOINT_NAME = "Plots.pptx"
@@ -53,6 +61,7 @@ class BatchItem:
     checkpoints: tuple[int, ...]
     request: HeatmapRequest | None = None
     parameters: tuple = ()
+    series_view: SeriesHeatmapView | None = None
 
 
 def _parameter_label(label):
@@ -61,23 +70,6 @@ def _parameter_label(label):
     if label.startswith("Keithley "):
         return label.removesuffix(" current").removesuffix(" voltage").removesuffix(" level")
     return label
-
-
-def _formatted_range(low, high, unit):
-    try:
-        scale = parse_quantity(f"1 {unit}") if unit else None
-    except QuantityError:
-        scale = None
-    if scale is not None:
-        low, high = low * scale.si_value, high * scale.si_value
-        dimension = scale.dimension
-        if low == high:
-            return format_quantity_auto(low, dimension, preferred_unit=unit)
-        engineering = format_quantity_auto(max(abs(low), abs(high)), dimension).split(" ", 1)[-1]
-        low, high = (Quantity(value, dimension).as_unit(engineering) for value in (low, high))
-        unit = engineering
-    values = f"{low:.9g}" if low == high else f"{low:.9g} to {high:+.9g}" if low < 0 < high else f"{low:.9g} to {high:.9g}"
-    return f"{values} {unit}".strip()
 
 
 def measurement_parameters(coordinates, checkpoints, points_by_index=None):
@@ -105,14 +97,16 @@ def measurement_parameters(coordinates, checkpoints, points_by_index=None):
 
 
 def measurement_title(parameters):
-    return " | ".join(f"{label} {_formatted_range(low, high, unit)}"
+    return " | ".join(f"{label} {format_measurement_range(low, high, unit)}"
                       for _, label, unit, low, high in parameters)
 
 
 def heatmap_title(coordinates, request, parameters):
     axes = {request.x_id, request.y_id}
     fixed = [parameter for parameter in parameters
-             if parameter[0] not in axes and parameter[3] == parameter[4]]
+             if parameter[0] not in axes and parameter[3] == parameter[4]
+             and (parameter[0] != SERIES_DIMENSION_ID or parameter[3] > 0)]
+    fixed.sort(key=lambda parameter: parameter[0] != SERIES_DIMENSION_ID)
     frequency = request.filters.get("frequency")
     if "frequency" not in axes and frequency is not None:
         bounds = _selection_range(frequency)
@@ -125,23 +119,36 @@ def heatmap_title(coordinates, request, parameters):
     return f"{y} × {x}"
 
 
-def plan_heatmaps(coordinates, request, points=()):
+def plan_heatmaps(coordinates, request, points=(), *, series_views=None):
     """Group the archive in recorded order, including repeated visits."""
     axes = {request.x_id, request.y_id}
     carry = {key: value for key, value in request.filters.items()
              if key in axes or coordinates.dimension(key).is_frequency}
+    if series_views:
+        # A range prepared for one series must not restrict other series.
+        carry = {key: value for key, value in carry.items() if key not in axes}
     fixed = [axis for axis in coordinates.dimensions if not axis.is_frequency and axis.id not in axes]
     groups = defaultdict(list)
     for index in _selected_checkpoints(coordinates, carry):
         groups[tuple(axis.values[index] for axis in fixed)].append(index)
     points_by_index = {point.index: point for point in points}
     items = []
+    used_views = set()
     for values, checkpoints in groups.items():
-        parameters = measurement_parameters(coordinates, checkpoints, points_by_index)
         filters = {**carry, **dict(zip((axis.id for axis in fixed), values, strict=True))}
-        plane = HeatmapRequest(request.x_id, request.y_id, filters)
+        series = filters.get(SERIES_DIMENSION_ID)
+        view = series_views.get(series) if series_views else None
+        if view is not None:
+            if series in used_views:
+                continue
+            used_views.add(series)
+            plane = view.request
+            checkpoints = _selected_checkpoints(coordinates, plane.filters)
+        else:
+            plane = HeatmapRequest(request.x_id, request.y_id, filters)
+        parameters = measurement_parameters(coordinates, checkpoints, points_by_index)
         items.append(BatchItem(heatmap_title(coordinates, plane, parameters),
-                               tuple(checkpoints), plane, parameters))
+                               tuple(checkpoints), plane, parameters, view))
     return tuple(items)
 
 
@@ -173,6 +180,7 @@ class HeatmapBatch:
     colours: tuple[tuple[float, ...], ...]
     manual_levels: tuple[float, float] | None = None
     cached_row: ThatecSpectralRow | None = None
+    series_palettes: dict[str, tuple[tuple[float, ...], ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,14 +280,19 @@ def _export_heatmap(path, item, state, source, cache, metadata, cancelled):
         _write_heatmap_companions,
     )
 
+    view = item.series_view
+    processing = view.processing if view else state.processing
+    map_state = view.map_state if view else state.map_state
+    palette = view.palette if view else state.palette
+    colours = state.series_palettes[palette] if view else state.colours
     payload = _read_heatmap_payload(source, state.row, state.coordinates, item.request, cancelled=cancelled,
-                                    processing=state.processing, points=state.points, source_cache=cache,
+                                    processing=processing, points=state.points, source_cache=cache,
                                     checkpoint_indices=item.checkpoints)
     frequency_axis = 1 if item.request.x_id == "frequency" else 0 if item.request.y_id == "frequency" else None
-    payload = _process_map_payload(payload, state.map_state, frequency_axis, cancelled=cancelled)
+    payload = _process_map_payload(payload, map_state, frequency_axis, cancelled=cancelled)
     matrix, levels, z_label, signed, absolute = _heatmap_display(
-        payload, state.row, state.processing, state.map_state, state.absolute)
-    levels = state.manual_levels or levels
+        payload, state.row, processing, map_state, view.absolute if view else state.absolute)
+    levels = view.colour_levels if view else state.manual_levels or levels
     x_edges = HeatmapPlotWidget._cell_edges(payload.x_values)
     y_edges = HeatmapPlotWidget._cell_edges(payload.y_values)
     metadata.update(spectrum_row=state.row.id, coordinate_selection=processing_manifest(item.request),
@@ -288,16 +301,25 @@ def _export_heatmap(path, item, state, source, cache, metadata, cancelled):
                           "y": {"label": payload.y_label, "unit": payload.y_unit}},
                     value_unit=payload.z_unit, notes=list(payload.processing_notes),
                     corrected_frequencies_hz=list(payload.corrected_frequencies_hz),
-                    palette=state.palette, colour_levels=levels,
+                    palette=palette, colour_levels=levels, saved_series_view=view is not None,
+                    spectrum_processing=processing_manifest(processing),
+                    map_processing=processing_manifest(map_state),
                     missing_checkpoints=payload.missing_checkpoints,
                     signed_difference=signed, display_transform="absolute_difference" if absolute else "none",
                     line_classification_source="Recorded dBm, same selected coordinate plane"
-                    if state.map_state.mask_lines else None)
+                    if map_state.mask_lines else None)
+    if view:
+        metadata.update(view_ranges=view.view_ranges, inverted_axes=view.inverted_axes,
+                        manual_colour_levels=levels, absolute=view.absolute)
     if payload.instrument_averages:
         metadata["instrument_averages_by_checkpoint"] = payload.instrument_averages
     canvas, ax = _figure(item.title)
-    image = ax.pcolormesh(x_edges, y_edges, matrix, cmap=ListedColormap(state.colours),
+    image = ax.pcolormesh(x_edges, y_edges, matrix, cmap=ListedColormap(colours),
                           vmin=levels[0], vmax=levels[1], shading="flat", rasterized=True)
+    if view:
+        x_range, y_range = view.view_ranges
+        ax.set_xlim(*(x_range[::-1] if view.inverted_axes[0] else x_range))
+        ax.set_ylim(*(y_range[::-1] if view.inverted_axes[1] else y_range))
     canvas.figure.colorbar(image, ax=ax, label=_axis_label(z_label, payload.z_unit))
     _set_axis_label(ax.xaxis, payload.x_label, payload.x_unit)
     _set_axis_label(ax.yaxis, payload.y_label, payload.y_unit)
@@ -406,8 +428,7 @@ def export_batch(source, items, state, *, power_point, expected_identity, cancel
             if native_path(folder / f"{stem}.png").exists():
                 stem = analysis_file_stem(f"{number:04d} - {stem}")
             path = native_path(folder / f"{stem}.png")
-            parameters = [{"id": key, "label": label, "unit": unit, "minimum": low, "maximum": high}
-                          for key, label, unit, low, high in item.parameters]
+            parameters = measurement_parameter_metadata(item.parameters)
             entry = {"title": item.title, "checkpoints": item.checkpoints, "parameters": parameters}
             metadata = {"source_file": str(source), "title": item.title,
                         "checkpoints": item.checkpoints, "parameters": parameters, **settings}

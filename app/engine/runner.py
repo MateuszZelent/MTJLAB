@@ -145,6 +145,8 @@ class RecipeRunner:
         self._device_states: dict[str, dict[str, object]] = {}
         self._rigol_output_active = {1: False, 2: False}
         self._keithley_output_active = {"A": False, "B": False}
+        self._keithley_compliance_holds: set[str] = set()
+        self._keithley_limited_currents: set[str] = set()
         self._output_status = self._unknown_output_status()
         self._keithley_zeroed = {"A": True, "B": True}
         self._anritsu_sg_output_active = False
@@ -210,8 +212,17 @@ class RecipeRunner:
         point_setpoints: dict[str, float] = {}
         skip_until = start_action_index
         compliance_points_skipped = 0
-        self._keithley_compliance_holds: set[str] = set()
-        self._keithley_limited_currents: set[str] = set()
+        series_starts = {}
+        for item in plan.series:
+            span = plan.series_action_ranges.get(item.id)
+            if span is not None and span[1] > start_action_index:
+                start, end = span
+                series_starts[max(start, start_action_index)] = (item, end)
+        active_series: dict[str, object] = {}
+        series_end = -1
+        series_initial_points = stored
+        self._keithley_compliance_holds.clear()
+        self._keithley_limited_currents.clear()
         run_started_monotonic = time.monotonic()
         self._required_devices = (
             plan.required_devices | required_devices_for_actions(plan.actions)
@@ -260,6 +271,8 @@ class RecipeRunner:
                     "start_action_index": start_action_index,
                     "stored_points": stored_points,
                     "execution_mode": self._execution_mode.value,
+                    "series_total": len(plan.series),
+                    "series_already_measured": [item.id for item in plan.series if item.already_measured],
                     "outputs_forced_off": self.outputs_forced_off,
                     "output_guard_devices": self._output_guard_devices(),
                 },
@@ -326,6 +339,15 @@ class RecipeRunner:
                 if action_index < skip_until:
                     completed = action_index + 1
                     continue
+                if action_index in series_starts:
+                    item, series_end = series_starts[action_index]
+                    series_initial_points = stored
+                    active_series = {"series_id": item.id, "series_number": item.number}
+                    self._emit("series_started", {
+                        **active_series, "series_total": len(plan.series),
+                        "moke_channel": item.moke_channel, "moke_voltage_v": item.moke_voltage_v,
+                        "keithley_b_a": item.keithley_b_a, "action_index": action_index,
+                    })
                 if action.fault_only:
                     completed = action_index + 1
                     self._emit("action_skipped", {"node_id": action.node_id, "kind": action.kind,
@@ -457,6 +479,7 @@ class RecipeRunner:
                             "execution_mode": self._execution_mode.value,
                             "outputs_forced_off": self.outputs_forced_off,
                             "output_guard_devices": self._output_guard_devices(),
+                            **active_series,
                             **self._semantic_point_metadata(action),
                         },
                     )
@@ -510,6 +533,7 @@ class RecipeRunner:
                             "execution_mode": self._execution_mode.value,
                             "outputs_forced_off": self.outputs_forced_off,
                             "output_guard_devices": self._output_guard_devices(),
+                            **active_series,
                             **self._semantic_point_metadata(action),
                         },
                     )
@@ -557,6 +581,11 @@ class RecipeRunner:
                     },
                 )
                 current_action = None
+                if completed == series_end:
+                    self._emit("series_finished", {
+                        **active_series, "stored_points": stored - series_initial_points,
+                    })
+                    active_series = {}
                 self._record_safe_boundary_if_advanced(
                     stored_points=stored,
                     next_action_index=completed,
@@ -1490,10 +1519,9 @@ class RecipeRunner:
                 )
                 actual = result.actual_si
                 ramp_evidence = {"ramp_start_si": result.start_si, "ramp_steps": len(result.levels_si)}
-                if scoped_ramp or bounded_reentry:
-                    self._observe_keithley_compliance(result.final_measurement)
-                    if result.limited_by_compliance:
-                        measurements[f"{key}.compliance_detected"] = 1.0
+                self._observe_keithley_compliance(result.final_measurement)
+                if result.limited_by_compliance:
+                    measurements[f"{key}.compliance_detected"] = 1.0
             else:
                 actual = self._keithley.update_source_level(channel, mode=payload["mode"], level_si=target)
             context["source_level_si"] = actual
@@ -1503,7 +1531,7 @@ class RecipeRunner:
             if (reentry is not None and active and not bounded_reentry
                     and payload["_compliance_check_after_update"]):
                 self._sample_keithley(channel, measurements)
-            if (reentry or scoped_ramp) and channel not in self._keithley_compliance_holds:
+            if (reentry or action.kind == "ramp_keithley_current") and channel not in self._keithley_compliance_holds:
                 self._keithley_limited_currents.discard(channel)
         elif action.kind == "update_keithley_compliance":
             actual = self._keithley.update_source_compliance(
